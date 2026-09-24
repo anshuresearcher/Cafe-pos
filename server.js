@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { AsyncLocalStorage } = require("async_hooks");
 const { execFile } = require("child_process");
 
 const app = express();
@@ -42,6 +43,62 @@ const poolConfig = process.env.DATABASE_URL
     };
 
 const pool = new Pool(poolConfig);
+
+// =====================================================
+// MULTI-BUSINESS TENANT CONTEXT (PHASE 2A)
+// =====================================================
+const tenantContext = new AsyncLocalStorage();
+let tenantSystemMode = true;
+let systemBusinessId = null;
+
+const rawPoolConnect = pool.connect.bind(pool);
+
+const rawPoolQuery = async function (text, values) {
+    const client = await rawPoolConnect();
+
+    try {
+        return await client.query(text, values);
+    } finally {
+        client.release();
+    }
+};
+
+async function applyTenantDbContext(client) {
+    const store = tenantContext.getStore();
+    const requestBusinessId = store?.businessId ? Number(store.businessId) : null;
+    const effectiveBusinessId = requestBusinessId || (tenantSystemMode ? Number(systemBusinessId || 0) : null);
+
+    await client.query(
+        `SELECT
+            set_config('app.business_id', $1, false),
+            set_config('app.system_mode', $2, false)`,
+        [
+            effectiveBusinessId ? String(effectiveBusinessId) : '',
+            tenantSystemMode ? 'on' : 'off'
+        ]
+    );
+}
+
+pool.query = async function (text, values) {
+    const client = await rawPoolConnect();
+    try {
+        await applyTenantDbContext(client);
+        return await client.query(text, values);
+    } finally {
+        client.release();
+    }
+};
+
+pool.connect = async function () {
+    const client = await rawPoolConnect();
+    try {
+        await applyTenantDbContext(client);
+        return client;
+    } catch (error) {
+        client.release();
+        throw error;
+    }
+};
 pool.on(
     "connect",
     () => console.log("✅ PostgreSQL connected")
@@ -344,15 +401,31 @@ async function requireAuth(req, res, next) {
     try {
         const session = await getSessionUser(req);
         if (!session) return res.status(401).json({ error: "Authentication required" });
+
         const user = await loadSessionUser(session);
         if (!user) return res.status(401).json({ error: "Session is invalid or user is inactive" });
+
         req.user = user;
         req.sessionToken = session.token;
-        const required = permissionForRequest(req);
-        if (!required) return next();
-        const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
-        if (user.profile_name === "Admin" || permissions[required] === true) return next();
-        return res.status(403).json({ error: `Permission denied: ${required}` });
+
+        if (!user.business_id || user.business_active === false) {
+            return res.status(403).json({ error: "Business account is inactive or not assigned" });
+        }
+
+        return tenantContext.run({ businessId: Number(user.business_id) }, () => {
+            const required = permissionForRequest(req);
+            if (!required) return next();
+
+            const permissions = user.permissions && typeof user.permissions === "object"
+                ? user.permissions
+                : {};
+
+            if (user.profile_name !== "Admin" && permissions[required] !== true) {
+                return res.status(403).json({ error: `Permission denied: ${required}` });
+            }
+
+            return next();
+        });
     } catch (e) {
         console.error("Auth middleware error:", e);
         res.status(500).json({ error: "Authentication service error" });
@@ -364,6 +437,23 @@ async function requireAuth(req, res, next) {
 // =====================================================
 
 async function ensureInvoiceTables() {
+    console.log("2/7 ensureInvoiceTables");
+
+    const check = await pool.query(`
+        SELECT
+            to_regclass('public.invoice_number_seq') AS sequence,
+            to_regclass('public.invoices') AS invoices
+    `);
+
+    const existing = check.rows[0];
+
+    if (existing?.sequence && existing?.invoices) {
+        console.log("✅ Invoice tables already exist");
+        console.log("✅ ensureInvoiceTables complete");
+        return;
+    }
+
+    console.log("🔧 Creating invoice database objects...");
 
     await pool.query(`
         CREATE SEQUENCE IF NOT EXISTS invoice_number_seq
@@ -373,47 +463,33 @@ async function ensureInvoiceTables() {
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS invoices (
-
             id SERIAL PRIMARY KEY,
-
             invoice_number VARCHAR(50) NOT NULL UNIQUE,
-
             order_id INTEGER NOT NULL UNIQUE
                 REFERENCES orders(id)
                 ON DELETE RESTRICT,
-
             customer_id INTEGER
                 REFERENCES customers(id)
                 ON DELETE SET NULL,
-
             invoice_date TIMESTAMP NOT NULL
                 DEFAULT CURRENT_TIMESTAMP,
-
             subtotal NUMERIC(12,2) NOT NULL
                 DEFAULT 0,
-
             gst NUMERIC(12,2) NOT NULL
                 DEFAULT 0,
-
             total NUMERIC(12,2) NOT NULL
                 DEFAULT 0,
-
             payment_method VARCHAR(50),
-
             status VARCHAR(30) NOT NULL
                 DEFAULT 'Generated',
-
             created_at TIMESTAMP NOT NULL
                 DEFAULT CURRENT_TIMESTAMP
         )
     `);
 
-    console.log(
-        "✅ Invoice tables ready"
-    );
-
+    console.log("✅ Invoice tables created");
+    console.log("✅ ensureInvoiceTables complete");
 }
-
 
 // =====================================================
 // BUSINESS EXTENSIONS (STEP 15-19)
@@ -455,7 +531,6 @@ async function ensureBusinessTables() {
     await pool.query(`CREATE TABLE IF NOT EXISTS kot_groups (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, description TEXT, station VARCHAR(60) NOT NULL DEFAULT 'Kitchen', sort_order INTEGER NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
-    await pool.query(`INSERT INTO kot_groups(name, description, station, sort_order, active) VALUES('Main Kitchen','Default KOT group','Kitchen',0,TRUE) ON CONFLICT(name) DO NOTHING`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
@@ -480,11 +555,6 @@ async function ensureBusinessTables() {
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
-
-    const seedExpenseCategories = ['Purchase / Supplies','Staff / Salary','Rent','Utilities','Marketing','Maintenance','Delivery / Logistics','Other'];
-    for (const name of seedExpenseCategories) {
-        await pool.query(`INSERT INTO expense_categories(name) VALUES($1) ON CONFLICT(name) DO NOTHING`, [name]);
-    }
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS loyalty_settings (
@@ -637,7 +707,7 @@ function databaseEnv() {
 // HOME
 // =====================================================
 
-app.get("/", (_, res) => res.sendFile(path.join(__dirname, "index.html")));
+app.get("/", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
 
 
 
@@ -691,6 +761,8 @@ app.post('/api/public/register-business', async (req, res) => {
         `, [b.ownerName, username, hashPassword(password), adminProfile.id, business.id])).rows[0];
 
         await client.query('COMMIT');
+        try { await seedTenantDefaults(business.id); }
+        catch (seedError) { console.error('⚠️ Could not seed tenant defaults:', seedError.message); }
         res.status(201).json({ success: true, business, user });
     } catch (e) {
         try { await client.query('ROLLBACK'); } catch (_) {}
@@ -777,6 +849,7 @@ app.use("/api", requireAuth);
 
 app.get("/api/menu/categories", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const result = await pool.query(`
             SELECT
                 id,
@@ -786,175 +859,130 @@ app.get("/api/menu/categories", async (req, res) => {
                 created_at,
                 updated_at
             FROM menu_categories
+            WHERE business_id = $1
             ORDER BY sort_order ASC, name ASC, id ASC
-        `);
+        `, [businessId]);
 
         res.json(result.rows);
     } catch (e) {
         console.error("Load menu categories error:", e);
-        res.status(500).json({
-            error: "Failed to load menu categories"
-        });
+        res.status(500).json({ error: "Failed to load menu categories" });
     }
 });
 
 
 app.post("/api/menu/categories", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const name = String(req.body.name || "").trim();
         const sortOrder = Number(req.body.sortOrder || 0);
         const active = req.body.active !== false;
 
         if (!name) {
-            return res.status(400).json({
-                error: "Category name is required"
-            });
+            return res.status(400).json({ error: "Category name is required" });
         }
 
         const result = await pool.query(`
             INSERT INTO menu_categories
-            (
-                name,
-                sort_order,
-                active
-            )
-            VALUES
-            ($1, $2, $3)
+            (name, sort_order, active, business_id)
+            VALUES ($1, $2, $3, $4)
             RETURNING *
         `, [
             name,
             Number.isFinite(sortOrder) ? sortOrder : 0,
-            active
+            active,
+            businessId
         ]);
 
         res.status(201).json(result.rows[0]);
-
     } catch (e) {
         console.error("Create menu category error:", e);
-
-        if (e.code === "23505") {
-            return res.status(409).json({
-                error: "Menu category already exists"
-            });
-        }
-
-        res.status(500).json({
-            error: "Failed to create menu category"
-        });
+        if (e.code === "23505") return res.status(409).json({ error: "Menu category already exists" });
+        res.status(500).json({ error: "Failed to create menu category" });
     }
 });
 
 
 app.put("/api/menu/categories/:id", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                error: "Invalid category ID"
-            });
-        }
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid category ID" });
 
         const name = String(req.body.name || "").trim();
         const sortOrder = Number(req.body.sortOrder || 0);
         const active = req.body.active !== false;
-
-        if (!name) {
-            return res.status(400).json({
-                error: "Category name is required"
-            });
-        }
+        if (!name) return res.status(400).json({ error: "Category name is required" });
 
         const result = await pool.query(`
             UPDATE menu_categories
-            SET
-                name = $1,
+            SET name = $1,
                 sort_order = $2,
                 active = $3,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $4
+              AND business_id = $5
             RETURNING *
         `, [
             name,
             Number.isFinite(sortOrder) ? sortOrder : 0,
             active,
-            id
+            id,
+            businessId
         ]);
 
-        if (!result.rows.length) {
-            return res.status(404).json({
-                error: "Menu category not found"
-            });
-        }
-
+        if (!result.rows.length) return res.status(404).json({ error: "Menu category not found" });
         res.json(result.rows[0]);
-
     } catch (e) {
         console.error("Update menu category error:", e);
-
-        if (e.code === "23505") {
-            return res.status(409).json({
-                error: "Menu category already exists"
-            });
-        }
-
-        res.status(500).json({
-            error: "Failed to update menu category"
-        });
+        if (e.code === "23505") return res.status(409).json({ error: "Menu category already exists" });
+        res.status(500).json({ error: "Failed to update menu category" });
     }
 });
 
 
 app.delete("/api/menu/categories/:id", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                error: "Invalid category ID"
-            });
-        }
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid category ID" });
 
         const result = await pool.query(`
             DELETE FROM menu_categories
             WHERE id = $1
+              AND business_id = $2
             RETURNING id
-        `, [id]);
+        `, [id, businessId]);
 
-        if (!result.rows.length) {
-            return res.status(404).json({
-                error: "Menu category not found"
-            });
-        }
-
-        res.json({
-            success: true
-        });
-
+        if (!result.rows.length) return res.status(404).json({ error: "Menu category not found" });
+        res.json({ success: true });
     } catch (e) {
         console.error("Delete menu category error:", e);
-        res.status(500).json({
-            error: "Failed to delete menu category"
-        });
+        res.status(500).json({ error: "Failed to delete menu category" });
     }
 });
 
 app.get(
     "/api/menu",
-    async (_, res) => {
+    async (req, res) => {
         try {
+            const businessId = Number(req.user.business_id);
             const result = await pool.query(
                 `SELECT m.*, kg.name AS kot_group_name, kg.station AS kot_group_station
                  FROM menu m
-                 LEFT JOIN kot_groups kg ON kg.id=m.kot_group_id
-                 ORDER BY m.category, m.name, m.id`
+                 LEFT JOIN kot_groups kg ON kg.id=m.kot_group_id AND kg.business_id=$1
+                 WHERE m.business_id=$1
+                 ORDER BY m.category, m.name, m.id`,
+                [businessId]
             );
             const items = result.rows;
             const variants = await pool.query(`
-                SELECT id, menu_id, name, sku, price, unit, channel_prices, available
-                FROM menu_variants
-                ORDER BY menu_id, id
-            `);
+                SELECT mv.id, mv.menu_id, mv.name, mv.sku, mv.price, mv.unit, mv.channel_prices, mv.available
+                FROM menu_variants mv
+                INNER JOIN menu m ON m.id=mv.menu_id AND m.business_id=$1
+                WHERE mv.business_id=$1
+                ORDER BY mv.menu_id, mv.id
+            `, [businessId]);
             const byMenu = new Map();
             for (const v of variants.rows) {
                 const key = Number(v.menu_id);
@@ -1010,12 +1038,21 @@ function cleanVariants(value) {
 }
 
 async function replaceMenuVariants(client, menuId, variants) {
-    await client.query(`DELETE FROM menu_variants WHERE menu_id=$1`, [menuId]);
+    const businessId = Number(tenantContext.getStore()?.businessId || 0);
+    if (!businessId) throw new Error("Business context is missing");
+
+    const owner = await client.query(
+        `SELECT id FROM menu WHERE id=$1 AND business_id=$2 LIMIT 1`,
+        [menuId, businessId]
+    );
+    if (!owner.rows.length) throw new Error("Menu item not found for current business");
+
+    await client.query(`DELETE FROM menu_variants WHERE menu_id=$1 AND business_id=$2`, [menuId, businessId]);
     for (const v of variants) {
         await client.query(`
-            INSERT INTO menu_variants(menu_id,name,sku,price,unit,channel_prices,available)
-            VALUES($1,$2,$3,$4,$5,$6,$7)
-        `, [menuId, v.name, v.sku, v.price, v.unit, JSON.stringify(v.channelPrices), v.available]);
+            INSERT INTO menu_variants(menu_id,name,sku,price,unit,channel_prices,available,business_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        `, [menuId, v.name, v.sku, v.price, v.unit, JSON.stringify(v.channelPrices), v.available, businessId]);
     }
 }
 
@@ -1040,11 +1077,12 @@ app.post(
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
             }
+            const businessId = Number(req.user.business_id);
             const result = await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                 RETURNING *
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices)]);
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
             await replaceMenuVariants(client, result.rows[0].id, variants);
             await client.query('COMMIT');
             res.status(201).json({ success: true, menu: result.rows[0] });
@@ -1080,8 +1118,8 @@ app.put(
                 UPDATE menu SET name=$1, price=$2, category=$3, kot_group_id=$4,
                     nature=$5, unit=$6, tax_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10,
                     tax_mode=$11, tax_label=$12, channel_prices=$13
-                WHERE id=$14 RETURNING *
-            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), req.params.id]);
+                WHERE id=$14 AND business_id=$15 RETURNING *
+            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), req.params.id, Number(req.user.business_id)]);
             if (!result.rows.length) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: "Menu item not found" });
@@ -1099,8 +1137,17 @@ app.put(
 
 
 app.get("/api/menu/:id/variants", async (req,res)=>{
-    try { const r=await pool.query(`SELECT * FROM menu_variants WHERE menu_id=$1 ORDER BY id`,[req.params.id]); res.json(r.rows); }
-    catch(e){ res.status(500).json({error:"Failed to load variants"}); }
+    try {
+        const businessId = Number(req.user.business_id);
+        const r = await pool.query(`
+            SELECT mv.*
+            FROM menu_variants mv
+            INNER JOIN menu m ON m.id=mv.menu_id AND m.business_id=$2
+            WHERE mv.menu_id=$1 AND mv.business_id=$2
+            ORDER BY mv.id
+        `, [req.params.id, businessId]);
+        res.json(r.rows);
+    } catch(e){ res.status(500).json({error:"Failed to load variants"}); }
 });
 
 app.delete(
@@ -1115,9 +1162,9 @@ app.delete(
                     UPDATE menu
                     SET available = false
                     WHERE id = $1
-                    RETURNING *
+                      AND business_id = $2
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
             if (!result.rows.length) {
@@ -1158,9 +1205,9 @@ app.put(
                     UPDATE menu
                     SET available = true
                     WHERE id = $1
-                    RETURNING *
+                      AND business_id = $2
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
             if (!result.rows.length) {
@@ -1195,30 +1242,18 @@ app.put(
 
 app.get(
     "/api/tables",
-    async (_, res) => {
-
+    async (req, res) => {
         try {
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM restaurant_tables
-                    ORDER BY id
-                    `
-                );
-
+            const result = await pool.query(`
+                SELECT *
+                FROM restaurant_tables
+                WHERE business_id = $1
+                ORDER BY id
+            `, [Number(req.user.business_id)]);
             res.json(result.rows);
-
         } catch (e) {
-
-            res.status(500).json({
-                error:
-                    "Failed to load tables"
-            });
-
+            res.status(500).json({ error: "Failed to load tables" });
         }
-
     }
 );
 
@@ -1226,64 +1261,23 @@ app.get(
 app.post(
     "/api/tables",
     async (req, res) => {
-
         try {
+            const businessId = Number(req.user.business_id);
+            const n = req.body.tableNumber || req.body.table_number;
+            const c = Number(req.body.capacity) || 4;
+            if (!n) return res.status(400).json({ error: "Table number is required" });
 
-            const n =
-                req.body.tableNumber ||
-                req.body.table_number;
+            const result = await pool.query(`
+                INSERT INTO restaurant_tables (table_number, capacity, status, business_id)
+                VALUES ($1,$2,'Available',$3)
+                RETURNING *
+            `, [n, c, businessId]);
 
-            const c =
-                Number(req.body.capacity) || 4;
-
-            if (!n) {
-
-                return res.status(400).json({
-                    error:
-                        "Table number is required"
-                });
-
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO restaurant_tables
-                    (
-                        table_number,
-                        capacity,
-                        status
-                    )
-                    VALUES
-                    ($1,$2,'Available')
-                    RETURNING *
-                    `,
-                    [n, c]
-                );
-
-            res.status(201).json({
-                success: true,
-                table: result.rows[0]
-            });
-
+            res.status(201).json({ success: true, table: result.rows[0] });
         } catch (e) {
-
-            if (e.code === "23505") {
-
-                return res.status(409).json({
-                    error:
-                        "Table number already exists"
-                });
-
-            }
-
-            res.status(500).json({
-                error:
-                    "Failed to add table"
-            });
-
+            if (e.code === "23505") return res.status(409).json({ error: "Table number already exists" });
+            res.status(500).json({ error: "Failed to add table" });
         }
-
     }
 );
 
@@ -1291,74 +1285,25 @@ app.post(
 app.put(
     "/api/tables/:id",
     async (req, res) => {
-
         try {
+            const businessId = Number(req.user.business_id);
+            const n = req.body.tableNumber || req.body.table_number;
+            const c = Number(req.body.capacity) || 4;
+            if (!n) return res.status(400).json({ error: "Table number is required" });
 
-            const n =
-                req.body.tableNumber ||
-                req.body.table_number;
+            const result = await pool.query(`
+                UPDATE restaurant_tables
+                SET table_number = $1, capacity = $2
+                WHERE id = $3 AND business_id = $4
+                RETURNING *
+            `, [n, c, req.params.id, businessId]);
 
-            const c =
-                Number(req.body.capacity) || 4;
-
-            if (!n) {
-
-                return res.status(400).json({
-                    error:
-                        "Table number is required"
-                });
-
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE restaurant_tables
-                    SET
-                        table_number = $1,
-                        capacity = $2
-                    WHERE id = $3
-                    RETURNING *
-                    `,
-                    [
-                        n,
-                        c,
-                        req.params.id
-                    ]
-                );
-
-            if (!result.rows.length) {
-
-                return res.status(404).json({
-                    error:
-                        "Table not found"
-                });
-
-            }
-
-            res.json({
-                success: true,
-                table: result.rows[0]
-            });
-
+            if (!result.rows.length) return res.status(404).json({ error: "Table not found" });
+            res.json({ success: true, table: result.rows[0] });
         } catch (e) {
-
-            if (e.code === "23505") {
-
-                return res.status(409).json({
-                    error:
-                        "Table number already exists"
-                });
-
-            }
-
-            res.status(500).json({
-                error:
-                    "Failed to update table"
-            });
-
+            if (e.code === "23505") return res.status(409).json({ error: "Table number already exists" });
+            res.status(500).json({ error: "Failed to update table" });
         }
-
     }
 );
 
@@ -1366,65 +1311,22 @@ app.put(
 app.put(
     "/api/tables/:id/status",
     async (req, res) => {
-
         try {
+            const allowed = ["Available", "Occupied", "Reserved"];
+            if (!allowed.includes(req.body.status)) return res.status(400).json({ error: "Invalid table status" });
 
-            const allowed = [
-                "Available",
-                "Occupied",
-                "Reserved"
-            ];
+            const result = await pool.query(`
+                UPDATE restaurant_tables
+                SET status = $1
+                WHERE id = $2 AND business_id = $3
+                RETURNING *
+            `, [req.body.status, req.params.id, Number(req.user.business_id)]);
 
-            if (
-                !allowed.includes(
-                    req.body.status
-                )
-            ) {
-
-                return res.status(400).json({
-                    error:
-                        "Invalid table status"
-                });
-
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE restaurant_tables
-                    SET status = $1
-                    WHERE id = $2
-                    RETURNING *
-                    `,
-                    [
-                        req.body.status,
-                        req.params.id
-                    ]
-                );
-
-            if (!result.rows.length) {
-
-                return res.status(404).json({
-                    error:
-                        "Table not found"
-                });
-
-            }
-
-            res.json({
-                success: true,
-                table: result.rows[0]
-            });
-
+            if (!result.rows.length) return res.status(404).json({ error: "Table not found" });
+            res.json({ success: true, table: result.rows[0] });
         } catch (e) {
-
-            res.status(500).json({
-                error:
-                    "Failed to update table status"
-            });
-
+            res.status(500).json({ error: "Failed to update table status" });
         }
-
     }
 );
 
@@ -1432,115 +1334,43 @@ app.put(
 app.delete(
     "/api/tables/:id",
     async (req, res) => {
-
         try {
+            const businessId = Number(req.user.business_id);
+            const tableResult = await pool.query(`
+                SELECT * FROM restaurant_tables
+                WHERE id = $1 AND business_id = $2
+            `, [req.params.id, businessId]);
 
-            const tableResult =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM restaurant_tables
-                    WHERE id = $1
-                    `,
-                    [req.params.id]
-                );
-
-            if (!tableResult.rows.length) {
-
-                return res.status(404).json({
-                    error:
-                        "Table not found"
-                });
-
-            }
-
-            const table =
-                tableResult.rows[0];
-
-
+            if (!tableResult.rows.length) return res.status(404).json({ error: "Table not found" });
+            const table = tableResult.rows[0];
             if (table.status === "Occupied") {
-
-                return res.status(400).json({
-                    error:
-                        `${table.table_number} is currently occupied. Please make it Available before deleting.`
-                });
-
+                return res.status(400).json({ error: `${table.table_number} is currently occupied. Please make it Available before deleting.` });
             }
 
-
-            const orders =
-                await pool.query(
-                    `
-                    SELECT COUNT(*) AS count
-                    FROM orders
-                    WHERE table_number = $1
-                    `,
-                    [table.table_number]
-                );
-
-            if (
-                Number(
-                    orders.rows[0].count
-                ) > 0
-            ) {
-
-                return res.status(400).json({
-                    error:
-                        `${table.table_number} has existing orders. It cannot be deleted because historical order data must be preserved.`
-                });
-
+            const orders = await pool.query(`
+                SELECT COUNT(*) AS count
+                FROM orders
+                WHERE table_number = $1 AND business_id = $2
+            `, [table.table_number, businessId]);
+            if (Number(orders.rows[0].count) > 0) {
+                return res.status(400).json({ error: `${table.table_number} has existing orders. It cannot be deleted because historical order data must be preserved.` });
             }
 
-
-            const reservations =
-                await pool.query(
-                    `
-                    SELECT COUNT(*) AS count
-                    FROM reservations
-                    WHERE table_number = $1
-                    `,
-                    [table.table_number]
-                );
-
-            if (
-                Number(
-                    reservations.rows[0].count
-                ) > 0
-            ) {
-
-                return res.status(400).json({
-                    error:
-                        `${table.table_number} has reservation records. It cannot be deleted.`
-                });
-
+            const reservations = await pool.query(`
+                SELECT COUNT(*) AS count
+                FROM reservations
+                WHERE table_number = $1 AND business_id = $2
+            `, [table.table_number, businessId]);
+            if (Number(reservations.rows[0].count) > 0) {
+                return res.status(400).json({ error: `${table.table_number} has reservation records. It cannot be deleted.` });
             }
 
-
-            await pool.query(
-                `
-                DELETE FROM restaurant_tables
-                WHERE id = $1
-                `,
-                [req.params.id]
-            );
-
-
-            res.json({
-                success: true,
-                table
-            });
-
+            await pool.query(`DELETE FROM restaurant_tables WHERE id = $1 AND business_id = $2`, [req.params.id, businessId]);
+            res.json({ success: true, table });
         } catch (e) {
-
             console.error(e);
-
-            res.status(500).json({
-                error:
-                    "Failed to delete table"
-            });
-
+            res.status(500).json({ error: "Failed to delete table" });
         }
-
     }
 );
 
@@ -3344,27 +3174,29 @@ app.put(
 
 app.get("/api/kot-groups", async (req,res)=>{
     try {
-        const r=await pool.query(`SELECT * FROM kot_groups ORDER BY sort_order ASC, name ASC`);
+        const r=await pool.query(`SELECT * FROM kot_groups WHERE business_id=$1 ORDER BY sort_order ASC, name ASC`,[Number(req.user.business_id)]);
         res.json(r.rows);
     } catch(e){res.status(500).json({error:"Failed to load KOT groups"});}
 });
 app.post("/api/kot-groups", async (req,res)=>{
     try {
+        const businessId=Number(req.user.business_id);
         const name=String(req.body.name||"").trim();
         if(!name)return res.status(400).json({error:"KOT group name is required"});
-        const r=await pool.query(`INSERT INTO kot_groups(name,description,station,sort_order,active) VALUES($1,$2,$3,$4,$5) RETURNING *`,[name,String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false]);
+        const r=await pool.query(`INSERT INTO kot_groups(name,description,station,sort_order,active,business_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[name,String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,businessId]);
         res.status(201).json(r.rows[0]);
     }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(500).json({error:"Failed to create KOT group"});}
 });
 app.put("/api/kot-groups/:id", async (req,res)=>{
     try {
-        const id=Number(req.params.id); if(!Number.isInteger(id)||id<=0)return res.status(400).json({error:"Invalid KOT group ID"});
-        const r=await pool.query(`UPDATE kot_groups SET name=$1,description=$2,station=$3,sort_order=$4,active=$5,updated_at=CURRENT_TIMESTAMP WHERE id=$6 RETURNING *`,[String(req.body.name||"").trim(),String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,id]);
+        const id=Number(req.params.id); const businessId=Number(req.user.business_id);
+        if(!Number.isInteger(id)||id<=0)return res.status(400).json({error:"Invalid KOT group ID"});
+        const r=await pool.query(`UPDATE kot_groups SET name=$1,description=$2,station=$3,sort_order=$4,active=$5,updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING *`,[String(req.body.name||"").trim(),String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,id,businessId]);
         if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json(r.rows[0]);
     }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(500).json({error:"Failed to update KOT group"});}
 });
 app.delete("/api/kot-groups/:id", async (req,res)=>{
-    try { const id=Number(req.params.id); const r=await pool.query(`DELETE FROM kot_groups WHERE id=$1 RETURNING id`,[id]); if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json({success:true}); } catch(e){res.status(500).json({error:"Failed to delete KOT group"});}
+    try { const id=Number(req.params.id); const r=await pool.query(`DELETE FROM kot_groups WHERE id=$1 AND business_id=$2 RETURNING id`,[id,Number(req.user.business_id)]); if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json({success:true}); } catch(e){res.status(500).json({error:"Failed to delete KOT group"});}
 });
 
 // =====================================================
@@ -4850,13 +4682,17 @@ app.get(
 // EXPENSES
 // =====================================================
 app.get('/api/expenses/categories', async (req,res)=>{
-    try { res.json((await pool.query(`SELECT * FROM expense_categories WHERE active=true ORDER BY name`)).rows); }
-    catch(e){ res.status(500).json({error:'Failed to load expense categories'}); }
+    try {
+        res.json((await pool.query(`SELECT * FROM expense_categories WHERE active=true AND business_id=$1 ORDER BY name`,[Number(req.user.business_id)])).rows);
+    } catch(e){ res.status(500).json({error:'Failed to load expense categories'}); }
 });
 app.post('/api/expenses/categories', async (req,res)=>{
     try {
-        const name=String(req.body.name||'').trim(); if(!name) return res.status(400).json({error:'Category name is required'});
-        const r=await pool.query(`INSERT INTO expense_categories(name) VALUES($1) RETURNING *`,[name]); res.status(201).json(r.rows[0]);
+        const businessId=Number(req.user.business_id);
+        const name=String(req.body.name||'').trim();
+        if(!name) return res.status(400).json({error:'Category name is required'});
+        const r=await pool.query(`INSERT INTO expense_categories(name,business_id) VALUES($1,$2) RETURNING *`,[name,businessId]);
+        res.status(201).json(r.rows[0]);
     } catch(e){ res.status(e.code==='23505'?409:500).json({error:e.code==='23505'?'Category already exists':'Failed to create category'}); }
 });
 app.get('/api/expenses', async (req,res)=>{
@@ -4865,25 +4701,29 @@ app.get('/api/expenses', async (req,res)=>{
         const r=await pool.query(`
             SELECT e.*, c.name AS category_name, u.display_name AS created_by_name
             FROM expenses e LEFT JOIN expense_categories c ON c.id=e.category_id LEFT JOIN app_users u ON u.id=e.created_by
-            WHERE ($1::date IS NULL OR e.expense_date >= $1::date) AND ($2::date IS NULL OR e.expense_date <= $2::date)
+            WHERE e.business_id=$3
+              AND ($1::date IS NULL OR e.expense_date >= $1::date)
+              AND ($2::date IS NULL OR e.expense_date <= $2::date)
             ORDER BY e.expense_date DESC, e.id DESC
-        `,[from,to]); res.json(r.rows);
+        `,[from,to,Number(req.user.business_id)]);
+        res.json(r.rows);
     } catch(e){ res.status(500).json({error:'Failed to load expenses'}); }
 });
 app.post('/api/expenses', async (req,res)=>{
     try {
+        const businessId=Number(req.user.business_id);
         const amount=Number(req.body.amount); if(!Number.isFinite(amount)||amount<0) return res.status(400).json({error:'Invalid expense amount'});
-        const r=await pool.query(`INSERT INTO expenses(category_id,amount,payment_method,expense_date,note,created_by) VALUES($1,$2,$3,COALESCE($4::date,CURRENT_DATE),$5,$6) RETURNING *`,[
-            req.body.categoryId?Number(req.body.categoryId):null,amount,String(req.body.paymentMethod||'Cash'),req.body.expenseDate||null,req.body.note?String(req.body.note).slice(0,1000):null,req.user?.id||null]);
+        const r=await pool.query(`INSERT INTO expenses(category_id,amount,payment_method,expense_date,note,created_by,business_id) VALUES($1,$2,$3,COALESCE($4::date,CURRENT_DATE),$5,$6,$7) RETURNING *`,[
+            req.body.categoryId?Number(req.body.categoryId):null,amount,String(req.body.paymentMethod||'Cash'),req.body.expenseDate||null,req.body.note?String(req.body.note).slice(0,1000):null,req.user?.id||null,businessId]);
         res.status(201).json({success:true,expense:r.rows[0]});
     } catch(e){ console.error(e);res.status(500).json({error:'Failed to save expense'}); }
 });
-app.delete('/api/expenses/:id', async (req,res)=>{try{await pool.query(`DELETE FROM expenses WHERE id=$1`,[Number(req.params.id)]);res.json({success:true});}catch(e){res.status(500).json({error:'Failed to delete expense'});}});
+app.delete('/api/expenses/:id', async (req,res)=>{try{await pool.query(`DELETE FROM expenses WHERE id=$1 AND business_id=$2`,[Number(req.params.id),Number(req.user.business_id)]);res.json({success:true});}catch(e){res.status(500).json({error:'Failed to delete expense'});}});
 app.get('/api/expenses/summary', async (req,res)=>{
     try {
-        const from=req.query.from||null,to=req.query.to||null;
-        const total=(await pool.query(`SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM expenses WHERE ($1::date IS NULL OR expense_date >= $1::date) AND ($2::date IS NULL OR expense_date <= $2::date)`,[from,to])).rows[0];
-        const categories=(await pool.query(`SELECT COALESCE(c.name,'Uncategorised') category, COALESCE(SUM(e.amount),0) amount FROM expenses e LEFT JOIN expense_categories c ON c.id=e.category_id WHERE ($1::date IS NULL OR e.expense_date >= $1::date) AND ($2::date IS NULL OR e.expense_date <= $2::date) GROUP BY c.name ORDER BY amount DESC`,[from,to])).rows;
+        const from=req.query.from||null,to=req.query.to||null,businessId=Number(req.user.business_id);
+        const total=(await pool.query(`SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM expenses WHERE business_id=$3 AND ($1::date IS NULL OR expense_date >= $1::date) AND ($2::date IS NULL OR expense_date <= $2::date)`,[from,to,businessId])).rows[0];
+        const categories=(await pool.query(`SELECT COALESCE(c.name,'Uncategorised') category, COALESCE(SUM(e.amount),0) amount FROM expenses e LEFT JOIN expense_categories c ON c.id=e.category_id WHERE e.business_id=$3 AND ($1::date IS NULL OR e.expense_date >= $1::date) AND ($2::date IS NULL OR e.expense_date <= $2::date) GROUP BY c.name ORDER BY amount DESC`,[from,to,businessId])).rows;
         res.json({total,count:Number(total.count||0),categories});
     } catch(e){res.status(500).json({error:'Failed to load expense summary'});}
 });
@@ -4914,277 +4754,111 @@ app.post('/api/loyalty/adjust', async (req,res)=>{try{
 app.get("/api/billing-adjustments", async (req, res) => {
     try {
         const result = await pool.query(`
-            SELECT *
-            FROM billing_adjustments
+            SELECT * FROM billing_adjustments
+            WHERE business_id = $1
             ORDER BY active DESC, name ASC, id ASC
-        `);
-
+        `, [Number(req.user.business_id)]);
         res.json(result.rows);
     } catch (e) {
         console.error("Load billing adjustments error:", e);
-        res.status(500).json({
-            error: "Failed to load billing adjustments"
-        });
+        res.status(500).json({ error: "Failed to load billing adjustments" });
     }
 });
-
 
 app.post("/api/billing-adjustments", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const name = String(req.body.name || "").trim();
-        const type = ["discount", "charge"].includes(
-            String(req.body.type || "").toLowerCase()
-        )
-            ? String(req.body.type).toLowerCase()
-            : "discount";
-
-        const valueType = ["amount", "percent"].includes(
-            String(req.body.valueType || "").toLowerCase()
-        )
-            ? String(req.body.valueType).toLowerCase()
-            : "amount";
-
+        const type = ["discount", "charge"].includes(String(req.body.type || "").toLowerCase()) ? String(req.body.type).toLowerCase() : "discount";
+        const valueType = ["amount", "percent"].includes(String(req.body.valueType || "").toLowerCase()) ? String(req.body.valueType).toLowerCase() : "amount";
         const value = Number(req.body.value);
-        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(
-            String(req.body.appliesTo || "").toLowerCase()
-        )
-            ? String(req.body.appliesTo).toLowerCase()
-            : "all";
+        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(String(req.body.appliesTo || "").toLowerCase()) ? String(req.body.appliesTo).toLowerCase() : "all";
+        const description = String(req.body.description || "").trim() || null;
 
-        const description =
-            String(req.body.description || "").trim() || null;
-
-        if (!name) {
-            return res.status(400).json({
-                error: "Adjustment name is required"
-            });
-        }
-
-        if (!Number.isFinite(value) || value < 0) {
-            return res.status(400).json({
-                error: "Adjustment value must be a valid non-negative number"
-            });
-        }
-
-        if (valueType === "percent" && value > 100) {
-            return res.status(400).json({
-                error: "Percentage cannot exceed 100"
-            });
-        }
+        if (!name) return res.status(400).json({ error: "Adjustment name is required" });
+        if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "Adjustment value must be a valid non-negative number" });
+        if (valueType === "percent" && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
 
         const result = await pool.query(`
             INSERT INTO billing_adjustments
-            (
-                name,
-                type,
-                value_type,
-                value,
-                applies_to,
-                description,
-                active
-            )
-            VALUES
-            ($1,$2,$3,$4,$5,$6,TRUE)
+            (name,type,value_type,value,applies_to,description,active,business_id)
+            VALUES($1,$2,$3,$4,$5,$6,TRUE,$7)
             RETURNING *
-        `, [
-            name,
-            type,
-            valueType,
-            value,
-            appliesTo,
-            description
-        ]);
+        `, [name,type,valueType,value,appliesTo,description,businessId]);
 
         res.status(201).json(result.rows[0]);
-
     } catch (e) {
         console.error("Create billing adjustment error:", e);
-
-        if (e.code === "23505") {
-            return res.status(409).json({
-                error: "Billing adjustment already exists"
-            });
-        }
-
-        res.status(500).json({
-            error: "Failed to create billing adjustment"
-        });
+        if (e.code === "23505") return res.status(409).json({ error: "Billing adjustment already exists" });
+        res.status(500).json({ error: "Failed to create billing adjustment" });
     }
 });
-
 
 app.put("/api/billing-adjustments/:id", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                error: "Invalid adjustment ID"
-            });
-        }
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid adjustment ID" });
 
         const name = String(req.body.name || "").trim();
-
-        const type = ["discount", "charge"].includes(
-            String(req.body.type || "").toLowerCase()
-        )
-            ? String(req.body.type).toLowerCase()
-            : "discount";
-
-        const valueType = ["amount", "percent"].includes(
-            String(req.body.valueType || "").toLowerCase()
-        )
-            ? String(req.body.valueType).toLowerCase()
-            : "amount";
-
+        const type = ["discount", "charge"].includes(String(req.body.type || "").toLowerCase()) ? String(req.body.type).toLowerCase() : "discount";
+        const valueType = ["amount", "percent"].includes(String(req.body.valueType || "").toLowerCase()) ? String(req.body.valueType).toLowerCase() : "amount";
         const value = Number(req.body.value);
+        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(String(req.body.appliesTo || "").toLowerCase()) ? String(req.body.appliesTo).toLowerCase() : "all";
+        const description = String(req.body.description || "").trim() || null;
 
-        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(
-            String(req.body.appliesTo || "").toLowerCase()
-        )
-            ? String(req.body.appliesTo).toLowerCase()
-            : "all";
-
-        const description =
-            String(req.body.description || "").trim() || null;
-
-        if (!name) {
-            return res.status(400).json({
-                error: "Adjustment name is required"
-            });
-        }
-
-        if (!Number.isFinite(value) || value < 0) {
-            return res.status(400).json({
-                error: "Adjustment value must be a valid non-negative number"
-            });
-        }
-
-        if (valueType === "percent" && value > 100) {
-            return res.status(400).json({
-                error: "Percentage cannot exceed 100"
-            });
-        }
+        if (!name) return res.status(400).json({ error: "Adjustment name is required" });
+        if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "Adjustment value must be a valid non-negative number" });
+        if (valueType === "percent" && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
 
         const result = await pool.query(`
             UPDATE billing_adjustments
-            SET
-                name = $1,
-                type = $2,
-                value_type = $3,
-                value = $4,
-                applies_to = $5,
-                description = $6,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $7
+            SET name=$1,type=$2,value_type=$3,value=$4,applies_to=$5,description=$6,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$7 AND business_id=$8
             RETURNING *
-        `, [
-            name,
-            type,
-            valueType,
-            value,
-            appliesTo,
-            description,
-            id
-        ]);
-
-        if (!result.rows.length) {
-            return res.status(404).json({
-                error: "Billing adjustment not found"
-            });
-        }
-
+        `, [name,type,valueType,value,appliesTo,description,id,businessId]);
+        if (!result.rows.length) return res.status(404).json({ error: "Billing adjustment not found" });
         res.json(result.rows[0]);
-
     } catch (e) {
         console.error("Update billing adjustment error:", e);
-
-        if (e.code === "23505") {
-            return res.status(409).json({
-                error: "Billing adjustment already exists"
-            });
-        }
-
-        res.status(500).json({
-            error: "Failed to update billing adjustment"
-        });
+        if (e.code === "23505") return res.status(409).json({ error: "Billing adjustment already exists" });
+        res.status(500).json({ error: "Failed to update billing adjustment" });
     }
 });
-
 
 app.put("/api/billing-adjustments/:id/toggle", async (req, res) => {
     try {
         const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                error: "Invalid adjustment ID"
-            });
-        }
-
         const result = await pool.query(`
             UPDATE billing_adjustments
-            SET
-                active = NOT active,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = $1
+            SET active=NOT active,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$1 AND business_id=$2
             RETURNING *
-        `, [id]);
-
-        if (!result.rows.length) {
-            return res.status(404).json({
-                error: "Billing adjustment not found"
-            });
-        }
-
+        `, [id, Number(req.user.business_id)]);
+        if (!result.rows.length) return res.status(404).json({ error: "Billing adjustment not found" });
         res.json(result.rows[0]);
-
     } catch (e) {
         console.error("Toggle billing adjustment error:", e);
-        res.status(500).json({
-            error: "Failed to update billing adjustment"
-        });
+        res.status(500).json({ error: "Failed to update billing adjustment" });
     }
 });
-
 
 app.delete("/api/billing-adjustments/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
-
-        if (!Number.isInteger(id) || id <= 0) {
-            return res.status(400).json({
-                error: "Invalid adjustment ID"
-            });
-        }
-
         const result = await pool.query(`
             DELETE FROM billing_adjustments
-            WHERE id = $1
+            WHERE id=$1 AND business_id=$2
             RETURNING id
-        `, [id]);
-
-        if (!result.rows.length) {
-            return res.status(404).json({
-                error: "Billing adjustment not found"
-            });
-        }
-
-        res.json({
-            success: true
-        });
-
+        `, [id, Number(req.user.business_id)]);
+        if (!result.rows.length) return res.status(404).json({ error: "Billing adjustment not found" });
+        res.json({ success: true });
     } catch (e) {
         console.error("Delete billing adjustment error:", e);
-        res.status(500).json({
-            error: "Failed to delete billing adjustment"
-        });
+        res.status(500).json({ error: "Failed to delete billing adjustment" });
     }
 });
 
-// =====================================================
-// BACKUP / RESTORE
-// =====================================================
 app.get('/api/backup/health', async (_, res) => {
     const binary = resolvePgDumpBinary();
     const configured = Boolean(process.env.DB_USER && process.env.DB_NAME && process.env.DB_HOST);
@@ -5607,15 +5281,16 @@ app.delete("/api/access/profiles/:id", async (req, res) => {
     }
 });
 
-app.get("/api/access/users", async (_, res) => {
+app.get("/api/access/users", async (req, res) => {
     try {
         const result = await pool.query(`
             SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.created_at,
                    p.name AS profile_name
             FROM app_users u
             LEFT JOIN access_profiles p ON p.id=u.profile_id
+            WHERE u.business_id=$1
             ORDER BY u.id
-        `);
+        `, [Number(req.user.business_id)]);
         res.json(result.rows);
     } catch (e) {
         res.status(500).json({ error: "Failed to load users" });
@@ -5624,6 +5299,7 @@ app.get("/api/access/users", async (_, res) => {
 
 app.post("/api/access/users", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const displayName = String(req.body.displayName || "").trim();
         const username = String(req.body.username || "").trim();
         const profileId = req.body.profileId === null || req.body.profileId === undefined || req.body.profileId === "" ? null : Number(req.body.profileId);
@@ -5633,8 +5309,8 @@ app.post("/api/access/users", async (req, res) => {
         if (!password || password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
         if (profileId !== null && (!Number.isInteger(profileId) || profileId <= 0)) return res.status(400).json({ error: "Invalid access profile" });
         const result = await pool.query(
-            `INSERT INTO app_users (display_name, username, password_hash, profile_id, active) VALUES ($1,$2,$3,$4,$5) RETURNING id,display_name,username,profile_id,active,created_at,updated_at`,
-            [displayName, username, hashPassword(password), profileId, active]
+            `INSERT INTO app_users (display_name, username, password_hash, profile_id, business_id, active) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
+            [displayName, username, hashPassword(password), profileId, businessId, active]
         );
         res.status(201).json({ success: true, user: result.rows[0] });
     } catch (e) {
@@ -5647,7 +5323,7 @@ app.put("/api/access/users/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
         if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid user ID" });
-        const current = await pool.query(`SELECT * FROM app_users WHERE id=$1`, [id]);
+        const current = await pool.query(`SELECT * FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
         if (!current.rows.length) return res.status(404).json({ error: "User not found" });
         const old = current.rows[0];
         const displayName = req.body.displayName === undefined ? old.display_name : String(req.body.displayName).trim();
@@ -5659,9 +5335,9 @@ app.put("/api/access/users/:id", async (req, res) => {
         if (password && password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
         const result = await pool.query(
             password
-                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, updated_at=CURRENT_TIMESTAMP WHERE id=$6 RETURNING id,display_name,username,profile_id,active,created_at,updated_at`
-                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5 RETURNING id,display_name,username,profile_id,active,created_at,updated_at`,
-            password ? [displayName,username,hashPassword(password),profileId,active,id] : [displayName,username,profileId,active,id]
+                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
+                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
+            password ? [displayName,username,hashPassword(password),profileId,active,id,Number(req.user.business_id)] : [displayName,username,profileId,active,id,Number(req.user.business_id)]
         );
         res.json({ success: true, user: result.rows[0] });
     } catch (e) {
@@ -5673,10 +5349,10 @@ app.put("/api/access/users/:id", async (req, res) => {
 app.delete("/api/access/users/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
-        const user = await pool.query(`SELECT username FROM app_users WHERE id=$1`, [id]);
+        const user = await pool.query(`SELECT username FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
         if (!user.rows.length) return res.status(404).json({ error: "User not found" });
         if (user.rows[0].username === "admin") return res.status(400).json({ error: "The admin user cannot be deleted" });
-        await pool.query(`DELETE FROM app_users WHERE id=$1`, [id]);
+        await pool.query(`DELETE FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: "Failed to delete user" });
@@ -5754,19 +5430,142 @@ app.put(
 );
 
 // =====================================================
+// MULTI-BUSINESS DATA ISOLATION (PHASE 2A)
+// =====================================================
+const TENANT_TABLES_PHASE_2A = [
+    'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
+    'reservations','kot_groups','kot','payments','customers','invoices',
+    'loyalty_transactions','billing_adjustments','expense_categories','expenses'
+];
+
+// NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices
+// are also tenant-isolated at the database layer by the Phase 2A RLS policy above.
+// The authenticated tenant context is now established for every /api route, so
+// those existing SQL routes inherit the current business automatically without
+// requiring repetitive WHERE business_id clauses everywhere.
+
+
+async function tableExists(tableName) {
+    const r = await pool.query(`
+        SELECT EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema='public' AND table_name=$1
+        ) AS exists
+    `, [tableName]);
+    return r.rows[0]?.exists === true;
+}
+
+async function makeNameUniquePerBusiness(tableName, columnName) {
+    if (!(await tableExists(tableName))) return;
+    const constraints = await pool.query(`
+        SELECT tc.constraint_name
+        FROM information_schema.table_constraints tc
+        WHERE tc.table_schema='public'
+          AND tc.table_name=$1
+          AND tc.constraint_type='UNIQUE'
+          AND (SELECT COUNT(*) FROM information_schema.constraint_column_usage c2
+               WHERE c2.constraint_schema=tc.constraint_schema
+                 AND c2.constraint_name=tc.constraint_name)=1
+          AND EXISTS (SELECT 1 FROM information_schema.constraint_column_usage c1
+                      WHERE c1.constraint_schema=tc.constraint_schema
+                        AND c1.constraint_name=tc.constraint_name
+                        AND c1.column_name=$2)
+    `, [tableName, columnName]);
+    const safeTable=String(tableName).replace(/"/g,'""');
+    for (const row of constraints.rows) {
+        const safeConstraint=String(row.constraint_name).replace(/"/g,'""');
+        await pool.query(`ALTER TABLE "${safeTable}" DROP CONSTRAINT IF EXISTS "${safeConstraint}"`);
+    }
+    const safeColumn=String(columnName).replace(/"/g,'""');
+    const indexName=`uq_${tableName}_business_${columnName}`.replace(/[^a-zA-Z0-9_]/g,'_');
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id,"${safeColumn}")`);
+}
+
+async function ensureTenantIsolationPhase2A() {
+    console.log('🔧 Phase 2A: starting tenant isolation migration');
+    if (!systemBusinessId) {
+        const r=await rawPoolQuery(`SELECT id FROM businesses ORDER BY id LIMIT 1`);
+        systemBusinessId=Number(r.rows[0]?.id||0)||null;
+    }
+    if (!systemBusinessId) throw new Error('No default business exists for tenant migration');
+
+    for (const tableName of TENANT_TABLES_PHASE_2A) {
+        console.log(`🔧 Phase 2A: migrating table ${tableName}`);
+        if (!(await tableExists(tableName))) continue;
+        const safeTable=String(tableName).replace(/"/g,'""');
+        await pool.query(`ALTER TABLE "${safeTable}" ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
+        await pool.query(`UPDATE "${safeTable}" SET business_id=$1 WHERE business_id IS NULL`,[systemBusinessId]);
+        await pool.query(`ALTER TABLE "${safeTable}" ALTER COLUMN business_id SET DEFAULT NULLIF(current_setting('app.business_id', true), '')::INTEGER`);
+        await pool.query(`ALTER TABLE "${safeTable}" ALTER COLUMN business_id SET NOT NULL`);
+        const indexName=`idx_${tableName}_business_id`.replace(/[^a-zA-Z0-9_]/g,'_');
+        await pool.query(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id)`);
+        await pool.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
+        await pool.query(`ALTER TABLE "${safeTable}" FORCE ROW LEVEL SECURITY`);
+        await pool.query(`DROP POLICY IF EXISTS tenant_isolation ON "${safeTable}"`);
+        await pool.query(`CREATE POLICY tenant_isolation ON "${safeTable}"
+            USING (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)
+            WITH CHECK (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)`);
+    }
+
+    await makeNameUniquePerBusiness('kot_groups','name');
+    await makeNameUniquePerBusiness('expense_categories','name');
+    await makeNameUniquePerBusiness('billing_adjustments','name');
+    console.log('✅ Phase 2A tenant isolation ready');
+}
+
+async function seedTenantDefaults(businessId) {
+    const id=Number(businessId);
+    if (!id) return;
+    return tenantContext.run({businessId:id}, async()=>{
+        if (await tableExists('kot_groups')) {
+            await pool.query(`INSERT INTO kot_groups(name,description,station,sort_order,active)
+                VALUES('Main Kitchen','Default KOT group','Kitchen',0,TRUE)
+                ON CONFLICT (business_id,name) DO NOTHING`);
+        }
+        if (await tableExists('expense_categories')) {
+            const defaults=['Purchase / Supplies','Staff / Salary','Rent','Utilities','Marketing','Maintenance','Delivery / Logistics','Other'];
+            for (const name of defaults) {
+                await pool.query(`INSERT INTO expense_categories(name,business_id) VALUES($1,$2) ON CONFLICT (business_id,name) DO NOTHING`,[name,id]);
+            }
+        }
+    });
+}
+
+// =====================================================
 // START SERVER
 // =====================================================
-
 async function startServer() {
 
     try {
 
-        await ensureInvoiceTables();
-        await ensureSettingsTable();
-        await ensureAccessTables();
+        console.log('🚀 Phase 2A startup: initializing database');
+        console.log('1/7 ensureBusinessTable');
         await ensureBusinessTable();
+        console.log('✅ ensureBusinessTable complete');
+        const systemBusiness = await rawPoolQuery(`SELECT id FROM businesses ORDER BY id LIMIT 1`);
+        systemBusinessId = Number(systemBusiness.rows[0]?.id || 0) || null;
+        if (!systemBusinessId) throw new Error("No business exists after business initialization");
+
+        console.log('2/7 ensureInvoiceTables');
+        await ensureInvoiceTables();
+        console.log('✅ ensureInvoiceTables complete');
+        console.log('3/7 ensureSettingsTable');
+        await ensureSettingsTable();
+        console.log('✅ ensureSettingsTable complete');
+        console.log('4/7 ensureAccessTables');
+        await ensureAccessTables();
+        console.log('✅ ensureAccessTables complete');
+        console.log('5/7 ensureBusinessTables');
         await ensureBusinessTables();
+        console.log('✅ ensureBusinessTables complete');
+        console.log('6/7 ensureTenantIsolationPhase2A');
+        await ensureTenantIsolationPhase2A();
+        console.log('✅ ensureTenantIsolationPhase2A complete');
+        console.log('7/7 ensureSessionTable');
         await ensureSessionTable();
+        console.log('✅ ensureSessionTable complete');
+
+        tenantSystemMode = false;
 
         app.listen(
             PORT,
