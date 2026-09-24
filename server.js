@@ -5567,6 +5567,7 @@ async function startServer() {
 
         tenantSystemMode = false;
 
+       if (!process.env.VERCEL) {
         app.listen(
             PORT,
             () =>
@@ -5574,6 +5575,7 @@ async function startServer() {
                     `🚀 Cafe POS server running on http://localhost:${PORT}`
                 )
         );
+       }
 
     } catch (error) {
 
@@ -5588,4 +5590,11 @@ async function startServer() {
 
 }
 
-startServer();
+const startupPromise = startServer();
+
+if (process.env.VERCEL) {
+    module.exports = async function handler(req, res) {
+        await startupPromise;
+        return app(req, res);
+    };
+}
