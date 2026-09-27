@@ -27,19 +27,33 @@ app.use(express.static(path.join(__dirname, "public")));
 // POSTGRESQL
 // =====================================================
 
+// =====================================================
+// POSTGRESQL
+// =====================================================
+
+const poolOptions = {
+    max: Number(process.env.DB_POOL_MAX || 2),
+    min: 0,
+    idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 5000),
+    connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 8000),
+    allowExitOnIdle: true
+};
+
 const poolConfig = process.env.DATABASE_URL
-  ? {
-      connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false
-      }
+    ? {
+        ...poolOptions,
+        connectionString: process.env.DATABASE_URL,
+        ssl: {
+            rejectUnauthorized: false
+        }
     }
-  : {
-      user: process.env.DB_USER,
-      host: process.env.DB_HOST,
-      database: process.env.DB_NAME,
-      password: process.env.DB_PASSWORD,
-      port: process.env.DB_PORT
+    : {
+        ...poolOptions,
+        user: process.env.DB_USER,
+        host: process.env.DB_HOST,
+        database: process.env.DB_NAME,
+        password: process.env.DB_PASSWORD,
+        port: process.env.DB_PORT
     };
 
 const pool = new Pool(poolConfig);
