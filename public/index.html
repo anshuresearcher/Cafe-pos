@@ -13,6 +13,96 @@
     <link rel="stylesheet"
         href="style.css">
 
+
+<style>
+/* =========================================================
+   PHASE 2B — DEVICE REGISTRATION KEY PANEL
+   ========================================================= */
+.device-registration-panel {
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid #e8ebf0;
+    text-align: left;
+}
+.device-registration-trigger {
+    width: 100%;
+    border: 1px solid #d8deea;
+    background: #f7f9fc;
+    color: #1f2937;
+    border-radius: 12px;
+    padding: 12px 14px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: .18s ease;
+}
+.device-registration-trigger:hover {
+    background: #eef3fb;
+    border-color: #c8d3e5;
+}
+.device-registration-view {
+    display: none;
+}
+.device-registration-card-icon {
+    width: 52px;
+    height: 52px;
+    margin: 0 auto 10px;
+    display: grid;
+    place-items: center;
+    border-radius: 14px;
+    background: #eef4ff;
+    font-size: 26px;
+}
+.device-registration-subtitle {
+    color: #737b88;
+    margin: 0 0 18px;
+    font-size: 14px;
+    line-height: 1.5;
+}
+.device-registration-note {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #f7f9fc;
+    color: #737b88;
+    font-size: 12px;
+    line-height: 1.45;
+}
+.device-registration-message {
+    margin-top: 12px;
+    padding: 11px 12px;
+    border-radius: 10px;
+    display: none;
+    font-size: 13px;
+    line-height: 1.45;
+}
+.device-registration-message.success {
+    display: block;
+    background: #eaf8ef;
+    color: #176637;
+}
+.device-registration-message.error {
+    display: block;
+    background: #fff0f0;
+    color: #a52b2b;
+}
+.device-registration-key-input {
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-weight: 800;
+    text-align: center;
+}
+.device-registration-secondary {
+    width: 100%;
+    margin-top: 10px;
+    border: 0;
+    background: transparent;
+    color: #1f6feb;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 8px;
+}
+</style>
+
 </head>
 
 
@@ -33,6 +123,11 @@
         </form>
         <div class="login-help">Initial users: <b>admin / admin123</b> · <b>manager / manager123</b> · <b>cashier / cashier123</b></div>
         <button type="button" class="register-business-link" onclick="showRegisterBusiness()">🏪 Create a new cafe business</button>
+        <div class="device-registration-panel">
+            <button type="button" class="device-registration-trigger" onclick="showDeviceRegistrationView()">
+                🔑 Register this device with a Registration Key
+            </button>
+        </div>
         </div>
 
         <div id="registerView" style="display:none;">
@@ -68,6 +163,60 @@
                 <div id="registerError" class="login-error"></div>
             </form>
             <button type="button" class="register-business-link" onclick="showLoginView()">← Back to login</button>
+        </div>
+
+        <div id="deviceRegistrationView" class="device-registration-view">
+            <div class="device-registration-card-icon">🔑</div>
+            <h1>Register This Device</h1>
+            <p class="device-registration-subtitle">
+                Enter the one-time registration key provided by your Cafe Admin or support team.
+            </p>
+
+            <form onsubmit="registerDeviceFromLogin(event)">
+                <label for="deviceRegistrationKey">Registration Key</label>
+                <input
+                    id="deviceRegistrationKey"
+                    class="device-registration-key-input"
+                    type="text"
+                    autocomplete="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    maxlength="40"
+                    placeholder="XXXX-XXXX-XXXX-XXXX"
+                    required>
+
+                <label for="deviceRegistrationName">Device Name</label>
+                <input
+                    id="deviceRegistrationName"
+                    type="text"
+                    autocomplete="off"
+                    maxlength="160"
+                    placeholder="Counter PC">
+
+                <label for="deviceRegistrationType">Device Type</label>
+                <select id="deviceRegistrationType">
+                    <option value="Web">Web</option>
+                    <option value="Windows PC">Windows PC</option>
+                    <option value="Android">Android</option>
+                    <option value="Tablet">Tablet</option>
+                    <option value="Kitchen">Kitchen</option>
+                </select>
+
+                <button id="deviceRegistrationSubmit" class="big-btn login-btn" type="submit">
+                    🔐 Register Device
+                </button>
+
+                <div id="deviceRegistrationMessage" class="device-registration-message"></div>
+            </form>
+
+            <div class="device-registration-note">
+                This registration key can be used only once. After registration,
+                use the normal Cafe POS username and password to log in.
+            </div>
+
+            <button type="button" class="device-registration-secondary" onclick="showLoginViewFromDeviceRegistration()">
+                ← Back to user login
+            </button>
         </div>
     </div>
 </div>
@@ -2397,6 +2546,177 @@
          ===================================================== -->
 
     <script src="app.js"></script>
+
+    <script>
+    /* =========================================================
+       PHASE 2B — DEVICE REGISTRATION FROM EXISTING INDEX
+       Backend endpoint:
+       POST /api/public/device/register
+       ========================================================= */
+    (function () {
+        const defaultDeviceName = (() => {
+            try {
+                const platform = String(navigator.platform || "").trim();
+                return (platform ? platform + " POS" : "POS Device").slice(0, 160);
+            } catch (_) {
+                return "POS Device";
+            }
+        })();
+
+        function setDeviceRegistrationMessage(message, type) {
+            const el = document.getElementById("deviceRegistrationMessage");
+            if (!el) return;
+            el.textContent = String(message || "");
+            el.className = "device-registration-message " + (type === "success" ? "success" : "error");
+        }
+
+        window.showDeviceRegistrationView = function () {
+            const login = document.getElementById("loginView");
+            const register = document.getElementById("registerView");
+            const device = document.getElementById("deviceRegistrationView");
+
+            if (login) login.style.display = "none";
+            if (register) register.style.display = "none";
+            if (device) device.style.display = "block";
+
+            const name = document.getElementById("deviceRegistrationName");
+            if (name && !name.value) name.value = defaultDeviceName;
+
+            const msg = document.getElementById("deviceRegistrationMessage");
+            if (msg) {
+                msg.textContent = "";
+                msg.className = "device-registration-message";
+            }
+
+            const key = document.getElementById("deviceRegistrationKey");
+            if (key) {
+                key.focus();
+                key.select();
+            }
+        };
+
+        window.showLoginViewFromDeviceRegistration = function () {
+            const device = document.getElementById("deviceRegistrationView");
+            const register = document.getElementById("registerView");
+            const login = document.getElementById("loginView");
+
+            if (device) device.style.display = "none";
+            if (register) register.style.display = "none";
+            if (login) login.style.display = "block";
+
+            const user = document.getElementById("loginUsername");
+            if (user) user.focus();
+        };
+
+        window.registerDeviceFromLogin = async function (event) {
+            event.preventDefault();
+
+            const button = document.getElementById("deviceRegistrationSubmit");
+            const keyInput = document.getElementById("deviceRegistrationKey");
+            const nameInput = document.getElementById("deviceRegistrationName");
+            const typeInput = document.getElementById("deviceRegistrationType");
+
+            const registrationKey = String(keyInput?.value || "")
+                .trim()
+                .toUpperCase();
+
+            const deviceName = String(nameInput?.value || "POS Device")
+                .trim()
+                .slice(0, 160) || "POS Device";
+
+            const deviceType = String(typeInput?.value || "Web")
+                .trim() || "Web";
+
+            if (!registrationKey) {
+                setDeviceRegistrationMessage("Registration key is required.", "error");
+                return;
+            }
+
+            if (button) {
+                button.disabled = true;
+                button.dataset.originalText = button.textContent;
+                button.textContent = "Registering…";
+            }
+
+            setDeviceRegistrationMessage("", "error");
+
+            try {
+                const response = await fetch("/api/public/device/register", {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: {
+                        "Content-Type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        registrationKey,
+                        deviceName,
+                        deviceType
+                    })
+                });
+
+                const data = await response.json().catch(() => ({}));
+
+                if (!response.ok) {
+                    const error = new Error(data.error || "Device registration failed.");
+                    error.code = data.code || "";
+                    throw error;
+                }
+
+                const businessName = data?.business?.business_name || "your cafe";
+
+                setDeviceRegistrationMessage(
+                    "Device registered successfully for " + businessName +
+                    ". You can now log in with your Cafe POS username and password.",
+                    "success"
+                );
+
+                if (keyInput) keyInput.value = "";
+
+                setTimeout(() => {
+                    const device = document.getElementById("deviceRegistrationView");
+                    const login = document.getElementById("loginView");
+
+                    if (device) device.style.display = "none";
+                    if (login) login.style.display = "block";
+
+                    const username = document.getElementById("loginUsername");
+                    if (username) username.focus();
+
+                    const loginError = document.getElementById("loginError");
+                    if (loginError) {
+                        loginError.className = "login-error";
+                        loginError.textContent = "Device registered. Please log in.";
+                    }
+                }, 900);
+
+            } catch (error) {
+                setDeviceRegistrationMessage(
+                    error?.message || "Device registration failed.",
+                    "error"
+                );
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.textContent = button.dataset.originalText || "🔐 Register Device";
+                }
+            }
+        };
+
+        const keyInput = document.getElementById("deviceRegistrationKey");
+        if (keyInput) {
+            keyInput.addEventListener("input", function () {
+                this.value = String(this.value || "")
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9-]/g, "");
+            });
+        }
+
+        const nameInput = document.getElementById("deviceRegistrationName");
+        if (nameInput && !nameInput.value) {
+            nameInput.value = defaultDeviceName;
+        }
+    })();
+    </script>
 
     <!-- =========================
      BILL PREVIEW MODAL

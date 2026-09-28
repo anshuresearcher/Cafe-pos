@@ -27,10 +27,6 @@ app.use(express.static(path.join(__dirname, "public")));
 // POSTGRESQL
 // =====================================================
 
-// =====================================================
-// POSTGRESQL
-// =====================================================
-
 const poolOptions = {
     max: Number(process.env.DB_POOL_MAX || 2),
     min: 0,
@@ -80,7 +76,9 @@ const rawPoolQuery = async function (text, values) {
 async function applyTenantDbContext(client) {
     const store = tenantContext.getStore();
     const requestBusinessId = store?.businessId ? Number(store.businessId) : null;
-    const effectiveBusinessId = requestBusinessId || (tenantSystemMode ? Number(systemBusinessId || 0) : null);
+    const requestSystemMode = store?.systemMode === true;
+    const effectiveSystemMode = requestSystemMode || tenantSystemMode;
+    const effectiveBusinessId = requestBusinessId || (effectiveSystemMode ? Number(systemBusinessId || 0) : null);
 
     await client.query(
         `SELECT
@@ -88,9 +86,13 @@ async function applyTenantDbContext(client) {
             set_config('app.system_mode', $2, false)`,
         [
             effectiveBusinessId ? String(effectiveBusinessId) : '',
-            tenantSystemMode ? 'on' : 'off'
+            effectiveSystemMode ? 'on' : 'off'
         ]
     );
+}
+
+function runSystemContext(fn) {
+    return tenantContext.run({ systemMode: true }, fn);
 }
 
 pool.query = async function (text, values) {
@@ -137,10 +139,15 @@ async function ensureSessionTable() {
         CREATE TABLE IF NOT EXISTS app_sessions (
             token VARCHAR(128) PRIMARY KEY,
             user_id INTEGER NOT NULL,
+            business_id INTEGER,
+            device_id VARCHAR(128),
             expires_at TIMESTAMPTZ NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+
+    await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS business_id INTEGER`);
+    await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS device_id VARCHAR(128)`);
 
     await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_app_sessions_expires_at
@@ -150,6 +157,11 @@ async function ensureSessionTable() {
     await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_app_sessions_user_id
         ON app_sessions(user_id)
+    `);
+
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_app_sessions_device_id
+        ON app_sessions(device_id)
     `);
 }
 
@@ -298,35 +310,63 @@ function verifyPassword(password, stored) {
     } catch (_) { return false; }
 }
 
-async function createSession(user) {
+async function createSession(user, device) {
     const token = crypto.randomBytes(32).toString("hex");
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+    const businessId = Number(user.business_id || 0) || null;
+    const deviceId = device?.device_id ? String(device.device_id) : null;
 
     await pool.query(
         `
-        INSERT INTO app_sessions (token, user_id, expires_at)
-        VALUES ($1, $2, $3)
+        INSERT INTO app_sessions (token, user_id, business_id, device_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
         `,
-        [token, user.id, expiresAt]
+        [token, user.id, businessId, deviceId, expiresAt]
     );
 
     return {
         token,
         userId: user.id,
+        businessId,
+        deviceId,
         expiresAt: expiresAt.getTime()
     };
 }
 
+function getCookie(req, name) {
+    const header = String(req.headers.cookie || "");
+    for (const part of header.split(";")) {
+        const idx = part.indexOf("=");
+        if (idx < 0) continue;
+        const key = part.slice(0, idx).trim();
+        if (key !== name) continue;
+        return decodeURIComponent(part.slice(idx + 1).trim());
+    }
+    return null;
+}
+
+function setCookie(res, name, value, options = {}) {
+    const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${options.path || "/"}`];
+    if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
+    if (options.httpOnly !== false) parts.push("HttpOnly");
+    if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
+    if (options.secure !== false && process.env.NODE_ENV === "production") parts.push("Secure");
+    res.append("Set-Cookie", parts.join("; "));
+}
+
+function clearCookie(res, name) {
+    setCookie(res, name, "", { maxAge: 0, httpOnly: true, sameSite: "Lax", secure: true });
+}
+
 async function getSessionUser(req) {
     const auth = String(req.headers.authorization || "");
-    if (!auth.startsWith("Bearer ")) return null;
-
-    const token = auth.slice(7).trim();
+    let token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!token) token = getCookie(req, "cafe_session") || "";
     if (!token) return null;
 
     const result = await pool.query(
         `
-        SELECT token, user_id, expires_at
+        SELECT token, user_id, business_id, device_id, expires_at
         FROM app_sessions
         WHERE token = $1
         LIMIT 1
@@ -335,40 +375,99 @@ async function getSessionUser(req) {
     );
 
     const session = result.rows[0];
-
     if (!session) return null;
 
     const expiresAt = new Date(session.expires_at).getTime();
-
     if (expiresAt < Date.now()) {
-        await pool.query(
-            `DELETE FROM app_sessions WHERE token = $1`,
-            [token]
-        );
+        await pool.query(`DELETE FROM app_sessions WHERE token = $1`, [token]);
         return null;
     }
 
     return {
         token,
         userId: session.user_id,
+        businessId: session.business_id,
+        deviceId: session.device_id,
         expiresAt
     };
 }
 
 async function loadSessionUser(session) {
-    const result = await pool.query(`
-        SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,
-               b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
-               b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
-               b.logo_url, b.currency, b.active AS business_active,
-               p.name AS profile_name, COALESCE(p.permissions, '{}'::jsonb) AS permissions
-        FROM app_users u
-        LEFT JOIN businesses b ON b.id = u.business_id
-        LEFT JOIN access_profiles p ON p.id = u.profile_id
-        WHERE u.id = $1
-    `, [session.userId]);
-    const user = result.rows[0];
-    return user && user.active ? user : null;
+    const businessId = Number(session.businessId || 0);
+    if (!businessId) return null;
+
+    return tenantContext.run({ businessId }, async () => {
+        const result = await pool.query(`
+            SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,
+                   b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
+                   b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
+                   b.logo_url, b.currency, b.active AS business_active,
+                   p.name AS profile_name, COALESCE(p.permissions, '{}'::jsonb) AS permissions
+            FROM app_users u
+            LEFT JOIN businesses b ON b.id = u.business_id
+            LEFT JOIN access_profiles p ON p.id = u.profile_id AND p.business_id = u.business_id
+            WHERE u.id = $1 AND u.business_id = $2
+        `, [session.userId, businessId]);
+        const user = result.rows[0];
+        return user && user.active ? user : null;
+    });
+}
+
+async function getRegisteredDevice(deviceId) {
+    if (!deviceId) return null;
+    const result = await runSystemContext(() => pool.query(`
+        SELECT d.*, l.status AS license_status, l.plan, l.starts_at AS license_starts_at,
+               l.expires_at AS license_expires_at, l.max_devices
+        FROM registered_devices d
+        LEFT JOIN business_licenses l ON l.id = d.license_id
+        WHERE d.device_id = $1
+        LIMIT 1
+    `, [deviceId]));
+    return result.rows[0] || null;
+}
+
+async function getEffectiveLicense(businessId) {
+    const result = await runSystemContext(() => pool.query(`
+        SELECT * FROM business_licenses
+        WHERE business_id = $1
+        ORDER BY id DESC
+        LIMIT 1
+    `, [Number(businessId)]));
+    const license = result.rows[0] || null;
+    if (!license) return null;
+
+    const now = Date.now();
+    const starts = new Date(license.starts_at).getTime();
+    const expires = new Date(license.expires_at).getTime();
+
+    if (license.status === "active" && expires < now) {
+        await runSystemContext(() => pool.query(`UPDATE business_licenses SET status='expired', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, [license.id]));
+        license.status = "expired";
+    }
+
+    if (license.status !== "active") return license;
+    if (starts > now || expires < now) return license;
+    return license;
+}
+
+async function assertActiveDeviceAndLicense(deviceId, expectedBusinessId = null) {
+    const device = await getRegisteredDevice(deviceId);
+    if (!device) throw Object.assign(new Error("Device is not registered"), { code: "DEVICE_NOT_REGISTERED" });
+    if (device.status !== "active") throw Object.assign(new Error("Device registration has been revoked"), { code: "DEVICE_REVOKED" });
+    if (expectedBusinessId && Number(device.business_id) !== Number(expectedBusinessId)) {
+        throw Object.assign(new Error("Device is registered to a different business"), { code: "DEVICE_BUSINESS_MISMATCH" });
+    }
+
+    const license = await getEffectiveLicense(device.business_id);
+    if (!license) throw Object.assign(new Error("No license is assigned to this business"), { code: "LICENSE_MISSING" });
+    if (license.status !== "active") throw Object.assign(new Error(`Business license is ${license.status}`), { code: "LICENSE_INACTIVE" });
+
+    const now = Date.now();
+    if (new Date(license.starts_at).getTime() > now) throw Object.assign(new Error("Business license has not started yet"), { code: "LICENSE_NOT_STARTED" });
+    if (new Date(license.expires_at).getTime() < now) throw Object.assign(new Error("Business license has expired"), { code: "LICENSE_EXPIRED" });
+
+    await runSystemContext(() => pool.query(`UPDATE registered_devices SET last_seen_at=CURRENT_TIMESTAMP WHERE id=$1`, [device.id]));
+    return { device, license };
 }
 
 function permissionForRequest(req) {
@@ -386,7 +485,7 @@ function permissionForRequest(req) {
     }
     const groups = [
         ["kot-groups","kot_groups"],["expenses","expenses"],["loyalty","loyalty"],["backup","backup"],["invoice-designer","invoice_designer"],["advanced-reports","advanced_reports"],["deployment","deployment"],
-        ["menu","menu"],["customers","customers"],["tables","tables"],
+        ["menu","menu"],["customers","customers"],["tables","tables"],["devices","devices"],
         ["reservations","reservations"],["kot","kitchen"],["payments","payments"],
         ["invoices","payments"]
     ];
@@ -413,18 +512,40 @@ function permissionForRequest(req) {
 
 async function requireAuth(req, res, next) {
     try {
+        // These endpoints implement their own authentication layers and are intentionally public to the normal API gate.
+        if (req.path === "/public/device/register" || req.path.startsWith("/support/")) return next();
+
         const session = await getSessionUser(req);
         if (!session) return res.status(401).json({ error: "Authentication required" });
 
         const user = await loadSessionUser(session);
         if (!user) return res.status(401).json({ error: "Session is invalid or user is inactive" });
 
-        req.user = user;
-        req.sessionToken = session.token;
-
         if (!user.business_id || user.business_active === false) {
             return res.status(403).json({ error: "Business account is inactive or not assigned" });
         }
+
+        let deviceLicense;
+        try {
+            deviceLicense = await assertActiveDeviceAndLicense(session.deviceId, user.business_id);
+        } catch (e) {
+            const map = {
+                DEVICE_NOT_REGISTERED: [403, "This device is not registered. Enter a valid registration key first."],
+                DEVICE_REVOKED: [403, "This device registration has been revoked."],
+                DEVICE_BUSINESS_MISMATCH: [403, "This device belongs to a different business."],
+                LICENSE_MISSING: [403, "No license is assigned to this business."],
+                LICENSE_INACTIVE: [403, `Business license is ${e.message.replace("Business license is ", "")}.`],
+                LICENSE_NOT_STARTED: [403, "Business license has not started yet."],
+                LICENSE_EXPIRED: [403, "Business license has expired. Please contact support."]
+            };
+            const [status, message] = map[e.code] || [403, e.message || "Device or license validation failed"];
+            return res.status(status).json({ error: message, code: e.code || "AUTH_VALIDATION_FAILED" });
+        }
+
+        req.user = user;
+        req.sessionToken = session.token;
+        req.device = deviceLicense.device;
+        req.license = deviceLicense.license;
 
         return tenantContext.run({ businessId: Number(user.business_id) }, () => {
             const required = permissionForRequest(req);
@@ -721,7 +842,25 @@ function databaseEnv() {
 // HOME
 // =====================================================
 
-app.get("/", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.get("/", async (req, res) => {
+    try {
+        const deviceId = getCookie(req, "cafe_device_id");
+        if (deviceId) {
+            const device = await getRegisteredDevice(deviceId);
+            if (device && device.status === "active") {
+                return res.sendFile(path.join(__dirname, "public", "index.html"));
+            }
+        }
+        return res.sendFile(path.join(__dirname, "public", "device-registration.html"));
+    } catch (e) {
+        console.error("Home route error:", e);
+        return res.sendFile(path.join(__dirname, "public", "device-registration.html"));
+    }
+});
+app.get("/device-registration", (_, res) => res.sendFile(path.join(__dirname, "public", "device-registration.html")));
+app.get("/devices", (_, res) => res.sendFile(path.join(__dirname, "public", "devices.html")));
+app.get("/support", (_, res) => res.sendFile(path.join(__dirname, "public", "support.html")));
+app.get("/register-business", (_, res) => res.sendFile(path.join(__dirname, "public", "register-business.html")));
 
 
 
@@ -729,12 +868,14 @@ app.get("/", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html
 // BUSINESS / REGISTRATION
 // =====================================================
 app.post('/api/public/register-business', async (req, res) => {
-    // Registration is public, but the startup migration should already have run.
-    // Keep this defensive check for manually invoked/embedded server startup.
-    await ensureBusinessTable();
-    const client = await pool.connect();
     try {
-        const b = cleanBusinessPayload(req.body);
+        return await runSystemContext(async () => {
+            // Registration is public, but the startup migration should already have run.
+            // Keep this defensive check for manually invoked/embedded server startup.
+            await ensureBusinessTable();
+            const client = await pool.connect();
+            try {
+                const b = cleanBusinessPayload(req.body);
         const username = String(req.body.username || '').trim().toLowerCase();
         const password = String(req.body.password || '');
         if (!b.businessName || !b.ownerName || !username || !password) {
@@ -744,11 +885,6 @@ app.post('/api/public/register-business', async (req, res) => {
         if (!/^[a-z0-9._-]{3,100}$/.test(username)) return res.status(400).json({ error: 'Username may contain only letters, numbers, dot, underscore and hyphen' });
 
         await client.query('BEGIN');
-        const existingUser = await client.query('SELECT id FROM app_users WHERE LOWER(username)=$1 LIMIT 1', [username]);
-        if (existingUser.rows.length) {
-            await client.query('ROLLBACK');
-            return res.status(409).json({ error: 'Username already exists' });
-        }
 
         // Business authentication is handled by app_users. Legacy business.password_hash
         // columns are kept nullable by ensureBusinessTable() for backwards compatibility.
@@ -758,15 +894,8 @@ app.post('/api/public/register-business', async (req, res) => {
             RETURNING *
         `, [makeBusinessCode(b.businessName),b.businessName,b.businessType,b.ownerName,b.phone,b.email,b.address,b.city,b.state,b.gstin,b.logoUrl,b.currency])).rows[0];
 
-        let adminProfile = (await client.query(`SELECT id FROM access_profiles WHERE name='Admin' LIMIT 1`)).rows[0];
-        // Be defensive for databases where the access seed has not yet created Admin.
-        if (!adminProfile) {
-            const profileResult = await client.query(
-                `INSERT INTO access_profiles (name, description, permissions) VALUES ('Admin','Full system access',$1::jsonb) RETURNING id`,
-                [JSON.stringify(allPermissionsServer())]
-            );
-            adminProfile = profileResult.rows[0];
-        }
+        await seedBusinessAccessProfiles(business.id);
+        const adminProfile = (await client.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name='Admin' LIMIT 1`, [business.id])).rows[0];
 
         const user = (await client.query(`
             INSERT INTO app_users (display_name,username,password_hash,profile_id,business_id,active)
@@ -777,17 +906,28 @@ app.post('/api/public/register-business', async (req, res) => {
         await client.query('COMMIT');
         try { await seedTenantDefaults(business.id); }
         catch (seedError) { console.error('⚠️ Could not seed tenant defaults:', seedError.message); }
-        res.status(201).json({ success: true, business, user });
+        const license = await ensureTrialLicense(business.id);
+        const initialKey = await createDeviceRegistrationKey(business.id, {
+            deviceName: 'Initial Device',
+            createdByType: 'system',
+            expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+        });
+        res.status(201).json({ success: true, business, user, license, initialRegistrationKey: initialKey.rawKey });
+            } catch (e) {
+                try { await client.query('ROLLBACK'); } catch (_) {}
+                console.error('Business registration error:', e);
+                const detail = process.env.NODE_ENV === 'production'
+                    ? 'Could not create business profile'
+                    : `Could not create business profile: ${e.message}`;
+                const status = e?.code === '23505' ? 409 : 500;
+                res.status(status).json({ error: status === 409 ? 'Username already exists' : detail });
+            } finally {
+                client.release();
+            }
+        });
     } catch (e) {
-        try { await client.query('ROLLBACK'); } catch (_) {}
-        console.error('Business registration error:', e);
-        const detail = process.env.NODE_ENV === 'production'
-            ? 'Could not create business profile'
-            : `Could not create business profile: ${e.message}`;
-        const status = e?.code === '23505' ? 409 : 500;
-        res.status(status).json({ error: status === 409 ? 'Username already exists' : detail });
-    } finally {
-        client.release();
+        console.error('Business registration wrapper error:', e);
+        if (!res.headersSent) res.status(500).json({ error: 'Could not create business profile' });
     }
 });
 
@@ -807,51 +947,65 @@ app.post("/api/auth/login", async (req,res)=>{
         const username=String(req.body.username||"").trim().toLowerCase();
         const password=String(req.body.password||"");
         if(!username||!password) return res.status(400).json({error:"Username and password are required"});
-        const r=await pool.query(`SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,
-            b.business_code,b.business_name,b.business_type,b.owner_name,b.phone AS business_phone,b.email AS business_email,
-            b.address AS business_address,b.city,b.state,b.gstin,b.logo_url,b.currency,b.active AS business_active,
-            p.name AS profile_name,COALESCE(p.permissions,'{}'::jsonb) AS permissions
+
+        const deviceId = getCookie(req, "cafe_device_id");
+        if (!deviceId) {
+            return res.status(403).json({ error: "This device is not registered. Enter a registration key first.", code: "DEVICE_NOT_REGISTERED" });
+        }
+
+        let deviceLicense;
+        try {
+            deviceLicense = await assertActiveDeviceAndLicense(deviceId);
+        } catch (e) {
+            return res.status(403).json({
+                error: e.message || "Device or license validation failed",
+                code: e.code || "AUTH_VALIDATION_FAILED"
+            });
+        }
+
+        const businessId = Number(deviceLicense.device.business_id);
+        const r = await tenantContext.run({ businessId }, () => pool.query(`
+            SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,
+                b.business_code,b.business_name,b.business_type,b.owner_name,b.phone AS business_phone,b.email AS business_email,
+                b.address AS business_address,b.city,b.state,b.gstin,b.logo_url,b.currency,b.active AS business_active,
+                p.name AS profile_name,COALESCE(p.permissions,'{}'::jsonb) AS permissions
             FROM app_users u
             LEFT JOIN businesses b ON b.id=u.business_id
-            LEFT JOIN access_profiles p ON p.id=u.profile_id
-            WHERE LOWER(u.username)=$1 LIMIT 1`,[username]);
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+            WHERE LOWER(u.username)=$1 AND u.business_id=$2
+            LIMIT 1`,[username,businessId]));
         const user=r.rows[0];
         if(!user||!user.active||!verifyPassword(password,user.password_hash)) return res.status(401).json({error:"Invalid username or password"});
         delete user.password_hash;
-        const session = await createSession(user);
-
-res.json({
-    success: true,
-    token: session.token,
-    user,
-    expiresAt: session.expiresAt
-});
+        const session = await createSession(user, deviceLicense.device);
+        setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "Lax", secure: true });
+        res.json({ success: true, token: session.token, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
 });
+
 app.get("/api/auth/me",async(req,res)=>{
-    try{const session = await getSessionUser(req);if(!session)return res.status(401).json({error:"Not logged in"});const user=await loadSessionUser(session);if(!user)return res.status(401).json({error:"Session is invalid"});res.json({user,expiresAt: session.expiresAt});}
-    catch(e){res.status(500).json({error:"Could not read session"});}
+    try{
+        const session = await getSessionUser(req);
+        if(!session)return res.status(401).json({error:"Not logged in"});
+        const user=await loadSessionUser(session);
+        if(!user)return res.status(401).json({error:"Session is invalid"});
+        const {device,license} = await assertActiveDeviceAndLicense(session.deviceId, user.business_id);
+        res.json({user,device,license,expiresAt: session.expiresAt});
+    } catch(e){res.status(403).json({error:e.message || "Could not read session", code:e.code || "AUTH_VALIDATION_FAILED"});}
 });
+
 app.post("/api/auth/logout", async (req, res) => {
     try {
         const session = await getSessionUser(req);
-
-        if (session) {
-            await pool.query(
-                `DELETE FROM app_sessions WHERE token = $1`,
-                [session.token]
-            );
-        }
-
+        if (session) await pool.query(`DELETE FROM app_sessions WHERE token = $1`, [session.token]);
+        clearCookie(res, "cafe_session");
         res.json({ success: true });
-
     } catch (e) {
         console.error("Logout error:", e);
-        res.status(500).json({
-            error: "Logout failed"
-        });
+        res.status(500).json({ error: "Logout failed" });
     }
 });
+
 app.use("/api", requireAuth);
 
 // =====================================================
@@ -5119,7 +5273,7 @@ app.get('/api/system/deployment-check', async (_,res)=>{
 
 const ACCESS_MODULES_SERVER = [
     "dashboard", "orders", "new_order", "reservations", "tables",
-    "kitchen", "menu", "customers", "payments", "reports", "settings", "access", "expenses", "loyalty", "backup", "invoice_designer", "advanced_reports", "deployment"
+    "kitchen", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "backup", "invoice_designer", "advanced_reports", "deployment"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
 
@@ -5157,7 +5311,8 @@ async function ensureAccessTables() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS access_profiles (
             id SERIAL PRIMARY KEY,
-            name VARCHAR(100) NOT NULL UNIQUE,
+            name VARCHAR(100) NOT NULL,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             description TEXT,
             permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -5169,64 +5324,59 @@ async function ensureAccessTables() {
         CREATE TABLE IF NOT EXISTS app_users (
             id SERIAL PRIMARY KEY,
             display_name VARCHAR(150) NOT NULL,
-            username VARCHAR(100) NOT NULL UNIQUE,
-            password_hash TEXT,
+            username VARCHAR(100) NOT NULL,
             profile_id INTEGER REFERENCES access_profiles(id) ON DELETE SET NULL,
             active BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            password_hash TEXT,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL
         )
     `);
 
+    await pool.query(`ALTER TABLE access_profiles ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT`);
-
-    const adminProfile = await pool.query(`SELECT id FROM access_profiles WHERE name = 'Admin' LIMIT 1`);
-    let adminProfileId = adminProfile.rows[0]?.id;
-    if (!adminProfileId) {
-        const r = await pool.query(`INSERT INTO access_profiles (name, description, permissions) VALUES ('Admin','Full system access',$1::jsonb) RETURNING id`, [JSON.stringify(allPermissionsServer())]);
-        adminProfileId = r.rows[0].id;
-    }
-    const managerProfile = await pool.query(`SELECT id FROM access_profiles WHERE name = 'Manager' LIMIT 1`);
-    let managerProfileId = managerProfile.rows[0]?.id;
-    if (!managerProfileId) {
-        const r = await pool.query(`INSERT INTO access_profiles (name, description, permissions) VALUES ('Manager','Operational access without full administration',$1::jsonb) RETURNING id`, [JSON.stringify(managerPermissionsServer())]);
-        managerProfileId = r.rows[0].id;
-    }
-    const cashierPermissions = defaultPermissionsServer();
-    ["dashboard.view","new_order.view","new_order.create","customers.view","customers.create","payments.view","payments.create","orders.view","kitchen.view","kitchen.print"].forEach(k=>cashierPermissions[k]=true);
-    const cashierProfile = await pool.query(`SELECT id FROM access_profiles WHERE name = 'Cashier' LIMIT 1`);
-    let cashierProfileId = cashierProfile.rows[0]?.id;
-    if (!cashierProfileId) {
-        const r = await pool.query(`INSERT INTO access_profiles (name, description, permissions) VALUES ('Cashier','Counter and cashier access',$1::jsonb) RETURNING id`, [JSON.stringify(cashierPermissions)]);
-        cashierProfileId = r.rows[0].id;
-    }
-    // Backfill the new KOT Groups permissions for the built-in Manager profile without touching custom roles.
-    await pool.query(`UPDATE access_profiles SET permissions = permissions || jsonb_build_object(
-        'kot_groups.view', true, 'kot_groups.create', true, 'kot_groups.edit', true
-    ), updated_at=CURRENT_TIMESTAMP WHERE name='Manager'`);
-
-    const seeds = [
-        ['Administrator','admin',adminProfileId,'admin123'],
-        ['Manager','manager',managerProfileId,'manager123'],
-        ['Cashier','cashier',cashierProfileId,'cashier123']
-    ];
-    for (const [displayName,username,profileId,password] of seeds) {
-        await pool.query(`INSERT INTO app_users (display_name,username,password_hash,profile_id,active) VALUES ($1,$2,$3,$4,TRUE) ON CONFLICT (username) DO UPDATE SET profile_id=EXCLUDED.profile_id,active=TRUE,password_hash=COALESCE(app_users.password_hash,EXCLUDED.password_hash),updated_at=CURRENT_TIMESTAMP`, [displayName,username,hashPassword(password),profileId]);
-    }
-    console.log("✅ Access tables ready");
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
+    console.log("✅ Access table structure ready");
 }
 
-app.get("/api/access", async (_, res) => {
+function builtInProfileDefinitions() {
+    return [
+        { name: "Admin", description: "Full system access", permissions: allPermissionsServer() },
+        { name: "Manager", description: "Operational access without full administration", permissions: managerPermissionsServer() },
+        { name: "Cashier", description: "Counter and cashier access", permissions: (() => {
+            const p = defaultPermissionsServer();
+            ["dashboard.view","new_order.view","new_order.create","customers.view","customers.create","payments.view","payments.create","orders.view","kitchen.view","kitchen.print"].forEach(k => p[k] = true);
+            return p;
+        })() }
+    ];
+}
+
+async function seedBusinessAccessProfiles(businessId) {
+    const id = Number(businessId);
+    if (!id) throw new Error("Business id is required for access profile seed");
+    for (const profile of builtInProfileDefinitions()) {
+        await pool.query(`
+            INSERT INTO access_profiles (name,business_id,description,permissions)
+            VALUES ($1,$2,$3,$4::jsonb)
+            ON CONFLICT (business_id,name) DO NOTHING
+        `, [profile.name, id, profile.description, JSON.stringify(profile.permissions)]);
+    }
+}
+
+app.get("/api/access", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const [users, profiles] = await Promise.all([
             pool.query(`
                 SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.created_at,
                        p.name AS profile_name
                 FROM app_users u
-                LEFT JOIN access_profiles p ON p.id = u.profile_id
+                LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+                WHERE u.business_id=$1
                 ORDER BY u.id
-            `),
-            pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles ORDER BY name`)
+            `, [businessId]),
+            pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles WHERE business_id=$1 ORDER BY name`, [businessId])
         ]);
         res.json({ users: users.rows, profiles: profiles.rows });
     } catch (e) {
@@ -5235,9 +5385,9 @@ app.get("/api/access", async (_, res) => {
     }
 });
 
-app.get("/api/access/profiles", async (_, res) => {
+app.get("/api/access/profiles", async (req, res) => {
     try {
-        const result = await pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles ORDER BY name`);
+        const result = await pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles WHERE business_id=$1 ORDER BY name`, [Number(req.user.business_id)]);
         res.json(result.rows);
     } catch (e) {
         res.status(500).json({ error: "Failed to load access profiles" });
@@ -5246,13 +5396,14 @@ app.get("/api/access/profiles", async (_, res) => {
 
 app.post("/api/access/profiles", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const name = String(req.body.name || "").trim();
         const description = String(req.body.description || "").trim();
         const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : defaultPermissionsServer();
         if (!name) return res.status(400).json({ error: "Profile name is required" });
         const result = await pool.query(
-            `INSERT INTO access_profiles (name, description, permissions) VALUES ($1,$2,$3::jsonb) RETURNING *`,
-            [name, description || null, JSON.stringify(permissions)]
+            `INSERT INTO access_profiles (name, business_id, description, permissions) VALUES ($1,$2,$3,$4::jsonb) RETURNING *`,
+            [name, businessId, description || null, JSON.stringify(permissions)]
         );
         res.status(201).json({ success: true, profile: result.rows[0] });
     } catch (e) {
@@ -5264,16 +5415,21 @@ app.post("/api/access/profiles", async (req, res) => {
 app.put("/api/access/profiles/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
+        const businessId = Number(req.user.business_id);
         if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid profile ID" });
-        const current = await pool.query(`SELECT name FROM access_profiles WHERE id=$1`, [id]);
+        const current = await pool.query(`SELECT * FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "Access profile not found" });
-        const name = String(req.body.name ?? current.rows[0].name).trim();
-        const description = String(req.body.description ?? "").trim();
-        const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : defaultPermissionsServer();
+        const old = current.rows[0];
+        if (old.name === "Admin" && req.user.profile_name === "Admin") {
+            // Admin may adjust permissions, but the profile itself remains protected.
+        }
+        const name = String(req.body.name ?? old.name).trim();
+        const description = String(req.body.description ?? old.description ?? "").trim();
+        const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : old.permissions;
         if (!name) return res.status(400).json({ error: "Profile name is required" });
         const result = await pool.query(
-            `UPDATE access_profiles SET name=$1, description=$2, permissions=$3::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=$4 RETURNING *`,
-            [name, description || null, JSON.stringify(permissions), id]
+            `UPDATE access_profiles SET name=$1, description=$2, permissions=$3::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=$4 AND business_id=$5 RETURNING *`,
+            [name, description || null, JSON.stringify(permissions), id, businessId]
         );
         res.json({ success: true, profile: result.rows[0] });
     } catch (e) {
@@ -5285,10 +5441,11 @@ app.put("/api/access/profiles/:id", async (req, res) => {
 app.delete("/api/access/profiles/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
-        const profile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1`, [id]);
+        const businessId = Number(req.user.business_id);
+        const profile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!profile.rows.length) return res.status(404).json({ error: "Access profile not found" });
         if (profile.rows[0].name === "Admin") return res.status(400).json({ error: "The Admin profile cannot be deleted" });
-        await pool.query(`DELETE FROM access_profiles WHERE id=$1`, [id]);
+        await pool.query(`DELETE FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: "Failed to delete access profile" });
@@ -5297,14 +5454,15 @@ app.delete("/api/access/profiles/:id", async (req, res) => {
 
 app.get("/api/access/users", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const result = await pool.query(`
             SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.created_at,
                    p.name AS profile_name
             FROM app_users u
-            LEFT JOIN access_profiles p ON p.id=u.profile_id
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
             WHERE u.business_id=$1
             ORDER BY u.id
-        `, [Number(req.user.business_id)]);
+        `, [businessId]);
         res.json(result.rows);
     } catch (e) {
         res.status(500).json({ error: "Failed to load users" });
@@ -5315,20 +5473,23 @@ app.post("/api/access/users", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
         const displayName = String(req.body.displayName || "").trim();
-        const username = String(req.body.username || "").trim();
+        const username = String(req.body.username || "").trim().toLowerCase();
         const profileId = req.body.profileId === null || req.body.profileId === undefined || req.body.profileId === "" ? null : Number(req.body.profileId);
         const active = req.body.active !== false;
         const password = String(req.body.password || "");
         if (!displayName || !username) return res.status(400).json({ error: "Display name and username are required" });
         if (!password || password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
-        if (profileId !== null && (!Number.isInteger(profileId) || profileId <= 0)) return res.status(400).json({ error: "Invalid access profile" });
+        if (profileId !== null) {
+            const profile = await pool.query(`SELECT id FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
+            if (!profile.rows.length) return res.status(400).json({ error: "Invalid access profile" });
+        }
         const result = await pool.query(
             `INSERT INTO app_users (display_name, username, password_hash, profile_id, business_id, active) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
             [displayName, username, hashPassword(password), profileId, businessId, active]
         );
         res.status(201).json({ success: true, user: result.rows[0] });
     } catch (e) {
-        if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists" });
+        if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists in this business" });
         res.status(500).json({ error: "Failed to create user" });
     }
 });
@@ -5336,37 +5497,44 @@ app.post("/api/access/users", async (req, res) => {
 app.put("/api/access/users/:id", async (req, res) => {
     try {
         const id = Number(req.params.id);
+        const businessId = Number(req.user.business_id);
         if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid user ID" });
-        const current = await pool.query(`SELECT * FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
+        const current = await pool.query(`SELECT * FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "User not found" });
         const old = current.rows[0];
         const displayName = req.body.displayName === undefined ? old.display_name : String(req.body.displayName).trim();
-        const username = req.body.username === undefined ? old.username : String(req.body.username).trim();
+        const username = req.body.username === undefined ? old.username : String(req.body.username).trim().toLowerCase();
         const profileId = req.body.profileId === undefined ? old.profile_id : (req.body.profileId === null || req.body.profileId === "" ? null : Number(req.body.profileId));
         const active = req.body.active === undefined ? old.active : Boolean(req.body.active);
         const password = String(req.body.password || "");
         if (!displayName || !username) return res.status(400).json({ error: "Display name and username are required" });
         if (password && password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+        if (profileId !== null) {
+            const profile = await pool.query(`SELECT id FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
+            if (!profile.rows.length) return res.status(400).json({ error: "Invalid access profile" });
+        }
         const result = await pool.query(
             password
                 ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
                 : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
-            password ? [displayName,username,hashPassword(password),profileId,active,id,Number(req.user.business_id)] : [displayName,username,profileId,active,id,Number(req.user.business_id)]
+            password ? [displayName,username,hashPassword(password),profileId,active,id,businessId] : [displayName,username,profileId,active,id,businessId]
         );
         res.json({ success: true, user: result.rows[0] });
     } catch (e) {
-        if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists" });
+        if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists in this business" });
         res.status(500).json({ error: "Failed to update user" });
     }
 });
 
 app.delete("/api/access/users/:id", async (req, res) => {
     try {
+        const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
-        const user = await pool.query(`SELECT username FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
+        const user = await pool.query(`SELECT id, username, profile_id FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!user.rows.length) return res.status(404).json({ error: "User not found" });
-        if (user.rows[0].username === "admin") return res.status(400).json({ error: "The admin user cannot be deleted" });
-        await pool.query(`DELETE FROM app_users WHERE id=$1 AND business_id=$2`, [id, Number(req.user.business_id)]);
+        const profile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1 AND business_id=$2`, [user.rows[0].profile_id, businessId]);
+        if (profile.rows[0]?.name === "Admin") return res.status(400).json({ error: "The Admin user cannot be deleted" });
+        await pool.query(`DELETE FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: "Failed to delete user" });
@@ -5545,6 +5713,599 @@ async function seedTenantDefaults(businessId) {
     });
 }
 
+
+// =====================================================
+// PHASE 2B — AUTH / DEVICE / LICENSE ISOLATION
+// =====================================================
+async function dropSingleColumnUniqueConstraints(tableName, columnName) {
+    const constraints = await pool.query(`
+        SELECT tc.constraint_name
+        FROM information_schema.table_constraints tc
+        WHERE tc.table_schema='public'
+          AND tc.table_name=$1
+          AND tc.constraint_type='UNIQUE'
+          AND (SELECT COUNT(*) FROM information_schema.constraint_column_usage c2
+               WHERE c2.constraint_schema=tc.constraint_schema
+                 AND c2.constraint_name=tc.constraint_name)=1
+          AND EXISTS (SELECT 1 FROM information_schema.constraint_column_usage c1
+                      WHERE c1.constraint_schema=tc.constraint_schema
+                        AND c1.constraint_name=tc.constraint_name
+                        AND c1.column_name=$2)
+    `, [tableName, columnName]);
+    const safeTable = String(tableName).replace(/"/g, '""');
+    for (const row of constraints.rows) {
+        const safeConstraint = String(row.constraint_name).replace(/"/g, '""');
+        await pool.query(`ALTER TABLE "${safeTable}" DROP CONSTRAINT IF EXISTS "${safeConstraint}"`);
+    }
+}
+
+async function enableTenantRls(tableName) {
+    const safeTable = String(tableName).replace(/"/g, '""');
+    await pool.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
+    await pool.query(`ALTER TABLE "${safeTable}" FORCE ROW LEVEL SECURITY`);
+    await pool.query(`DROP POLICY IF EXISTS tenant_isolation ON "${safeTable}"`);
+    await pool.query(`CREATE POLICY tenant_isolation ON "${safeTable}"
+        USING (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)
+        WITH CHECK (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)`);
+}
+
+async function ensureLicenseTables() {
+    console.log('🔐 Phase 2B: ensuring license/device tables');
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS business_licenses (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            plan VARCHAR(60) NOT NULL DEFAULT 'Trial',
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            starts_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMPTZ NOT NULL,
+            max_devices INTEGER NOT NULL DEFAULT 1,
+            notes TEXT,
+            created_by_support_user_id INTEGER,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            revoked_at TIMESTAMPTZ
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS registered_devices (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            license_id INTEGER REFERENCES business_licenses(id) ON DELETE SET NULL,
+            device_id VARCHAR(128) NOT NULL UNIQUE,
+            device_name VARCHAR(160) NOT NULL DEFAULT 'POS Device',
+            device_type VARCHAR(60) NOT NULL DEFAULT 'Web',
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            registration_key_id INTEGER,
+            registered_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            last_ip VARCHAR(120),
+            user_agent TEXT,
+            revoked_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS device_registration_keys (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+            license_id INTEGER REFERENCES business_licenses(id) ON DELETE SET NULL,
+            key_hash VARCHAR(128) NOT NULL UNIQUE,
+            key_hint VARCHAR(20) NOT NULL,
+            device_name VARCHAR(160),
+            status VARCHAR(20) NOT NULL DEFAULT 'unused',
+            created_by_type VARCHAR(20) NOT NULL DEFAULT 'admin',
+            created_by_user_id INTEGER,
+            expires_at TIMESTAMPTZ,
+            used_at TIMESTAMPTZ,
+            used_device_id INTEGER,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`ALTER TABLE registered_devices ADD COLUMN IF NOT EXISTS registration_key_id INTEGER`);
+    await pool.query(`ALTER TABLE registered_devices ADD COLUMN IF NOT EXISTS license_id INTEGER REFERENCES business_licenses(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE device_registration_keys ADD COLUMN IF NOT EXISTS license_id INTEGER REFERENCES business_licenses(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE device_registration_keys ADD COLUMN IF NOT EXISTS used_device_id INTEGER`);
+
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_business_licenses_business_id
+        ON business_licenses(business_id, id DESC)
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_registered_devices_business_id
+        ON registered_devices(business_id, status)
+    `);
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_device_registration_keys_business_id
+        ON device_registration_keys(business_id, status)
+    `);
+
+    await enableTenantRls('business_licenses');
+    await enableTenantRls('registered_devices');
+    await enableTenantRls('device_registration_keys');
+
+    // Support infrastructure is deliberately NOT tenant RLS-scoped.
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS support_users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(100) NOT NULL UNIQUE,
+            display_name VARCHAR(150) NOT NULL DEFAULT 'Support',
+            password_hash TEXT NOT NULL,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS support_sessions (
+            token VARCHAR(128) PRIMARY KEY,
+            support_user_id INTEGER NOT NULL REFERENCES support_users(id) ON DELETE CASCADE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_sessions_expires_at ON support_sessions(expires_at)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_sessions_user_id ON support_sessions(support_user_id)`);
+
+    const supportUsername = String(process.env.SUPPORT_USERNAME || '').trim().toLowerCase();
+    const supportPassword = String(process.env.SUPPORT_PASSWORD || '');
+    if (supportUsername && supportPassword) {
+        const existing = await pool.query(`SELECT id FROM support_users WHERE username=$1 LIMIT 1`, [supportUsername]);
+        if (!existing.rows.length) {
+            await pool.query(`INSERT INTO support_users(username,display_name,password_hash,active) VALUES($1,$2,$3,TRUE)`, [supportUsername, 'Cafe POS Support', hashPassword(supportPassword)]);
+            console.log(`✅ Support account created for ${supportUsername}`);
+        }
+    } else {
+        console.warn('⚠️ SUPPORT_USERNAME / SUPPORT_PASSWORD not configured; support login will be unavailable until they are set.');
+    }
+
+    await ensureTrialLicensesForBusinesses();
+    console.log('✅ Phase 2B license/device tables ready');
+}
+
+async function ensureTrialLicensesForBusinesses() {
+    const businesses = await runSystemContext(() => pool.query(`SELECT id FROM businesses WHERE active=TRUE ORDER BY id`));
+    const trialDays = Math.max(1, Number(process.env.AUTO_TRIAL_DAYS || 30));
+    const maxDevices = Math.max(1, Number(process.env.AUTO_TRIAL_MAX_DEVICES || 1));
+    for (const row of businesses.rows) {
+        const existing = await runSystemContext(() => pool.query(`SELECT id FROM business_licenses WHERE business_id=$1 ORDER BY id DESC LIMIT 1`, [row.id]));
+        if (!existing.rows.length) {
+            await runSystemContext(() => pool.query(`
+                INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes)
+                VALUES($1,'Trial','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + ($2 || ' days')::interval,$3,'Automatically created trial license')
+            `, [Number(row.id), trialDays, maxDevices]));
+        }
+    }
+}
+
+async function seedAllBusinessAccessProfiles() {
+    const businesses = await rawPoolQuery(`SELECT id FROM businesses ORDER BY id`);
+    for (const row of businesses.rows) await seedBusinessAccessProfiles(Number(row.id));
+}
+
+async function ensurePhase2BAuthIsolation() {
+    console.log('🔐 Phase 2B: tenant-scoping users and access profiles');
+
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
+    await pool.query(`UPDATE app_users SET business_id=$1 WHERE business_id IS NULL`, [systemBusinessId]);
+    await pool.query(`ALTER TABLE app_users ALTER COLUMN business_id SET NOT NULL`);
+    await dropSingleColumnUniqueConstraints('app_users', 'username');
+    await pool.query(`DROP INDEX IF EXISTS app_users_username_key`);
+
+    // Preserve one canonical user per business/username before enforcing the
+    // tenant-scoped unique index. Older databases may contain duplicates.
+    const duplicateUsers = await rawPoolQuery(`
+        SELECT id, business_id, username
+        FROM (
+            SELECT id, business_id, username,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY business_id, LOWER(BTRIM(username))
+                       ORDER BY
+                           CASE WHEN password_hash IS NOT NULL AND BTRIM(password_hash) <> '' THEN 0 ELSE 1 END,
+                           CASE WHEN active THEN 0 ELSE 1 END,
+                           updated_at DESC NULLS LAST,
+                           id ASC
+                   ) AS rn
+            FROM app_users
+            WHERE business_id IS NOT NULL
+        ) ranked
+        WHERE rn > 1
+        ORDER BY business_id, LOWER(BTRIM(username)), id
+    `);
+    for (const row of duplicateUsers.rows) {
+        const base = String(row.username || 'user').trim() || 'user';
+        const legacyUsername = `${base}__legacy_${row.id}`;
+        await rawPoolQuery(
+            `UPDATE app_users SET username=$1, active=FALSE, updated_at=CURRENT_TIMESTAMP WHERE id=$2`,
+            [legacyUsername, Number(row.id)]
+        );
+        console.log(`⚠️ Preserved duplicate user #${row.id} as ${legacyUsername}`);
+    }
+
+    await pool.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_business_username
+        ON app_users(business_id, LOWER(username))
+    `);
+
+    await pool.query(`ALTER TABLE access_profiles ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
+    await dropSingleColumnUniqueConstraints('access_profiles', 'name');
+    await pool.query(`DROP INDEX IF EXISTS access_profiles_name_key`);
+
+    // Assign legacy global profiles to the first business.
+    await pool.query(`UPDATE access_profiles SET business_id=$1 WHERE business_id IS NULL`, [systemBusinessId]);
+    const businesses = (await rawPoolQuery(`SELECT id FROM businesses ORDER BY id`)).rows.map(r => Number(r.id));
+    const sourceProfiles = (await rawPoolQuery(`SELECT id,name,description,permissions FROM access_profiles WHERE business_id=$1 ORDER BY id`, [systemBusinessId])).rows;
+
+    for (const businessId of businesses) {
+        if (businessId === Number(systemBusinessId)) continue;
+        for (const profile of sourceProfiles) {
+            await rawPoolQuery(`
+                INSERT INTO access_profiles(name,business_id,description,permissions)
+                VALUES($1,$2,$3,$4::jsonb)
+                ON CONFLICT DO NOTHING
+            `, [profile.name,businessId,profile.description,JSON.stringify(profile.permissions || {})]);
+        }
+        for (const profile of sourceProfiles) {
+            const target = await rawPoolQuery(`SELECT id FROM access_profiles WHERE business_id=$1 AND name=$2 LIMIT 1`, [businessId, profile.name]);
+            if (target.rows[0]) {
+                await rawPoolQuery(`UPDATE app_users SET profile_id=$1 WHERE business_id=$2 AND profile_id=$3`, [target.rows[0].id,businessId,profile.id]);
+            }
+        }
+    }
+
+    // Create the exact constraint needed by seedBusinessAccessProfiles()
+    // BEFORE using ON CONFLICT (business_id,name).
+    await pool.query(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_profiles_business_name
+        ON access_profiles(business_id,name)
+    `);
+
+    await seedAllBusinessAccessProfiles();
+    await pool.query(`ALTER TABLE access_profiles ALTER COLUMN business_id SET NOT NULL`);
+
+    await enableTenantRls('app_users');
+    await enableTenantRls('access_profiles');
+    console.log('✅ Phase 2B user/profile tenant isolation ready');
+}
+
+function normaliseRegistrationKey(raw) {
+    return String(raw || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function hashRegistrationKey(raw) {
+    return crypto.createHash('sha256').update(normaliseRegistrationKey(raw)).digest('hex');
+}
+
+function generateRegistrationKey() {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const bytes = crypto.randomBytes(16);
+    let raw = '';
+    for (const byte of bytes) raw += alphabet[byte % alphabet.length];
+    return `${raw.slice(0,4)}-${raw.slice(4,8)}-${raw.slice(8,12)}-${raw.slice(12,16)}`;
+}
+
+async function ensureTrialLicense(businessId) {
+    const id = Number(businessId);
+    const existing = await runSystemContext(() => pool.query(`SELECT * FROM business_licenses WHERE business_id=$1 ORDER BY id DESC LIMIT 1`, [id]));
+    if (existing.rows[0]) return existing.rows[0];
+
+    const trialDays = Math.max(1, Number(process.env.AUTO_TRIAL_DAYS || 30));
+    const maxDevices = Math.max(1, Number(process.env.AUTO_TRIAL_MAX_DEVICES || 1));
+    const r = await runSystemContext(() => pool.query(`
+        INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes)
+        VALUES($1,'Trial','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + ($2 || ' days')::interval,$3,'Automatically created trial license')
+        RETURNING *
+    `, [id, trialDays, maxDevices]));
+    return r.rows[0];
+}
+
+async function createDeviceRegistrationKey(businessId, options = {}) {
+    const id = Number(businessId);
+    const license = options.license || await ensureTrialLicense(id);
+    if (!license || license.status !== 'active' || new Date(license.expires_at).getTime() < Date.now()) {
+        throw new Error('An active license is required to generate a device registration key');
+    }
+
+    const activeDeviceCount = await runSystemContext(() => pool.query(`SELECT COUNT(*)::int AS count FROM registered_devices WHERE business_id=$1 AND status='active'`, [id]));
+    if (Number(activeDeviceCount.rows[0].count) >= Number(license.max_devices)) {
+        throw new Error(`Device limit reached (${license.max_devices})`);
+    }
+
+    let rawKey, keyHash;
+    for (let i = 0; i < 5; i++) {
+        rawKey = generateRegistrationKey();
+        keyHash = hashRegistrationKey(rawKey);
+        const exists = await runSystemContext(() => pool.query(`SELECT 1 FROM device_registration_keys WHERE key_hash=$1 LIMIT 1`, [keyHash]));
+        if (!exists.rows.length) break;
+    }
+
+    const expiresAt = options.expiresAt || new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const r = await runSystemContext(() => pool.query(`
+        INSERT INTO device_registration_keys(
+            business_id,license_id,key_hash,key_hint,device_name,status,created_by_type,created_by_user_id,expires_at
+        ) VALUES($1,$2,$3,$4,$5,'unused',$6,$7,$8)
+        RETURNING id,business_id,license_id,key_hint,device_name,status,expires_at,created_at
+    `, [
+        id, license.id, keyHash,
+        `${rawKey.slice(0,4)}…${rawKey.slice(-4)}`,
+        String(options.deviceName || 'POS Device').trim() || 'POS Device',
+        String(options.createdByType || 'admin'),
+        options.createdByUserId ? Number(options.createdByUserId) : null,
+        expiresAt
+    ]));
+    return { ...r.rows[0], rawKey };
+}
+
+async function registerDeviceFromKey(req, res) {
+    try {
+        const rawKey = String(req.body.registrationKey || '').trim();
+        const deviceName = String(req.body.deviceName || 'POS Device').trim() || 'POS Device';
+        const deviceType = String(req.body.deviceType || 'Web').trim() || 'Web';
+        if (!rawKey) return res.status(400).json({ error: 'Registration key is required' });
+
+        let deviceId = getCookie(req, 'cafe_device_id');
+        if (!deviceId) deviceId = crypto.randomBytes(32).toString('hex');
+
+        return await runSystemContext(async () => {
+            const keyHash = hashRegistrationKey(rawKey);
+            const result = await pool.query(`
+                SELECT k.*, l.status AS license_status, l.starts_at, l.expires_at, l.max_devices, b.business_name, b.business_code, b.active AS business_active
+                FROM device_registration_keys k
+                JOIN business_licenses l ON l.id=k.license_id
+                JOIN businesses b ON b.id=k.business_id
+                WHERE k.key_hash=$1
+                LIMIT 1
+            `, [keyHash]);
+            const key = result.rows[0];
+            if (!key) return res.status(404).json({ error: 'Invalid registration key' });
+            if (key.status !== 'unused') return res.status(409).json({ error: 'This registration key has already been used or revoked' });
+            if (key.expires_at && new Date(key.expires_at).getTime() < Date.now()) {
+                await pool.query(`UPDATE device_registration_keys SET status='expired' WHERE id=$1`, [key.id]);
+                return res.status(410).json({ error: 'This registration key has expired' });
+            }
+            if (!key.business_active) return res.status(403).json({ error: 'Business account is inactive' });
+            if (key.license_status !== 'active' || new Date(key.expires_at).getTime() < Date.now()) {
+                return res.status(403).json({ error: 'Business license is not active' });
+            }
+
+            const existing = await pool.query(`SELECT * FROM registered_devices WHERE device_id=$1 LIMIT 1`, [deviceId]);
+            const count = await pool.query(`SELECT COUNT(*)::int AS count FROM registered_devices WHERE business_id=$1 AND status='active'`, [key.business_id]);
+            const activeCount = Number(count.rows[0].count);
+
+            if (existing.rows[0] && existing.rows[0].status === 'active') {
+                return res.status(409).json({ error: 'This device is already registered to a business.' });
+            }
+            if (activeCount >= Number(key.max_devices)) {
+                return res.status(409).json({ error: `Device limit reached (${key.max_devices})` });
+            }
+
+            let inserted;
+            if (existing.rows[0]) {
+                inserted = await pool.query(`
+                    UPDATE registered_devices
+                    SET business_id=$1,license_id=$2,device_name=$3,device_type=$4,status='active',registration_key_id=$5,
+                        registered_at=CURRENT_TIMESTAMP,last_seen_at=CURRENT_TIMESTAMP,last_ip=$6,user_agent=$7,revoked_at=NULL,updated_at=CURRENT_TIMESTAMP
+                    WHERE id=$8
+                    RETURNING id,business_id,license_id,device_id,device_name,device_type,status,registered_at,last_seen_at
+                `, [
+                    key.business_id, key.license_id, deviceName, deviceType, key.id,
+                    String(req.ip || ''), String(req.headers['user-agent'] || ''), existing.rows[0].id
+                ]);
+            } else {
+                inserted = await pool.query(`
+                    INSERT INTO registered_devices(
+                        business_id,license_id,device_id,device_name,device_type,status,registration_key_id,last_ip,user_agent
+                    ) VALUES($1,$2,$3,$4,$5,'active',$6,$7,$8)
+                    RETURNING id,business_id,license_id,device_id,device_name,device_type,status,registered_at,last_seen_at
+                `, [
+                    key.business_id, key.license_id, deviceId, deviceName, deviceType, key.id,
+                    String(req.ip || ''), String(req.headers['user-agent'] || '')
+                ]);
+            }
+
+            await pool.query(`UPDATE device_registration_keys SET status='used',used_at=CURRENT_TIMESTAMP,used_device_id=$1 WHERE id=$2`, [inserted.rows[0].id, key.id]);
+
+            setCookie(res, 'cafe_device_id', deviceId, { maxAge: 60 * 60 * 24 * 365, httpOnly: true, sameSite: 'Lax', secure: true });
+            return res.json({
+                success: true,
+                business: { id:key.business_id, business_code:key.business_code, business_name:key.business_name },
+                device: inserted.rows[0]
+            });
+        });
+    } catch (e) {
+        console.error('Device registration error:', e);
+        return res.status(500).json({ error: 'Device registration failed' });
+    }
+}
+
+// Public device registration — no user login required.
+app.post('/api/public/device/register', registerDeviceFromKey);
+
+// Support authentication and dashboard APIs live before the normal /api auth gate.
+const SUPPORT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+
+async function createSupportSession(userId) {
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
+    await pool.query(`INSERT INTO support_sessions(token,support_user_id,expires_at) VALUES($1,$2,$3)`, [token,userId,expiresAt]);
+    return { token, expiresAt: expiresAt.getTime() };
+}
+
+async function getSupportSession(req) {
+    let token = String(req.headers.authorization || '').startsWith('Bearer ')
+        ? String(req.headers.authorization || '').slice(7).trim()
+        : '';
+    if (!token) token = getCookie(req, 'cafe_support_session') || '';
+    if (!token) return null;
+    const r = await pool.query(`SELECT s.token,s.support_user_id,s.expires_at,u.username,u.display_name FROM support_sessions s JOIN support_users u ON u.id=s.support_user_id WHERE s.token=$1 LIMIT 1`, [token]);
+    const row = r.rows[0];
+    if (!row) return null;
+    const expiresAt = new Date(row.expires_at).getTime();
+    if (expiresAt < Date.now()) {
+        await pool.query(`DELETE FROM support_sessions WHERE token=$1`, [token]);
+        return null;
+    }
+    return row;
+}
+
+async function supportAuth(req, res, next) {
+    try {
+        const session = await getSupportSession(req);
+        if (!session) return res.status(401).json({ error: 'Support authentication required' });
+        req.supportUser = session;
+        next();
+    } catch (e) {
+        res.status(500).json({ error: 'Support authentication error' });
+    }
+}
+
+app.post('/api/support/login', async (req,res)=>{
+    try {
+        const username=String(req.body.username||'').trim().toLowerCase();
+        const password=String(req.body.password||'');
+        if(!username||!password) return res.status(400).json({error:'Support username and password are required'});
+        const r=await pool.query(`SELECT id,username,display_name,password_hash,active FROM support_users WHERE LOWER(username)=$1 LIMIT 1`,[username]);
+        const user=r.rows[0];
+        if(!user||!user.active||!verifyPassword(password,user.password_hash)) return res.status(401).json({error:'Invalid support credentials'});
+        const session=await createSupportSession(user.id);
+        setCookie(res,'cafe_support_session',session.token,{maxAge:Math.floor(SUPPORT_SESSION_TTL_MS/1000),httpOnly:true,sameSite:'Lax',secure:true});
+        res.json({success:true,token:session.token,user:{id:user.id,username:user.username,displayName:user.display_name},expiresAt:session.expiresAt});
+    }catch(e){console.error('Support login error:',e);res.status(500).json({error:'Support login failed'});}
+});
+
+app.post('/api/support/logout', supportAuth, async(req,res)=>{
+    try { await pool.query(`DELETE FROM support_sessions WHERE token=$1`,[req.supportUser.token]); clearCookie(res,'cafe_support_session'); res.json({success:true}); }
+    catch(e){res.status(500).json({error:'Support logout failed'});}
+});
+
+app.get('/api/support/me', supportAuth, async(req,res)=>res.json({user:{id:req.supportUser.support_user_id,username:req.supportUser.username,displayName:req.supportUser.display_name},expiresAt:new Date(req.supportUser.expires_at).getTime()}));
+
+app.get('/api/support/businesses', supportAuth, async(req,res)=>{
+    try {
+        const r = await runSystemContext(() => pool.query(`
+            SELECT b.id,b.business_code,b.business_name,b.business_type,b.owner_name,b.phone,b.email,b.active,b.created_at,
+                   l.id AS license_id,l.plan,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
+                   (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
+                   (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users
+            FROM businesses b
+            LEFT JOIN LATERAL (
+                SELECT * FROM business_licenses bl WHERE bl.business_id=b.id ORDER BY bl.id DESC LIMIT 1
+            ) l ON TRUE
+            ORDER BY b.id DESC
+        `));
+        res.json(r.rows);
+    } catch(e){console.error(e);res.status(500).json({error:'Failed to load businesses'});}
+});
+
+app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const plan=String(req.body.plan||'Professional').trim()||'Professional';
+        const status=['active','suspended','revoked','expired'].includes(String(req.body.status||'active')) ? String(req.body.status||'active') : 'active';
+        const startsAt=req.body.startsAt?new Date(req.body.startsAt):new Date();
+        const expiresAt=req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+365*24*60*60*1000);
+        const maxDevices=Math.max(1,Number(req.body.maxDevices||1));
+        if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(expiresAt.getTime()) || expiresAt<=startsAt) return res.status(400).json({error:'Invalid license dates'});
+        const result=await runSystemContext(async()=>{
+            await pool.query(`UPDATE business_licenses SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE business_id=$1 AND status='active'`,[businessId]);
+            return pool.query(`INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[businessId,plan,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
+        });
+        res.status(201).json({success:true,license:result.rows[0]});
+    }catch(e){res.status(500).json({error:e.message||'Failed to issue license'});}
+});
+
+app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
+    try {
+        const id=Number(req.params.id);
+        const current=(await runSystemContext(()=>pool.query(`SELECT * FROM business_licenses WHERE id=$1`,[id]))).rows[0];
+        if(!current)return res.status(404).json({error:'License not found'});
+        const status=req.body.status===undefined?current.status:String(req.body.status);
+        const plan=req.body.plan===undefined?current.plan:String(req.body.plan).trim();
+        const maxDevices=req.body.maxDevices===undefined?current.max_devices:Math.max(1,Number(req.body.maxDevices));
+        const startsAt=req.body.startsAt===undefined?current.starts_at:new Date(req.body.startsAt);
+        const expiresAt=req.body.expiresAt===undefined?current.expires_at:new Date(req.body.expiresAt);
+        if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
+        if(new Date(expiresAt)<=new Date(startsAt))return res.status(400).json({error:'Expiry must be after start date'});
+        const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,status=$2,starts_at=$3,expires_at=$4,max_devices=$5,notes=$6,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $2='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$7 RETURNING *`,[plan,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
+        res.json({success:true,license:r.rows[0]});
+    }catch(e){res.status(500).json({error:e.message||'Failed to update license'});}
+});
+
+app.get('/api/support/businesses/:id/devices', supportAuth, async(req,res)=>{
+    try {
+        const r=await runSystemContext(()=>pool.query(`SELECT d.id,d.business_id,d.device_id,d.device_name,d.device_type,d.status,d.registered_at,d.last_seen_at,d.last_ip,d.user_agent,l.plan,l.status AS license_status,l.expires_at FROM registered_devices d LEFT JOIN business_licenses l ON l.id=d.license_id WHERE d.business_id=$1 ORDER BY d.id DESC`,[Number(req.params.id)]));
+        res.json(r.rows);
+    }catch(e){res.status(500).json({error:'Failed to load devices'});}
+});
+
+app.post('/api/support/businesses/:id/registration-keys', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const key=await createDeviceRegistrationKey(businessId,{deviceName:String(req.body.deviceName||'POS Device').trim()||'POS Device',createdByType:'support',createdByUserId:req.supportUser.support_user_id,expiresAt:req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+24*60*60*1000)});
+        res.status(201).json({success:true,registrationKey:key});
+    }catch(e){res.status(400).json({error:e.message||'Failed to generate registration key'});}
+});
+
+app.post('/api/support/devices/:id/revoke', supportAuth, async(req,res)=>{
+    try {
+        const id=Number(req.params.id);
+        const r=await runSystemContext(()=>pool.query(`UPDATE registered_devices SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=$1 RETURNING id,business_id,device_name,status,revoked_at`,[id]));
+        if(!r.rows.length)return res.status(404).json({error:'Device not found'});
+        res.json({success:true,device:r.rows[0]});
+    }catch(e){res.status(500).json({error:'Failed to revoke device'});}
+});
+
+app.post('/api/support/registration-keys/:id/revoke', supportAuth, async(req,res)=>{
+    try {
+        const id=Number(req.params.id);
+        const r=await runSystemContext(()=>pool.query(`UPDATE device_registration_keys SET status='revoked' WHERE id=$1 AND status='unused' RETURNING id,business_id,key_hint,status`,[id]));
+        if(!r.rows.length)return res.status(404).json({error:'Unused registration key not found'});
+        res.json({success:true,key:r.rows[0]});
+    }catch(e){res.status(500).json({error:'Failed to revoke registration key'});}
+});
+
+// =====================================================
+// BUSINESS ADMIN DEVICE APIs
+// =====================================================
+app.get('/api/devices', async(req,res)=>{
+    try {
+        const businessId=Number(req.user.business_id);
+        const [devices,license]=await Promise.all([
+            pool.query(`SELECT id,device_name,device_type,status,registered_at,last_seen_at,last_ip FROM registered_devices WHERE business_id=$1 ORDER BY id DESC`,[businessId]),
+            getEffectiveLicense(businessId)
+        ]);
+        res.json({businessId,devices:devices.rows,license});
+    }catch(e){res.status(500).json({error:'Failed to load device information'});}
+});
+
+app.post('/api/devices/registration-keys', async(req,res)=>{
+    try {
+        const key=await createDeviceRegistrationKey(Number(req.user.business_id),{deviceName:String(req.body.deviceName||'POS Device').trim()||'POS Device',createdByType:'admin',createdByUserId:req.user.id,expiresAt:req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+24*60*60*1000)});
+        res.status(201).json({success:true,registrationKey:key});
+    }catch(e){res.status(400).json({error:e.message||'Failed to generate registration key'});}
+});
+
+app.post('/api/devices/:id/revoke', async(req,res)=>{
+    try {
+        const id=Number(req.params.id);
+        const businessId=Number(req.user.business_id);
+        const r=await pool.query(`UPDATE registered_devices SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND business_id=$2 RETURNING id,device_name,status,revoked_at`,[id,businessId]);
+        if(!r.rows.length)return res.status(404).json({error:'Device not found'});
+        res.json({success:true,device:r.rows[0]});
+    }catch(e){res.status(500).json({error:'Failed to revoke device'});}
+});
+
+app.get('/api/license/status', async(req,res)=>{
+    try { const license=await getEffectiveLicense(Number(req.user.business_id)); const count=await pool.query(`SELECT COUNT(*)::int AS count FROM registered_devices WHERE business_id=$1 AND status='active'`,[Number(req.user.business_id)]); res.json({license,activeDevices:Number(count.rows[0].count)}); }
+    catch(e){res.status(500).json({error:'Failed to read license status'});}
+});
+
 // =====================================================
 // START SERVER
 // =====================================================
@@ -5572,10 +6333,16 @@ async function startServer() {
         console.log('5/7 ensureBusinessTables');
         await ensureBusinessTables();
         console.log('✅ ensureBusinessTables complete');
-        console.log('6/7 ensureTenantIsolationPhase2A');
+        console.log('6/10 ensureTenantIsolationPhase2A');
         await ensureTenantIsolationPhase2A();
         console.log('✅ ensureTenantIsolationPhase2A complete');
-        console.log('7/7 ensureSessionTable');
+        console.log('7/10 ensurePhase2BAuthIsolation');
+        await ensurePhase2BAuthIsolation();
+        console.log('✅ ensurePhase2BAuthIsolation complete');
+        console.log('8/10 ensureLicenseTables');
+        await ensureLicenseTables();
+        console.log('✅ ensureLicenseTables complete');
+        console.log('9/10 ensureSessionTable');
         await ensureSessionTable();
         console.log('✅ ensureSessionTable complete');
 
