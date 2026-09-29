@@ -79,16 +79,23 @@ async function applyTenantDbContext(client) {
     const requestSystemMode = store?.systemMode === true;
     const effectiveSystemMode = requestSystemMode || tenantSystemMode;
     const effectiveBusinessId = requestBusinessId || (effectiveSystemMode ? Number(systemBusinessId || 0) : null);
+    const businessValue = effectiveBusinessId ? String(effectiveBusinessId) : '';
+    const systemValue = effectiveSystemMode ? 'on' : 'off';
+    const contextKey = `${businessValue}|${systemValue}`;
+
+    // A pooled connection can be reused by many requests. Avoid issuing the
+    // extra SET_CONFIG round-trip when this connection already has the exact
+    // same tenant context. The key is stored on the client itself, so changing
+    // from Business A to Business B still forces a fresh context update.
+    if (client.__cafeTenantContextKey === contextKey) return;
 
     await client.query(
         `SELECT
             set_config('app.business_id', $1, false),
             set_config('app.system_mode', $2, false)`,
-        [
-            effectiveBusinessId ? String(effectiveBusinessId) : '',
-            effectiveSystemMode ? 'on' : 'off'
-        ]
+        [businessValue, systemValue]
     );
+    client.__cafeTenantContextKey = contextKey;
 }
 
 function runSystemContext(fn) {
@@ -416,8 +423,7 @@ async function loadSessionUser(session) {
 async function getRegisteredDevice(deviceId) {
     if (!deviceId) return null;
     const result = await runSystemContext(() => pool.query(`
-        SELECT d.*, l.status AS license_status, l.plan, l.starts_at AS license_starts_at,
-               l.expires_at AS license_expires_at, l.max_devices
+        SELECT d.*, row_to_json(l) AS license_data
         FROM registered_devices d
         LEFT JOIN business_licenses l ON l.id = d.license_id
         WHERE d.device_id = $1
@@ -458,15 +464,27 @@ async function assertActiveDeviceAndLicense(deviceId, expectedBusinessId = null)
         throw Object.assign(new Error("Device is registered to a different business"), { code: "DEVICE_BUSINESS_MISMATCH" });
     }
 
-    const license = await getEffectiveLicense(device.business_id);
+    let license = device.license_data || null;
     if (!license) throw Object.assign(new Error("No license is assigned to this business"), { code: "LICENSE_MISSING" });
-    if (license.status !== "active") throw Object.assign(new Error(`Business license is ${license.status}`), { code: "LICENSE_INACTIVE" });
 
     const now = Date.now();
-    if (new Date(license.starts_at).getTime() > now) throw Object.assign(new Error("Business license has not started yet"), { code: "LICENSE_NOT_STARTED" });
-    if (new Date(license.expires_at).getTime() < now) throw Object.assign(new Error("Business license has expired"), { code: "LICENSE_EXPIRED" });
+    const starts = new Date(license.starts_at).getTime();
+    const expires = new Date(license.expires_at).getTime();
+
+    if (license.status === "active" && expires < now) {
+        await runSystemContext(() => pool.query(
+            `UPDATE business_licenses SET status='expired', updated_at=CURRENT_TIMESTAMP WHERE id=$1`,
+            [license.id]
+        ));
+        license = { ...license, status: "expired" };
+    }
+
+    if (license.status !== "active") throw Object.assign(new Error(`Business license is ${license.status}`), { code: "LICENSE_INACTIVE" });
+    if (starts > now) throw Object.assign(new Error("Business license has not started yet"), { code: "LICENSE_NOT_STARTED" });
+    if (expires < now) throw Object.assign(new Error("Business license has expired"), { code: "LICENSE_EXPIRED" });
 
     await runSystemContext(() => pool.query(`UPDATE registered_devices SET last_seen_at=CURRENT_TIMESTAMP WHERE id=$1`, [device.id]));
+    delete device.license_data;
     return { device, license };
 }
 
@@ -5892,53 +5910,116 @@ async function seedAllBusinessAccessProfiles() {
 async function ensurePhase2BAuthIsolation() {
     console.log('🔐 Phase 2B: tenant-scoping users and access profiles');
 
+    // -----------------------------------------------------
+    // USERS: make username unique PER BUSINESS.
+    // Existing installs can contain legacy duplicates such as
+    // `Manager` + `manager`. Normalize first, then preserve the
+    // most useful record and rename duplicate legacy records so no
+    // user/account data is silently deleted.
+    // -----------------------------------------------------
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
     await pool.query(`UPDATE app_users SET business_id=$1 WHERE business_id IS NULL`, [systemBusinessId]);
     await pool.query(`ALTER TABLE app_users ALTER COLUMN business_id SET NOT NULL`);
     await dropSingleColumnUniqueConstraints('app_users', 'username');
     await pool.query(`DROP INDEX IF EXISTS app_users_username_key`);
 
-    // Preserve one canonical user per business/username before enforcing the
-    // tenant-scoped unique index. Older databases may contain duplicates.
-    const duplicateUsers = await rawPoolQuery(`
+    await pool.query(`
+        UPDATE app_users
+        SET username = LOWER(BTRIM(username))
+        WHERE username IS NOT NULL
+          AND username <> LOWER(BTRIM(username))
+    `);
+
+    const duplicateUsers = await pool.query(`
         SELECT id, business_id, username
         FROM (
-            SELECT id, business_id, username,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY business_id, LOWER(BTRIM(username))
-                       ORDER BY
-                           CASE WHEN password_hash IS NOT NULL AND BTRIM(password_hash) <> '' THEN 0 ELSE 1 END,
-                           CASE WHEN active THEN 0 ELSE 1 END,
-                           updated_at DESC NULLS LAST,
-                           id ASC
-                   ) AS rn
+            SELECT
+                id,
+                business_id,
+                username,
+                ROW_NUMBER() OVER (
+                    PARTITION BY business_id, LOWER(BTRIM(username))
+                    ORDER BY
+                        CASE WHEN password_hash IS NOT NULL AND BTRIM(password_hash) <> '' THEN 0 ELSE 1 END,
+                        CASE WHEN active THEN 0 ELSE 1 END,
+                        updated_at DESC NULLS LAST,
+                        id ASC
+                ) AS rn
             FROM app_users
             WHERE business_id IS NOT NULL
         ) ranked
         WHERE rn > 1
         ORDER BY business_id, LOWER(BTRIM(username)), id
     `);
+
     for (const row of duplicateUsers.rows) {
         const base = String(row.username || 'user').trim() || 'user';
         const legacyUsername = `${base}__legacy_${row.id}`;
-        await rawPoolQuery(
+        await pool.query(
             `UPDATE app_users SET username=$1, active=FALSE, updated_at=CURRENT_TIMESTAMP WHERE id=$2`,
             [legacyUsername, Number(row.id)]
         );
-        console.log(`⚠️ Preserved duplicate user #${row.id} as ${legacyUsername}`);
+        console.log(`⚠️ Phase 2B: preserved duplicate user #${row.id} as ${legacyUsername}`);
     }
 
-    await pool.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_business_username
-        ON app_users(business_id, LOWER(username))
-    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_business_username ON app_users(business_id, LOWER(username))`);
 
+    // -----------------------------------------------------
+    // ACCESS PROFILES: make profile names unique PER BUSINESS.
+    // Legacy duplicate profiles are merged into the first profile
+    // and every existing user/business reference is moved first.
+    // -----------------------------------------------------
     await pool.query(`ALTER TABLE access_profiles ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
     await dropSingleColumnUniqueConstraints('access_profiles', 'name');
     await pool.query(`DROP INDEX IF EXISTS access_profiles_name_key`);
-
-    // Assign legacy global profiles to the first business.
     await pool.query(`UPDATE access_profiles SET business_id=$1 WHERE business_id IS NULL`, [systemBusinessId]);
+
+    const duplicateProfiles = await pool.query(`
+        SELECT id, business_id, name
+        FROM (
+            SELECT
+                id,
+                business_id,
+                name,
+                ROW_NUMBER() OVER (
+                    PARTITION BY business_id, name
+                    ORDER BY id ASC
+                ) AS rn
+            FROM access_profiles
+            WHERE business_id IS NOT NULL
+        ) ranked
+        WHERE rn > 1
+        ORDER BY business_id, name, id
+    `);
+
+    for (const row of duplicateProfiles.rows) {
+        const canonical = await pool.query(`
+            SELECT id
+            FROM access_profiles
+            WHERE business_id=$1 AND name=$2
+            ORDER BY id ASC
+            LIMIT 1
+        `, [Number(row.business_id), row.name]);
+        const canonicalId = Number(canonical.rows[0]?.id || 0);
+        if (!canonicalId || canonicalId === Number(row.id)) continue;
+
+        await pool.query(
+            `UPDATE app_users SET profile_id=$1 WHERE profile_id=$2 AND business_id=$3`,
+            [canonicalId, Number(row.id), Number(row.business_id)]
+        );
+        await pool.query(
+            `UPDATE businesses SET profile_id=$1 WHERE profile_id=$2 AND id=$3`,
+            [canonicalId, Number(row.id), Number(row.business_id)]
+        );
+        await pool.query(`DELETE FROM access_profiles WHERE id=$1`, [Number(row.id)]);
+        console.log(`⚠️ Phase 2B: merged duplicate access profile #${row.id} into #${canonicalId}`);
+    }
+
+    await pool.query(`ALTER TABLE access_profiles ALTER COLUMN business_id SET NOT NULL`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_access_profiles_business_name ON access_profiles(business_id,name)`);
+
+    // Clone the canonical built-in profiles to every business now that the
+    // composite uniqueness exists. This also makes ON CONFLICT deterministic.
     const businesses = (await rawPoolQuery(`SELECT id FROM businesses ORDER BY id`)).rows.map(r => Number(r.id));
     const sourceProfiles = (await rawPoolQuery(`SELECT id,name,description,permissions FROM access_profiles WHERE business_id=$1 ORDER BY id`, [systemBusinessId])).rows;
 
@@ -5948,7 +6029,7 @@ async function ensurePhase2BAuthIsolation() {
             await rawPoolQuery(`
                 INSERT INTO access_profiles(name,business_id,description,permissions)
                 VALUES($1,$2,$3,$4::jsonb)
-                ON CONFLICT DO NOTHING
+                ON CONFLICT (business_id,name) DO NOTHING
             `, [profile.name,businessId,profile.description,JSON.stringify(profile.permissions || {})]);
         }
         for (const profile of sourceProfiles) {
@@ -5959,15 +6040,7 @@ async function ensurePhase2BAuthIsolation() {
         }
     }
 
-    // Create the exact constraint needed by seedBusinessAccessProfiles()
-    // BEFORE using ON CONFLICT (business_id,name).
-    await pool.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_access_profiles_business_name
-        ON access_profiles(business_id,name)
-    `);
-
     await seedAllBusinessAccessProfiles();
-    await pool.query(`ALTER TABLE access_profiles ALTER COLUMN business_id SET NOT NULL`);
 
     await enableTenantRls('app_users');
     await enableTenantRls('access_profiles');
@@ -6307,7 +6380,31 @@ app.get('/api/license/status', async(req,res)=>{
 });
 
 // =====================================================
-// START SERVER
+// PERFORMANCE INDEXES
+// =====================================================
+async function ensurePerformanceIndexes() {
+    const statements = [
+        `CREATE INDEX IF NOT EXISTS idx_orders_business_created_at ON orders(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_customers_business_created_at ON customers(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_reservations_business_created_at ON reservations(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_kot_business_created_at ON kot(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_payments_business_created_at ON payments(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_menu_business_active ON menu(business_id, active)`,
+        `CREATE INDEX IF NOT EXISTS idx_menu_categories_business_active ON menu_categories(business_id, active)`,
+        `CREATE INDEX IF NOT EXISTS idx_restaurant_tables_business_active ON restaurant_tables(business_id, active)`,
+        `CREATE INDEX IF NOT EXISTS idx_app_sessions_user_business ON app_sessions(user_id, business_id)`,
+        `CREATE INDEX IF NOT EXISTS idx_registered_devices_business_status ON registered_devices(business_id, status)`,
+        `CREATE INDEX IF NOT EXISTS idx_business_licenses_business_status ON business_licenses(business_id, status)`
+    ];
+    for (const sql of statements) {
+        try { await runSystemContext(() => pool.query(sql)); }
+        catch (error) { console.warn('⚠️ Performance index skipped:', error.message); }
+    }
+}
+
+// =====================================================
+// START SERVER / DATABASE MIGRATIONS
 // =====================================================
 async function startServer() {
 
@@ -6339,6 +6436,9 @@ async function startServer() {
         console.log('7/10 ensurePhase2BAuthIsolation');
         await ensurePhase2BAuthIsolation();
         console.log('✅ ensurePhase2BAuthIsolation complete');
+        console.log('7b/10 ensurePerformanceIndexes');
+        await ensurePerformanceIndexes();
+        console.log('✅ ensurePerformanceIndexes complete');
         console.log('8/10 ensureLicenseTables');
         await ensureLicenseTables();
         console.log('✅ ensureLicenseTables complete');
@@ -6348,7 +6448,7 @@ async function startServer() {
 
         tenantSystemMode = false;
 
-       if (!process.env.VERCEL) {
+       if (!process.env.VERCEL && process.env.MIGRATE_ONLY !== 'true') {
         app.listen(
             PORT,
             () =>
@@ -6356,6 +6456,8 @@ async function startServer() {
                     `🚀 Cafe POS server running on http://localhost:${PORT}`
                 )
         );
+       } else if (process.env.MIGRATE_ONLY === 'true') {
+        console.log('✅ Database migration-only run complete');
        }
 
     } catch (error) {
@@ -6371,9 +6473,22 @@ async function startServer() {
 
 }
 
-const startupPromise = startServer();
+// Vercel production fast path: migrations are NOT part of request startup.
+// Keep RUN_DB_MIGRATIONS=false/unset in normal production deployments.
+// For a deliberate one-off migration, use MIGRATE_ONLY=true locally against
+// the intended database instead of making every Vercel request wait.
+const shouldRunStartupMigrations =
+    !process.env.VERCEL || String(process.env.RUN_DB_MIGRATIONS || '').toLowerCase() === 'true';
+
+const startupPromise = shouldRunStartupMigrations ? startServer() : Promise.resolve();
 
 if (process.env.VERCEL) {
+    if (shouldRunStartupMigrations) {
+        console.warn('⚠️ RUN_DB_MIGRATIONS=true: Vercel requests will wait for migrations. Disable it after a one-off migration.');
+    } else {
+        console.log('⚡ Vercel production fast boot: database migrations skipped in request startup.');
+    }
+
     module.exports = async function handler(req, res) {
         await startupPromise;
         return app(req, res);
