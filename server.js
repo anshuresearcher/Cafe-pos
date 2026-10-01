@@ -9,6 +9,7 @@ const os = require("os");
 const path = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
 const { execFile } = require("child_process");
+const net = require("net");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -18,7 +19,20 @@ const PORT = Number(process.env.PORT || 3000);
 // MIDDLEWARE
 // =====================================================
 
-app.use(cors());
+const corsAllowedOrigins = new Set([
+    "https://cafe-pos-six-gamma.vercel.app",
+    "https://localhost",
+    "http://localhost",
+    "capacitor://localhost",
+    ...String(process.env.CORS_ALLOWED_ORIGINS || "").split(",").map(origin => origin.trim()).filter(Boolean)
+]);
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin) return callback(null, false);
+        return callback(null, corsAllowedOrigins.has(origin) ? origin : false);
+    },
+    credentials: true
+}));
 app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -357,12 +371,12 @@ function setCookie(res, name, value, options = {}) {
     if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
     if (options.httpOnly !== false) parts.push("HttpOnly");
     if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
-    if (options.secure !== false && process.env.NODE_ENV === "production") parts.push("Secure");
+    if (options.secure !== false && (process.env.NODE_ENV === "production" || options.sameSite === "None")) parts.push("Secure");
     res.append("Set-Cookie", parts.join("; "));
 }
 
 function clearCookie(res, name) {
-    setCookie(res, name, "", { maxAge: 0, httpOnly: true, sameSite: "Lax", secure: true });
+    setCookie(res, name, "", { maxAge: 0, httpOnly: true, sameSite: "None", secure: true });
 }
 
 async function getSessionUser(req) {
@@ -405,11 +419,11 @@ async function loadSessionUser(session) {
 
     return tenantContext.run({ businessId }, async () => {
         const result = await pool.query(`
-            SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,
+            SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,u.permissions_override,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
                    b.logo_url, b.currency, b.active AS business_active,
-                   p.name AS profile_name, COALESCE(p.permissions, '{}'::jsonb) AS permissions
+                   p.name AS profile_name, COALESCE(u.permissions_override, p.permissions, '{}'::jsonb) AS permissions
             FROM app_users u
             LEFT JOIN businesses b ON b.id = u.business_id
             LEFT JOIN access_profiles p ON p.id = u.profile_id AND p.business_id = u.business_id
@@ -493,8 +507,16 @@ function permissionForRequest(req) {
     const method = req.method.toUpperCase();
     if (path.startsWith("/auth/")) return null;
     if (path === "/dashboard/stats") return "dashboard.view";
+    if (path === "/reports/advanced") return "advanced_reports.view";
     if (path.startsWith("/reports/")) return "reports.view";
     if (path === "/settings") return method === "GET" ? "settings.view" : "settings.edit";
+    if (path === "/printers" || path.startsWith("/printers/")) {
+        if (path.endsWith("/test") || path.endsWith("/print")) return "printer.print";
+        if (method === "GET") return "printer.view";
+        if (method === "POST") return "printer.create";
+        if (["PUT","PATCH"].includes(method)) return "printer.edit";
+        if (method === "DELETE") return "printer.delete";
+    }
     if (path === "/access" || path.startsWith("/access/")) {
         if (method === "GET") return "access.view";
         if (method === "POST") return "access.create";
@@ -573,7 +595,7 @@ async function requireAuth(req, res, next) {
                 ? user.permissions
                 : {};
 
-            if (user.profile_name !== "Admin" && permissions[required] !== true) {
+            if ((user.profile_name !== "Admin" || user.permissions_override !== null) && permissions[required] !== true) {
                 return res.status(403).json({ error: `Permission denied: ${required}` });
             }
 
@@ -912,7 +934,7 @@ app.post('/api/public/register-business', async (req, res) => {
             RETURNING *
         `, [makeBusinessCode(b.businessName),b.businessName,b.businessType,b.ownerName,b.phone,b.email,b.address,b.city,b.state,b.gstin,b.logoUrl,b.currency])).rows[0];
 
-        await seedBusinessAccessProfiles(business.id);
+        await seedBusinessAccessProfiles(business.id, client);
         const adminProfile = (await client.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name='Admin' LIMIT 1`, [business.id])).rows[0];
 
         const user = (await client.query(`
@@ -983,10 +1005,10 @@ app.post("/api/auth/login", async (req,res)=>{
 
         const businessId = Number(deviceLicense.device.business_id);
         const r = await tenantContext.run({ businessId }, () => pool.query(`
-            SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,
+            SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,u.permissions_override,
                 b.business_code,b.business_name,b.business_type,b.owner_name,b.phone AS business_phone,b.email AS business_email,
                 b.address AS business_address,b.city,b.state,b.gstin,b.logo_url,b.currency,b.active AS business_active,
-                p.name AS profile_name,COALESCE(p.permissions,'{}'::jsonb) AS permissions
+                p.name AS profile_name,COALESCE(u.permissions_override,p.permissions,'{}'::jsonb) AS permissions
             FROM app_users u
             LEFT JOIN businesses b ON b.id=u.business_id
             LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
@@ -996,7 +1018,7 @@ app.post("/api/auth/login", async (req,res)=>{
         if(!user||!user.active||!verifyPassword(password,user.password_hash)) return res.status(401).json({error:"Invalid username or password"});
         delete user.password_hash;
         const session = await createSession(user, deviceLicense.device);
-        setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "Lax", secure: true });
+        setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "None", secure: true });
         res.json({ success: true, token: session.token, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
 });
@@ -3884,15 +3906,16 @@ app.delete(
 
 app.get(
     "/api/dashboard/stats",
-    async (_, res) => {
+    async (req, res) => {
 
         try {
+            const businessId = Number(req.user.business_id);
 
             const q =
                 async sql =>
                     Number(
                         (
-                            await pool.query(sql)
+                            await pool.query(sql, [businessId])
                         ).rows[0].value
                     );
 
@@ -3913,6 +3936,7 @@ app.get(
                             CURRENT_DATE
                         AND status =
                             'Completed'
+                        AND business_id = $1
                         `
                     ),
 
@@ -3925,6 +3949,7 @@ app.get(
                         WHERE
                             created_at::date =
                             CURRENT_DATE
+                        AND business_id = $1
                         `
                     ),
 
@@ -3936,6 +3961,7 @@ app.get(
                         FROM orders
                         WHERE status =
                             'Pending'
+                        AND business_id = $1
                         `
                     ),
 
@@ -3945,6 +3971,7 @@ app.get(
                         SELECT
                             COUNT(*) value
                         FROM customers
+                        WHERE business_id = $1
                         `
                     ),
 
@@ -3954,6 +3981,7 @@ app.get(
                         SELECT
                             COUNT(*) value
                         FROM orders
+                        WHERE business_id = $1
                         `
                     ),
 
@@ -3968,6 +3996,7 @@ app.get(
                         FROM orders
                         WHERE status =
                             'Completed'
+                        AND business_id = $1
                         `
                     )
 
@@ -4159,6 +4188,8 @@ app.get(
                         payment_status =
                         'Success'
 
+                    AND business_id = ${Number(req.user.business_id)}
+
                     AND created_at >=
                         ${dateRange.start}
 
@@ -4186,7 +4217,8 @@ app.get(
 
                     FROM order_items oi
 
-                    WHERE EXISTS (
+                    WHERE oi.business_id = ${Number(req.user.business_id)}
+                    AND EXISTS (
 
                         SELECT 1
 
@@ -4195,6 +4227,8 @@ app.get(
                         WHERE
                             p.order_id =
                             oi.order_id
+
+                        AND p.business_id = ${Number(req.user.business_id)}
 
                         AND p.payment_status =
                             'Success'
@@ -4314,6 +4348,8 @@ app.get(
                         payment_status =
                         'Success'
 
+                    AND business_id = ${Number(req.user.business_id)}
+
                     AND created_at >=
                         ${dateRange.start}
 
@@ -4405,7 +4441,8 @@ app.get(
 
                     FROM order_items oi
 
-                    WHERE EXISTS (
+                    WHERE oi.business_id = ${Number(req.user.business_id)}
+                    AND EXISTS (
 
                         SELECT 1
 
@@ -4414,6 +4451,8 @@ app.get(
                         WHERE
                             p.order_id =
                             oi.order_id
+
+                        AND p.business_id = ${Number(req.user.business_id)}
 
                         AND p.payment_status =
                             'Success'
@@ -4517,8 +4556,10 @@ app.get(
 
                     LEFT JOIN menu m
                         ON m.id = oi.menu_id
+                       AND m.business_id = ${Number(req.user.business_id)}
 
-                    WHERE EXISTS (
+                    WHERE oi.business_id = ${Number(req.user.business_id)}
+                    AND EXISTS (
 
                         SELECT 1
 
@@ -4527,6 +4568,8 @@ app.get(
                         WHERE
                             p.order_id =
                             oi.order_id
+
+                        AND p.business_id = ${Number(req.user.business_id)}
 
                         AND p.payment_status =
                             'Success'
@@ -4626,10 +4669,14 @@ app.get(
 
                     INNER JOIN payments p
                         ON p.order_id = o.id
+                       AND p.business_id = o.business_id
 
                     WHERE
                         p.payment_status =
                         'Success'
+
+                    AND o.business_id = ${Number(req.user.business_id)}
+                    AND p.business_id = ${Number(req.user.business_id)}
 
                     AND p.created_at >=
                         ${dateRange.start}
@@ -4726,6 +4773,8 @@ app.get(
                     WHERE
                         p.payment_status =
                         'Success'
+
+                    AND p.business_id = ${Number(req.user.business_id)}
 
                     AND p.created_at >=
                         ${dateRange.start}
@@ -4827,10 +4876,14 @@ app.get(
 
                     INNER JOIN payments p
                         ON p.order_id = o.id
+                       AND p.business_id = o.business_id
 
                     WHERE
                         p.payment_status =
                         'Success'
+
+                    AND o.business_id = ${Number(req.user.business_id)}
+                    AND p.business_id = ${Number(req.user.business_id)}
 
                     AND p.created_at >=
                         ${dateRange.start}
@@ -5142,6 +5195,7 @@ app.get('/api/reports/advanced', async (req, res) => {
                     COALESCE(SUM(p.amount), 0) AS sales
                 FROM payments p
                 WHERE p.payment_status = 'Success'
+                  AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
                 GROUP BY EXTRACT(HOUR FROM p.created_at)
@@ -5166,6 +5220,7 @@ app.get('/api/reports/advanced', async (req, res) => {
                     COALESCE(SUM(p.amount), 0) AS sales
                 FROM payments p
                 WHERE p.payment_status = 'Success'
+                  AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
                 GROUP BY
@@ -5192,10 +5247,14 @@ app.get('/api/reports/advanced', async (req, res) => {
                 FROM orders o
                 LEFT JOIN customers c
                     ON c.id = o.customer_id
+                   AND c.business_id = o.business_id
                 INNER JOIN payments p
                     ON p.order_id = o.id
+                   AND p.business_id = o.business_id
                    AND p.payment_status = 'Success'
-                WHERE p.created_at >= ${dr.start}
+                WHERE o.business_id = ${Number(req.user.business_id)}
+                  AND p.business_id = ${Number(req.user.business_id)}
+                  AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
                 GROUP BY c.name
                 ORDER BY sales DESC
@@ -5219,6 +5278,7 @@ app.get('/api/reports/advanced', async (req, res) => {
                     COALESCE(SUM(o.total), 0) AS value
                 FROM orders o
                 WHERE o.status = 'Cancelled'
+                  AND o.business_id = ${Number(req.user.business_id)}
                   AND o.created_at >= ${dr.start}
                   AND o.created_at < ${dr.end}
                 GROUP BY DATE(o.created_at)
@@ -5239,7 +5299,8 @@ app.get('/api/reports/advanced', async (req, res) => {
                 SELECT
                     COALESCE(SUM(amount), 0) AS amount
                 FROM expenses
-                WHERE expense_date >= (${dr.start})::date
+                WHERE business_id = ${Number(req.user.business_id)}
+                  AND expense_date >= (${dr.start})::date
                   AND expense_date < (${dr.end})::date
             `);
 
@@ -5291,7 +5352,7 @@ app.get('/api/system/deployment-check', async (_,res)=>{
 
 const ACCESS_MODULES_SERVER = [
     "dashboard", "orders", "new_order", "reservations", "tables",
-    "kitchen", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "backup", "invoice_designer", "advanced_reports", "deployment"
+    "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "backup", "invoice_designer", "advanced_reports", "deployment", "printer"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
 
@@ -5319,7 +5380,7 @@ function managerPermissionsServer() {
         "new_order.edit", "reservations.view", "reservations.create", "reservations.edit",
         "tables.view", "tables.edit", "kitchen.view", "kitchen.edit", "kitchen.print", "kot_groups.view", "kot_groups.create", "kot_groups.edit",
         "menu.view", "menu.create", "menu.edit", "customers.view", "customers.create", "customers.edit",
-        "payments.view", "payments.print", "reports.view", "reports.export"
+        "payments.view", "payments.print", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
     ];
     allow.forEach(k => p[k] = true);
     return p;
@@ -5348,13 +5409,24 @@ async function ensureAccessTables() {
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             password_hash TEXT,
-            business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL
+            business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
+            permissions_override JSONB
         )
     `);
 
     await pool.query(`ALTER TABLE access_profiles ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions_override JSONB`);
+    await pool.query(`
+        UPDATE access_profiles
+        SET permissions=COALESCE(permissions,'{}'::jsonb)||CASE
+            WHEN name='Manager' THEN '{"printer.view":true,"printer.create":true,"printer.edit":true,"printer.delete":true,"printer.print":true}'::jsonb
+            WHEN name='Cashier' THEN '{"printer.view":true,"printer.print":true}'::jsonb
+            ELSE '{}'::jsonb
+        END
+        WHERE name IN ('Manager','Cashier')
+    `);
     console.log("✅ Access table structure ready");
 }
 
@@ -5364,17 +5436,17 @@ function builtInProfileDefinitions() {
         { name: "Manager", description: "Operational access without full administration", permissions: managerPermissionsServer() },
         { name: "Cashier", description: "Counter and cashier access", permissions: (() => {
             const p = defaultPermissionsServer();
-            ["dashboard.view","new_order.view","new_order.create","customers.view","customers.create","payments.view","payments.create","orders.view","kitchen.view","kitchen.print"].forEach(k => p[k] = true);
+            ["dashboard.view","new_order.view","new_order.create","customers.view","customers.create","payments.view","payments.create","orders.view","kitchen.view","kitchen.print","printer.view","printer.print"].forEach(k => p[k] = true);
             return p;
         })() }
     ];
 }
 
-async function seedBusinessAccessProfiles(businessId) {
+async function seedBusinessAccessProfiles(businessId, db = pool)  {
     const id = Number(businessId);
     if (!id) throw new Error("Business id is required for access profile seed");
     for (const profile of builtInProfileDefinitions()) {
-        await pool.query(`
+        await db.query(`
             INSERT INTO access_profiles (name,business_id,description,permissions)
             VALUES ($1,$2,$3,$4::jsonb)
             ON CONFLICT (business_id,name) DO NOTHING
@@ -5533,8 +5605,8 @@ app.put("/api/access/users/:id", async (req, res) => {
         }
         const result = await pool.query(
             password
-                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
-                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
+                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
+                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
             password ? [displayName,username,hashPassword(password),profileId,active,id,businessId] : [displayName,username,profileId,active,id,businessId]
         );
         res.json({ success: true, user: result.rows[0] });
@@ -5568,26 +5640,29 @@ async function ensureSettingsTable() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS app_settings (
             id INTEGER PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             settings JSONB NOT NULL DEFAULT '{}'::jsonb,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    await pool.query(`ALTER TABLE app_settings ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
 
     await pool.query(`
-        INSERT INTO app_settings (id, settings)
-        VALUES (1, '{}'::jsonb)
+        INSERT INTO app_settings (id, business_id, settings)
+        VALUES ($1, $1, '{}'::jsonb)
         ON CONFLICT (id) DO NOTHING
-    `);
+    `, [Number(systemBusinessId||1)]);
 
     console.log("✅ Application settings ready");
 }
 
 app.get(
     "/api/settings",
-    async (_, res) => {
+    async (req, res) => {
         try {
             const result = await pool.query(
-                "SELECT settings FROM app_settings WHERE id = 1"
+                "SELECT settings FROM app_settings WHERE business_id = $1",
+                [Number(req.user.business_id)]
             );
             res.json(result.rows[0]?.settings || {});
         } catch (e) {
@@ -5604,17 +5679,18 @@ app.put(
             const settings = req.body && typeof req.body === "object"
                 ? req.body
                 : {};
+            const businessId = Number(req.user.business_id);
 
             const result = await pool.query(
                 `
-                INSERT INTO app_settings (id, settings, updated_at)
-                VALUES (1, $1::jsonb, CURRENT_TIMESTAMP)
-                ON CONFLICT (id) DO UPDATE
+                INSERT INTO app_settings (id, business_id, settings, updated_at)
+                VALUES ($1, $1, $2::jsonb, CURRENT_TIMESTAMP)
+                ON CONFLICT (business_id) DO UPDATE
                 SET settings = EXCLUDED.settings,
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING settings, updated_at
                 `,
-                [JSON.stringify(settings)]
+                [businessId, JSON.stringify(settings)]
             );
 
             res.json({
@@ -5629,13 +5705,181 @@ app.put(
     }
 );
 
+function isPrivatePrinterIPv4(value) {
+    const ip=String(value||'').trim();
+    if(net.isIP(ip)!==4)return false;
+    const [a,b]=ip.split('.').map(Number);
+    return a===10||(a===192&&b===168)||(a===172&&b>=16&&b<=31)||a===127;
+}
+
+function normalizePrinterPayload(body={}, current={}) {
+    const value=(key,fallback='')=>body[key]===undefined?current[key]??fallback:body[key];
+    const name=String(value('name','')).trim().slice(0,120);
+    const connectionType=String(value('connectionType',current.connection_type||'local'));
+    const host=String(value('host',current.host||'')).trim();
+    const port=Number(value('port',current.port||9100));
+    const paperWidth=String(value('paperWidth',current.paper_width||'80'));
+    const bluetoothName=String(value('bluetoothName',current.bluetooth_name||'')).trim().slice(0,120);
+    const serviceUuid=String(value('serviceUuid',current.service_uuid||'000018f0-0000-1000-8000-00805f9b34fb')).trim().slice(0,120);
+    const characteristicUuid=String(value('characteristicUuid',current.characteristic_uuid||'00002af1-0000-1000-8000-00805f9b34fb')).trim().slice(0,120);
+    const isDefault=body.isDefault===undefined?Boolean(current.is_default):body.isDefault===true;
+    if(!name)throw Object.assign(new Error('Printer name is required'),{status:400});
+    if(!['local','bluetooth','network'].includes(connectionType))throw Object.assign(new Error('Select a supported printer connection type'),{status:400});
+    if(!['58','80'].includes(paperWidth))throw Object.assign(new Error('Paper width must be 58mm or 80mm'),{status:400});
+    if(connectionType==='network'){
+        if(!isPrivatePrinterIPv4(host))throw Object.assign(new Error('Enter a private LAN IPv4 address for the network printer'),{status:400});
+        if(!Number.isInteger(port)||port<1||port>65535)throw Object.assign(new Error('Printer port must be between 1 and 65535'),{status:400});
+    }
+    if(connectionType==='bluetooth'&&(!serviceUuid||!characteristicUuid))throw Object.assign(new Error('Bluetooth service and write characteristic UUIDs are required'),{status:400});
+    return {name,connectionType,host:connectionType==='network'?host:null,port:connectionType==='network'?port:9100,bluetoothName:connectionType==='bluetooth'?(bluetoothName||name):null,serviceUuid,characteristicUuid,paperWidth,isDefault};
+}
+
+function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
+    const width=paperWidth==='58'?32:48;
+    const clean=value=>String(value??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim();
+    const currency=clean(settings.currency||'₹');
+    const line='-'.repeat(width);
+    const moneyValue=value=>currency+Number(value||0).toFixed(2);
+    const rows=[
+        clean(settings.restaurantName||'CAFE POS'),
+        clean(settings.address||''),
+        settings.phone?'Phone: '+clean(settings.phone):'',
+        settings.gstin?'GSTIN: '+clean(settings.gstin):'',
+        line,
+        'Invoice: '+clean(receipt.invoiceNumber||'-'),
+        'Order: '+clean(receipt.orderNumber||'-'),
+        'Type: '+clean(receipt.orderType||'-'),
+        receipt.tableNumber?'Table: '+clean(receipt.tableNumber):'',
+        'Date: '+clean(receipt.date||new Date().toLocaleString()),
+        receipt.customerName?'Customer: '+clean(receipt.customerName):'',
+        line,
+        'ITEM                         QTY      AMOUNT',
+        ...(Array.isArray(receipt.items)?receipt.items.map(item=>{
+            const name=clean(settings.uppercaseItems?String(item.name||'-').toUpperCase():(item.name||'-')).slice(0,width-17);
+            const qty=Number(item.quantity||0),amount=qty*Number(item.price||0);
+            return name.padEnd(width-16)+String(qty).padStart(4)+' '+moneyValue(amount).padStart(12);
+        }):[]),
+        line,
+        'Subtotal: '+moneyValue(receipt.subtotal||0),
+        'GST:      '+moneyValue(receipt.gst||0),
+        'TOTAL:    '+moneyValue(receipt.total||0),
+        'Payment:  '+clean(receipt.paymentMethod||'-'),
+        line,
+        ...clean(settings.footer||'Thank you!').split(/\r?\n/).map(clean),
+        '',
+        ''
+    ];
+    return Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),Buffer.from(rows.filter(Boolean).join('\n')+'\n','utf8'),Buffer.from([0x1b,0x64,0x04,0x1d,0x56,0x00])]);
+}
+
+function sendRawPrinterBytes(host,port,bytes) {
+    return new Promise((resolve,reject)=>{
+        const socket=net.createConnection({host,port});
+        const timer=setTimeout(()=>{socket.destroy();reject(new Error('Printer connection timed out'))},5000);
+        socket.once('connect',()=>socket.end(bytes));
+        socket.once('error',error=>{clearTimeout(timer);reject(new Error(error.code==='ECONNREFUSED'?'Printer refused the connection':error.message))});
+        socket.once('close',hadError=>{clearTimeout(timer);if(!hadError)resolve()});
+    });
+}
+
+async function getTenantPrinter(req,res,printerId) {
+    const id=Number(printerId),businessId=Number(req.user.business_id);
+    if(!Number.isInteger(id)||id<=0){res.status(400).json({error:'Invalid printer ID'});return null;}
+    const printer=(await pool.query('SELECT * FROM printers WHERE id=$1 AND business_id=$2 AND active=TRUE',[id,businessId])).rows[0];
+    if(!printer){res.status(404).json({error:'Printer not found'});return null;}
+    return printer;
+}
+
+app.get('/api/printers',async(req,res)=>{
+    try{res.json((await pool.query('SELECT id,name,connection_type,host,port,bluetooth_name,service_uuid,characteristic_uuid,paper_width,is_default,active,created_at,updated_at FROM printers WHERE business_id=$1 ORDER BY is_default DESC,name',[Number(req.user.business_id)])).rows);}
+    catch(e){console.error('Printer list error:',e);res.status(500).json({error:'Failed to load printers'});}
+});
+
+app.post('/api/printers',async(req,res)=>{
+    try{
+        const businessId=Number(req.user.business_id),printer=normalizePrinterPayload(req.body);
+        const existing=await pool.query('SELECT COUNT(*)::int AS count FROM printers WHERE business_id=$1 AND active=TRUE',[businessId]);
+        printer.isDefault=printer.isDefault||Number(existing.rows[0]?.count||0)===0;
+        if(printer.isDefault)await pool.query('UPDATE printers SET is_default=FALSE WHERE business_id=$1',[businessId]);
+        const created=await pool.query(`
+            INSERT INTO printers(business_id,name,connection_type,host,port,bluetooth_name,service_uuid,characteristic_uuid,paper_width,is_default)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+            RETURNING id,name,connection_type,host,port,bluetooth_name,service_uuid,characteristic_uuid,paper_width,is_default,active
+        `,[businessId,printer.name,printer.connectionType,printer.host,printer.port,printer.bluetoothName,printer.serviceUuid,printer.characteristicUuid,printer.paperWidth,printer.isDefault]);
+        res.status(201).json({success:true,printer:created.rows[0]});
+    }catch(e){res.status(e.status||500).json({error:e.message||'Failed to save printer'});}
+});
+
+app.put('/api/printers/:id',async(req,res)=>{
+    try{
+        const businessId=Number(req.user.business_id),id=Number(req.params.id);
+        const current=(await pool.query('SELECT * FROM printers WHERE id=$1 AND business_id=$2',[id,businessId])).rows[0];
+        if(!current)return res.status(404).json({error:'Printer not found'});
+        const printer=normalizePrinterPayload(req.body,current);
+        if(printer.isDefault)await pool.query('UPDATE printers SET is_default=FALSE WHERE business_id=$1 AND id<>$2',[businessId,id]);
+        const updated=(await pool.query(`
+            UPDATE printers SET name=$1,connection_type=$2,host=$3,port=$4,bluetooth_name=$5,
+                service_uuid=$6,characteristic_uuid=$7,paper_width=$8,is_default=$9,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$10 AND business_id=$11
+            RETURNING id,name,connection_type,host,port,bluetooth_name,service_uuid,characteristic_uuid,paper_width,is_default,active
+        `,[printer.name,printer.connectionType,printer.host,printer.port,printer.bluetoothName,printer.serviceUuid,printer.characteristicUuid,printer.paperWidth,printer.isDefault,id,businessId])).rows[0];
+        res.json({success:true,printer:updated});
+    }catch(e){res.status(e.status||500).json({error:e.message||'Failed to update printer'});}
+});
+
+app.delete('/api/printers/:id',async(req,res)=>{
+    try{
+        const businessId=Number(req.user.business_id),id=Number(req.params.id);
+        const deleted=(await pool.query('DELETE FROM printers WHERE id=$1 AND business_id=$2 RETURNING id,is_default',[id,businessId])).rows[0];
+        if(!deleted)return res.status(404).json({error:'Printer not found'});
+        if(deleted.is_default){
+            await pool.query('UPDATE printers SET is_default=TRUE WHERE id=(SELECT id FROM printers WHERE business_id=$1 ORDER BY id LIMIT 1)',[businessId]);
+        }
+        res.json({success:true});
+    }catch(e){res.status(500).json({error:'Failed to delete printer'});}
+});
+
+app.post('/api/printers/:id/test',async(req,res)=>{
+    try{
+        const printer=await getTenantPrinter(req,res,req.params.id);
+        if(!printer)return;
+        if(printer.connection_type==='network'){
+            const body=receiptTextForPrinter({invoiceNumber:'PRINTER TEST',orderNumber:'TEST',items:[],subtotal:0,gst:0,total:0,paymentMethod:'—'},{restaurantName:'Cafe POS Printer Test',footer:'Printer connection successful'},printer.paper_width);
+            await sendRawPrinterBytes(printer.host,printer.port,body);
+            return res.json({success:true,mode:'network'});
+        }
+        res.json({success:true,mode:printer.connection_type});
+    }catch(e){res.status(502).json({error:e.message||'Printer test failed'});}
+});
+
+app.post('/api/printers/:id/print',async(req,res)=>{
+    try{
+        const printer=await getTenantPrinter(req,res,req.params.id);
+        if(!printer)return;
+        if(printer.connection_type!=='network')return res.status(400).json({error:'Use the local print dialog or Bluetooth connection for this printer'});
+        if(!req.body.receipt||typeof req.body.receipt!=='object')return res.status(400).json({error:'Receipt data is required'});
+        const savedSettings=(await pool.query('SELECT settings FROM app_settings WHERE business_id=$1',[Number(req.user.business_id)])).rows[0]?.settings||{};
+        const settings={
+            restaurantName:req.user.business_name||'CAFE POS',
+            address:req.user.business_address||'',
+            phone:req.user.business_phone||'',
+            gstin:req.user.gstin||'',
+            currency:req.user.currency||'₹',
+            ...savedSettings
+        };
+        const bytes=receiptTextForPrinter(req.body.receipt,settings,printer.paper_width);
+        await sendRawPrinterBytes(printer.host,printer.port,bytes);
+        res.json({success:true});
+    }catch(e){res.status(502).json({error:e.message||'Could not print to the network printer'});}
+});
+
 // =====================================================
 // MULTI-BUSINESS DATA ISOLATION (PHASE 2A)
 // =====================================================
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices',
-    'loyalty_transactions','billing_adjustments','expense_categories','expenses'
+    'loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings'
 ];
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices
@@ -5708,9 +5952,32 @@ async function ensureTenantIsolationPhase2A() {
     }
 
     await makeNameUniquePerBusiness('kot_groups','name');
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_settings_business_id ON app_settings(business_id)`);
     await makeNameUniquePerBusiness('expense_categories','name');
     await makeNameUniquePerBusiness('billing_adjustments','name');
     console.log('✅ Phase 2A tenant isolation ready');
+}
+
+async function ensurePrinterTable() {
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS printers (
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+            name VARCHAR(120) NOT NULL,
+            connection_type VARCHAR(20) NOT NULL DEFAULT 'local',
+            host VARCHAR(64),
+            port INTEGER NOT NULL DEFAULT 9100,
+            bluetooth_name VARCHAR(120),
+            service_uuid VARCHAR(120) NOT NULL DEFAULT '000018f0-0000-1000-8000-00805f9b34fb',
+            characteristic_uuid VARCHAR(120) NOT NULL DEFAULT '00002af1-0000-1000-8000-00805f9b34fb',
+            paper_width VARCHAR(4) NOT NULL DEFAULT '80',
+            is_default BOOLEAN NOT NULL DEFAULT FALSE,
+            active BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_printers_business_default ON printers(business_id) WHERE is_default=TRUE`);
 }
 
 async function seedTenantDefaults(businessId) {
@@ -6184,7 +6451,7 @@ async function registerDeviceFromKey(req, res) {
 
             await pool.query(`UPDATE device_registration_keys SET status='used',used_at=CURRENT_TIMESTAMP,used_device_id=$1 WHERE id=$2`, [inserted.rows[0].id, key.id]);
 
-            setCookie(res, 'cafe_device_id', deviceId, { maxAge: 60 * 60 * 24 * 365, httpOnly: true, sameSite: 'Lax', secure: true });
+            setCookie(res, 'cafe_device_id', deviceId, { maxAge: 60 * 60 * 24 * 365, httpOnly: true, sameSite: 'None', secure: true });
             return res.json({
                 success: true,
                 business: { id:key.business_id, business_code:key.business_code, business_name:key.business_name },
@@ -6262,7 +6529,12 @@ app.get('/api/support/me', supportAuth, async(req,res)=>res.json({user:{id:req.s
 app.get('/api/support/businesses', supportAuth, async(req,res)=>{
     try {
         const r = await runSystemContext(() => pool.query(`
-            SELECT b.id,b.business_code,b.business_name,b.business_type,b.owner_name,b.phone,b.email,b.active,b.created_at,
+            SELECT b.id,b.id::text AS account_number,b.business_code,b.business_name,b.business_name AS business_brand_name,
+                   b.id::text AS branch_id,b.business_code AS branch_code,b.business_name AS branch_name,
+                   CONCAT_WS(', ',NULLIF(b.address,''),NULLIF(b.city,''),NULLIF(b.state,'')) AS address_line,
+                   CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS business_status,
+                   CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS branch_status,
+                   b.business_type,b.owner_name,b.phone,b.email,b.address,b.city,b.state,b.active,b.created_at,
                    l.id AS license_id,l.plan,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
                    (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
                    (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users
@@ -6274,6 +6546,145 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
         `));
         res.json(r.rows);
     } catch(e){console.error(e);res.status(500).json({error:'Failed to load businesses'});}
+});
+
+app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        const result=await runSystemContext(async()=>{
+            const users=await pool.query(`
+                SELECT u.id,u.display_name,u.username,u.profile_id,u.active,u.created_at,
+                       p.name AS profile_name,
+                       u.permissions_override,
+                       COALESCE(u.permissions_override,p.permissions,'{}'::jsonb) AS permissions
+                FROM app_users u
+                LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+                WHERE u.business_id=$1
+                ORDER BY u.id
+            `,[businessId]);
+            const profiles=await pool.query(`
+                SELECT id,name,description,permissions
+                FROM access_profiles
+                WHERE business_id=$1
+                ORDER BY name
+            `,[businessId]);
+            return {users:users.rows,profiles:profiles.rows};
+        });
+        res.json(result);
+    }catch(e){console.error('Support user list error:',e);res.status(500).json({error:'Failed to load business users'});}
+});
+
+app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const displayName=String(req.body.displayName||'').trim();
+        const username=String(req.body.username||'').trim().toLowerCase();
+        const password=String(req.body.password||'');
+        const profileId=req.body.profileId===null||req.body.profileId===undefined||req.body.profileId===''?null:Number(req.body.profileId);
+        const active=req.body.active!==false;
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        if(!displayName||!username)return res.status(400).json({error:'Display name and username are required'});
+        if(!/^[a-z0-9._-]{3,100}$/.test(username))return res.status(400).json({error:'Username may contain only letters, numbers, dot, underscore and hyphen'});
+        if(password.length<6)return res.status(400).json({error:'Password must be at least 6 characters'});
+        const user=await runSystemContext(async()=>{
+            let assignedProfileName=null;
+            if(profileId!==null){
+                const profile=(await pool.query('SELECT id,name FROM access_profiles WHERE id=$1 AND business_id=$2',[profileId,businessId])).rows[0];
+                if(!profile)return null;
+                assignedProfileName=profile.name;
+            }
+            let permissionsOverride=null;
+            if(req.body.permissionsOverride!==undefined&&req.body.permissionsOverride!==null){
+                if(typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride))throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
+                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)));
+                permissionsOverride={};
+                for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
+            }
+            if(assignedProfileName==='Admin'&&permissionsOverride&&(!permissionsOverride['dashboard.view']||!permissionsOverride['access.view']||!permissionsOverride['access.edit']))throw Object.assign(new Error('Admin custom permissions must keep Dashboard and Access management available'),{status:400});
+            const result=await pool.query(`
+                INSERT INTO app_users(display_name,username,password_hash,profile_id,business_id,active,permissions_override)
+                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
+                RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at
+            `,[displayName,username,hashPassword(password),profileId,businessId,active,permissionsOverride===null?null:JSON.stringify(permissionsOverride)]);
+            return result.rows[0];
+        });
+        if(!user)return res.status(400).json({error:'Permission profile must belong to the selected business'});
+        res.status(201).json({success:true,user});
+    }catch(e){
+        if(e.code==='23505')return res.status(409).json({error:'A user with this username already exists in this business'});
+        res.status(e.status||500).json({error:e.message||'Failed to add business user'});
+    }
+});
+
+app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.businessId),userId=Number(req.params.userId);
+        if(!Number.isInteger(businessId)||businessId<=0||!Number.isInteger(userId)||userId<=0)return res.status(400).json({error:'Invalid business or user ID'});
+        const result=await runSystemContext(async()=>{
+            const current=(await pool.query(`
+                SELECT u.*,p.name AS profile_name
+                FROM app_users u
+                LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+                WHERE u.id=$1 AND u.business_id=$2
+            `,[userId,businessId])).rows[0];
+            if(!current)return null;
+
+            const displayName=req.body.displayName===undefined?current.display_name:String(req.body.displayName).trim();
+            const username=req.body.username===undefined?current.username:String(req.body.username).trim().toLowerCase();
+            const profileId=req.body.profileId===undefined?current.profile_id:(req.body.profileId===null||req.body.profileId===''?null:Number(req.body.profileId));
+            let assignedProfileName=current.profile_name;
+            const active=req.body.active===undefined?current.active:Boolean(req.body.active);
+            const password=String(req.body.password||'');
+            if(!displayName||!username)throw Object.assign(new Error('Display name and username are required'),{status:400});
+            if(!/^[a-z0-9._-]{3,100}$/.test(username))throw Object.assign(new Error('Username may contain only letters, numbers, dot, underscore and hyphen'),{status:400});
+            if(password&&password.length<6)throw Object.assign(new Error('Password must be at least 6 characters'),{status:400});
+            if(profileId!==null){
+                if(!Number.isInteger(profileId))throw Object.assign(new Error('Invalid permission profile'),{status:400});
+                const profile=(await pool.query('SELECT id,name FROM access_profiles WHERE id=$1 AND business_id=$2',[profileId,businessId])).rows[0];
+                if(!profile)throw Object.assign(new Error('Permission profile must belong to the selected business'),{status:400});
+                assignedProfileName=profile.name;
+            }
+
+            let permissionsOverride=current.permissions_override;
+            if(req.body.permissionsOverride!==undefined){
+                if(req.body.permissionsOverride===null)permissionsOverride=null;
+                else if(!req.body.permissionsOverride||typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride)){
+                    throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
+                }else{
+                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)));
+                    permissionsOverride={};
+                    for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
+                }
+            }
+            if(assignedProfileName==='Admin'&&permissionsOverride&&(!permissionsOverride['dashboard.view']||!permissionsOverride['access.view']||!permissionsOverride['access.edit']))throw Object.assign(new Error('Admin custom permissions must keep Dashboard and Access management available'),{status:400});
+
+            if(current.profile_name==='Admin'&&current.active&&(!active||profileId!==current.profile_id)){
+                const otherAdmins=Number((await pool.query(`
+                    SELECT COUNT(*)::int AS count
+                    FROM app_users u JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+                    WHERE u.business_id=$1 AND u.active=TRUE AND p.name='Admin' AND u.id<>$2
+                `,[businessId,userId])).rows[0]?.count||0);
+                if(otherAdmins===0)throw Object.assign(new Error('This is the last active Admin user for this business'),{status:400});
+            }
+
+            const updated=(await pool.query(`
+                UPDATE app_users
+                SET display_name=$1,username=$2,profile_id=$3,active=$4,
+                    password_hash=CASE WHEN $5::text IS NULL THEN password_hash ELSE $5 END,
+                    permissions_override=$6::jsonb,updated_at=CURRENT_TIMESTAMP
+                WHERE id=$7 AND business_id=$8
+                RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at
+            `,[displayName,username,profileId,active,password?hashPassword(password):null,permissionsOverride===null?null:JSON.stringify(permissionsOverride),userId,businessId])).rows[0];
+            if(password||!active)await pool.query('DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2',[userId,businessId]);
+            return updated;
+        });
+        if(!result)return res.status(404).json({error:'User not found in this business'});
+        res.json({success:true,user:result});
+    }catch(e){
+        if(e.code==='23505')return res.status(409).json({error:'A user with this username already exists in this business'});
+        res.status(e.status||500).json({error:e.message||'Failed to update business user'});
+    }
 });
 
 app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
@@ -6430,6 +6841,7 @@ async function startServer() {
         console.log('5/7 ensureBusinessTables');
         await ensureBusinessTables();
         console.log('✅ ensureBusinessTables complete');
+        await ensurePrinterTable();
         console.log('6/10 ensureTenantIsolationPhase2A');
         await ensureTenantIsolationPhase2A();
         console.log('✅ ensureTenantIsolationPhase2A complete');
