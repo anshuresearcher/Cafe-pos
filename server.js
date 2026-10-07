@@ -524,6 +524,7 @@ function permissionForRequest(req) {
         if (method === "DELETE") return "access.delete";
     }
     const groups = [
+        ["marketing","marketing"],
         ["kot-groups","kot_groups"],["expenses","expenses"],["loyalty","loyalty"],["backup","backup"],["invoice-designer","invoice_designer"],["advanced-reports","advanced_reports"],["deployment","deployment"],
         ["menu","menu"],["customers","customers"],["tables","tables"],["devices","devices"],
         ["reservations","reservations"],["kot","kitchen"],["payments","payments"],
@@ -541,6 +542,7 @@ function permissionForRequest(req) {
             if (method === "DELETE") return `${module}.delete`;
         }
     }
+    if (path.endsWith("/payment-summary")) return "payments.view";
     if (path === "/orders" || path.startsWith("/orders/")) {
         if (method === "GET") return "orders.view";
         if (method === "POST") return "new_order.create";
@@ -971,6 +973,23 @@ app.post('/api/public/register-business', async (req, res) => {
     }
 });
 
+app.get('/api/public/device-business', async (req,res)=>{
+    try {
+        const deviceId=getCookie(req,'cafe_device_id');
+        if(!deviceId) return res.json({businessName:''});
+        const result=await runSystemContext(()=>pool.query(`
+            SELECT b.business_name AS "businessName"
+            FROM registered_devices d
+            JOIN businesses b ON b.id=d.business_id
+            WHERE d.device_id=$1 AND d.status='active' AND b.active=TRUE
+            LIMIT 1
+        `,[deviceId]));
+        res.json(result.rows[0]||{businessName:''});
+    } catch(e) {
+        console.error('Device business lookup error:',e);
+        res.status(500).json({error:'Could not load business name'});
+    }
+});
 app.get('/api/public/business/:id', async (req,res)=>{
     try {
         const id=Number(req.params.id);
@@ -1946,6 +1965,26 @@ app.get(
 );
 
 
+app.get("/api/orders/:id/payment-summary", async (req,res)=>{
+    try {
+        const orderId=Number(req.params.id);
+        const businessId=Number(req.user.business_id);
+        const result=await pool.query(`
+            SELECT o.total,
+                   COALESCE(SUM(CASE WHEN p.payment_status='Success' THEN p.amount ELSE 0 END),0) AS amount_collected
+            FROM orders o LEFT JOIN payments p ON p.order_id=o.id
+            WHERE o.id=$1 AND o.business_id=$2
+            GROUP BY o.id
+        `,[orderId,businessId]);
+        if(!result.rows.length) return res.status(404).json({error:'Order not found'});
+        const total=Number(result.rows[0].total||0);
+        const amountCollected=Number(result.rows[0].amount_collected||0);
+        res.json({total,amountCollected,amountDue:Math.max(0,total-amountCollected)});
+    } catch(e) {
+        console.error('Order payment summary error:',e);
+        res.status(500).json({error:'Failed to load payment summary'});
+    }
+});
 app.get(
     "/api/orders/:id",
     async (req, res) => {
@@ -4990,6 +5029,20 @@ app.post('/api/loyalty/adjust', async (req,res)=>{try{
 // BILLING ADJUSTMENTS
 // =====================================================
 
+async function getBillingAdjustmentStorageSchema() {
+    const result = await pool.query(`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='billing_adjustments'
+    `);
+    const columns = new Set(result.rows.map(row => row.column_name));
+    const legacy = columns.has('kind') && columns.has('calculation');
+    if (legacy) return { kindColumn: 'kind', calculationColumn: 'calculation', legacy: true };
+    if (columns.has('type') && columns.has('value_type')) {
+        return { kindColumn: 'type', calculationColumn: 'value_type', legacy: false };
+    }
+    throw new Error('Billing adjustments table has an unsupported schema');
+}
+
 app.get("/api/billing-adjustments", async (req, res) => {
     try {
         const result = await pool.query(`
@@ -5007,23 +5060,31 @@ app.get("/api/billing-adjustments", async (req, res) => {
 app.post("/api/billing-adjustments", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
+        const schema = await getBillingAdjustmentStorageSchema();
         const name = String(req.body.name || "").trim();
-        const type = ["discount", "charge"].includes(String(req.body.type || "").toLowerCase()) ? String(req.body.type).toLowerCase() : "discount";
-        const valueType = ["amount", "percent"].includes(String(req.body.valueType || "").toLowerCase()) ? String(req.body.valueType).toLowerCase() : "amount";
+        const typeInput = String(req.body.type || req.body.kind || "discount").toLowerCase();
+        const type = ["discount", "charge"].includes(typeInput) ? typeInput : "discount";
+        const calculationInput = String(req.body.valueType || req.body.calculation || "amount").toLowerCase();
+        const isPercent = calculationInput === "percent";
+        const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
         const value = Number(req.body.value);
-        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(String(req.body.appliesTo || "").toLowerCase()) ? String(req.body.appliesTo).toLowerCase() : "all";
+        const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
+        const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
+        const appliesTo = ["all", "dine-in", "takeaway", "delivery"].includes(appliesCanonical)
+            ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
+            : "all";
         const description = String(req.body.description || "").trim() || null;
 
         if (!name) return res.status(400).json({ error: "Adjustment name is required" });
         if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "Adjustment value must be a valid non-negative number" });
-        if (valueType === "percent" && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
+        if (isPercent && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
 
         const result = await pool.query(`
             INSERT INTO billing_adjustments
-            (name,type,value_type,value,applies_to,description,active,business_id)
+            (name,${schema.kindColumn},${schema.calculationColumn},value,applies_to,description,active,business_id)
             VALUES($1,$2,$3,$4,$5,$6,TRUE,$7)
             RETURNING *
-        `, [name,type,valueType,value,appliesTo,description,businessId]);
+        `, [name,type,storedCalculation,value,appliesTo,description,businessId]);
 
         res.status(201).json(result.rows[0]);
     } catch (e) {
@@ -5036,26 +5097,34 @@ app.post("/api/billing-adjustments", async (req, res) => {
 app.put("/api/billing-adjustments/:id", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
+        const schema = await getBillingAdjustmentStorageSchema();
         const id = Number(req.params.id);
         if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid adjustment ID" });
 
         const name = String(req.body.name || "").trim();
-        const type = ["discount", "charge"].includes(String(req.body.type || "").toLowerCase()) ? String(req.body.type).toLowerCase() : "discount";
-        const valueType = ["amount", "percent"].includes(String(req.body.valueType || "").toLowerCase()) ? String(req.body.valueType).toLowerCase() : "amount";
+        const typeInput = String(req.body.type || req.body.kind || "discount").toLowerCase();
+        const type = ["discount", "charge"].includes(typeInput) ? typeInput : "discount";
+        const calculationInput = String(req.body.valueType || req.body.calculation || "amount").toLowerCase();
+        const isPercent = calculationInput === "percent";
+        const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
         const value = Number(req.body.value);
-        const appliesTo = ["all", "dine_in", "takeaway", "delivery"].includes(String(req.body.appliesTo || "").toLowerCase()) ? String(req.body.appliesTo).toLowerCase() : "all";
+        const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
+        const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
+        const appliesTo = ["all", "dine-in", "takeaway", "delivery"].includes(appliesCanonical)
+            ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
+            : "all";
         const description = String(req.body.description || "").trim() || null;
 
         if (!name) return res.status(400).json({ error: "Adjustment name is required" });
         if (!Number.isFinite(value) || value < 0) return res.status(400).json({ error: "Adjustment value must be a valid non-negative number" });
-        if (valueType === "percent" && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
+        if (isPercent && value > 100) return res.status(400).json({ error: "Percentage cannot exceed 100" });
 
         const result = await pool.query(`
             UPDATE billing_adjustments
-            SET name=$1,type=$2,value_type=$3,value=$4,applies_to=$5,description=$6,updated_at=CURRENT_TIMESTAMP
+            SET name=$1,${schema.kindColumn}=$2,${schema.calculationColumn}=$3,value=$4,applies_to=$5,description=$6,updated_at=CURRENT_TIMESTAMP
             WHERE id=$7 AND business_id=$8
             RETURNING *
-        `, [name,type,valueType,value,appliesTo,description,id,businessId]);
+        `, [name,type,storedCalculation,value,appliesTo,description,id,businessId]);
         if (!result.rows.length) return res.status(404).json({ error: "Billing adjustment not found" });
         res.json(result.rows[0]);
     } catch (e) {
@@ -5352,7 +5421,7 @@ app.get('/api/system/deployment-check', async (_,res)=>{
 
 const ACCESS_MODULES_SERVER = [
     "dashboard", "orders", "new_order", "reservations", "tables",
-    "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "backup", "invoice_designer", "advanced_reports", "deployment", "printer"
+    "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "marketing", "invoice_designer", "advanced_reports", "printer"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
 
@@ -5380,7 +5449,7 @@ function managerPermissionsServer() {
         "new_order.edit", "reservations.view", "reservations.create", "reservations.edit",
         "tables.view", "tables.edit", "kitchen.view", "kitchen.edit", "kitchen.print", "kot_groups.view", "kot_groups.create", "kot_groups.edit",
         "menu.view", "menu.create", "menu.edit", "customers.view", "customers.create", "customers.edit",
-        "payments.view", "payments.print", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
+        "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
     ];
     allow.forEach(k => p[k] = true);
     return p;
@@ -5656,6 +5725,33 @@ async function ensureSettingsTable() {
     console.log("✅ Application settings ready");
 }
 
+app.get("/api/marketing/deals", async (req,res)=>{
+    try {
+        const result=await pool.query("SELECT settings->'marketingDeals' AS deals FROM app_settings WHERE business_id=$1",[Number(req.user.business_id)]);
+        res.json({deals:Array.isArray(result.rows[0]?.deals)?result.rows[0].deals:[]});
+    } catch(e) {
+        console.error("Marketing deals load error:",e);
+        res.status(500).json({error:"Failed to load marketing deals"});
+    }
+});
+app.put("/api/marketing/deals", async (req,res)=>{
+    try {
+        if(!Array.isArray(req.body?.deals)) return res.status(400).json({error:"Deals must be a list"});
+        const businessId=Number(req.user.business_id);
+        const settings={marketingDeals:req.body.deals};
+        const result=await pool.query(`
+            INSERT INTO app_settings (id,business_id,settings,updated_at)
+            VALUES ($1,$1,$2::jsonb,CURRENT_TIMESTAMP)
+            ON CONFLICT (business_id) DO UPDATE
+            SET settings=app_settings.settings || EXCLUDED.settings, updated_at=CURRENT_TIMESTAMP
+            RETURNING settings->'marketingDeals' AS deals
+        `,[businessId,JSON.stringify(settings)]);
+        res.json({success:true,deals:result.rows[0].deals||[]});
+    } catch(e) {
+        console.error("Marketing deals save error:",e);
+        res.status(500).json({error:"Failed to save marketing deals"});
+    }
+});
 app.get(
     "/api/settings",
     async (req, res) => {
@@ -5942,7 +6038,11 @@ async function ensureTenantIsolationPhase2A() {
         await pool.query(`ALTER TABLE "${safeTable}" ALTER COLUMN business_id SET DEFAULT NULLIF(current_setting('app.business_id', true), '')::INTEGER`);
         await pool.query(`ALTER TABLE "${safeTable}" ALTER COLUMN business_id SET NOT NULL`);
         const indexName=`idx_${tableName}_business_id`.replace(/[^a-zA-Z0-9_]/g,'_');
-        await pool.query(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id)`);
+        if (tableName === 'app_settings') {
+            await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_settings_business_id_unique ON app_settings(business_id)`);
+        } else {
+            await pool.query(`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id)`);
+        }
         await pool.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
         await pool.query(`ALTER TABLE "${safeTable}" FORCE ROW LEVEL SECURITY`);
         await pool.query(`DROP POLICY IF EXISTS tenant_isolation ON "${safeTable}"`);
@@ -5952,7 +6052,6 @@ async function ensureTenantIsolationPhase2A() {
     }
 
     await makeNameUniquePerBusiness('kot_groups','name');
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_settings_business_id ON app_settings(business_id)`);
     await makeNameUniquePerBusiness('expense_categories','name');
     await makeNameUniquePerBusiness('billing_adjustments','name');
     console.log('✅ Phase 2A tenant isolation ready');

@@ -7,6 +7,9 @@
 const API = "/api";
 let authToken = sessionStorage.getItem("cafeAuthToken") || "";
 let currentUser = null;
+let currentDevice = null;
+const LOGIN_BUSINESS_NAME_KEY = 'cafeLoginBusinessName';
+function settingsLocalStorageKey(){return currentUser&&currentUser.business_id?"cafeAppSettings:"+Number(currentUser.business_id):"cafeAppSettings";}
 
 let sessionExpiryTimer = null;
 
@@ -72,6 +75,7 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
 
 let cart = [];
 let orderType = "Dine-in";
+let selectedPOSChannelKey = "dine_in";
 
 let restaurantTables = [];
 let currentOrders = [];
@@ -86,6 +90,12 @@ let editingMenuItemId = null;
 let editingAccessUserId = null;
 let editingAccessProfileId = null;
 
+const STARTER_PAYMENT_MODES = [
+    { name: "Cash", isCash: true },
+    { name: "UPI", isCash: false },
+    { name: "Card", isCash: false }
+];
+
 let appSettings = {
     restaurantName: "CAFE POS", address: "", phone: "", gstin: "",
     header: "Cafe Management System", footer: "Thank You!\nVisit Again 😊",
@@ -93,14 +103,15 @@ let appSettings = {
     showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
     showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
     paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
-    defaultPayment: "Cash", orderPrefix: "ORD-", invoicePrefix: "INV-",
+    defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: STARTER_PAYMENT_MODES.map(mode => ({ ...mode })), orderPrefix: "ORD-", invoicePrefix: "INV-",
     allowZeroAmount: false, roundTotals: false, logoUrl: "", upiId: "", receiptFont: "Arial",
     printKitchenOnOrder: false, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Dine-in", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
-    backupRetention: 30, sessionTimeout: 12, autoBackup: false, auditLog: false,
+    sessionTimeout: 12, auditLog: false,
     uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide"
 };
+const DEFAULT_APP_SETTINGS = { ...appSettings };
 
 let editingTableId = null;
 let editingCustomerId = null;
@@ -121,6 +132,106 @@ function esc(value) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+}
+
+function normalizePaymentModes(modes) {
+    const source = Array.isArray(modes) ? modes : STARTER_PAYMENT_MODES;
+    const seen = new Set();
+    const normalized = source.map(mode => {
+        const value = typeof mode === "string" ? { name: mode, isCash: mode.trim().toLowerCase() === "cash" } : mode;
+        const name = String(value?.name || "").trim().slice(0, 40);
+        const key = name.toLocaleLowerCase();
+        if (!name || seen.has(key)) return null;
+        seen.add(key);
+        return { name, isCash: value?.isCash === true };
+    }).filter(Boolean);
+    return normalized.length ? normalized : STARTER_PAYMENT_MODES.map(mode => ({ ...mode }));
+}
+
+function isCashPaymentMethod(method) {
+    return normalizePaymentModes(appSettings.paymentModes).some(mode => mode.name === method && mode.isCash);
+}
+
+function preferredPaymentMethod() {
+    const modes = normalizePaymentModes(appSettings.paymentModes);
+    return modes.find(mode => mode.name === appSettings.defaultPayment)?.name || modes[0].name;
+}
+
+function renderPaymentModeOptions() {
+    appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
+    const defaultSelect = document.getElementById("settingDefaultPayment");
+    const expenseSelect = document.getElementById("expensePayment");
+    const currentDefault = defaultSelect?.value || appSettings.defaultPayment;
+    const currentExpense = expenseSelect?.value;
+    const defaultMode = appSettings.paymentModes.find(mode => mode.name === currentDefault)?.name || appSettings.paymentModes[0].name;
+    const expenseMode = appSettings.paymentModes.find(mode => mode.name === currentExpense)?.name || appSettings.paymentModes[0].name;
+    const options = appSettings.paymentModes.map(mode => `<option value="${esc(mode.name)}">${esc(mode.name)}</option>`).join("");
+    if (defaultSelect) {
+        defaultSelect.innerHTML = options;
+        defaultSelect.value = defaultMode;
+    }
+    if (expenseSelect) {
+        expenseSelect.innerHTML = options;
+        expenseSelect.value = expenseMode;
+    }
+    appSettings.defaultPayment = defaultMode;
+}
+
+function renderPaymentModeManager() {
+    const list = document.getElementById("paymentModesList");
+    if (!list) return;
+    appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
+    list.innerHTML = appSettings.paymentModes.map((mode, index) => `
+        <div class="payment-mode-row">
+            <strong>${esc(mode.name)}</strong>
+            <label><input type="checkbox" ${mode.isCash ? "checked" : ""} onchange="setPaymentModeCash(${index}, this.checked)"> Cash handling</label>
+            <button type="button" class="table-action-btn" onclick="removePaymentMode(${index})" ${appSettings.paymentModes.length <= 1 ? "disabled" : ""}>Remove</button>
+        </div>`).join("");
+    renderPaymentModeOptions();
+}
+
+function addPaymentMode() {
+    const input = document.getElementById("newPaymentModeName");
+    const name = String(input?.value || "").trim().slice(0, 40);
+    if (!name) return alert("Enter a payment mode name.");
+    if (normalizePaymentModes(appSettings.paymentModes).some(mode => mode.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        return alert("That payment mode already exists.");
+    }
+    const isCash = document.getElementById("newPaymentModeCash")?.checked === true;
+    appSettings.paymentModes = [...normalizePaymentModes(appSettings.paymentModes).map(mode => ({ ...mode, isCash: isCash ? false : mode.isCash })), { name, isCash }];
+    if (input) input.value = "";
+    const cashCheckbox = document.getElementById("newPaymentModeCash");
+    if (cashCheckbox) cashCheckbox.checked = false;
+    renderPaymentModeManager();
+    renderPaymentMethods();
+}
+
+function removePaymentMode(index) {
+    const modes = normalizePaymentModes(appSettings.paymentModes);
+    if (modes.length <= 1) return alert("Keep at least one payment mode available.");
+    modes.splice(index, 1);
+    appSettings.paymentModes = modes;
+    renderPaymentModeManager();
+    renderPaymentMethods();
+}
+
+function setPaymentModeCash(index, checked) {
+    appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes).map((mode, modeIndex) => ({
+        ...mode,
+        isCash: modeIndex === index ? checked : checked ? false : mode.isCash
+    }));
+    renderPaymentModeManager();
+    renderPaymentMethods();
+}
+
+function renderPaymentMethods() {
+    const container = document.getElementById("paymentMethods");
+    if (!container) return;
+    const modes = normalizePaymentModes(appSettings.paymentModes);
+    container.innerHTML = modes.map(mode => `<button type="button" data-payment-method="${esc(mode.name)}" aria-pressed="${mode.name === selectedPaymentMethod ? "true" : "false"}" class="${mode.name === selectedPaymentMethod ? "selected" : ""}"><span class="payment-method-icon">${mode.isCash ? "💵" : "💳"}</span><span>${esc(mode.name)}</span></button>`).join("");
+    container.querySelectorAll("[data-payment-method]").forEach(button => {
+        button.addEventListener("click", () => selectPaymentMethod(button.dataset.paymentMethod));
+    });
 }
 
 
@@ -276,6 +387,28 @@ async function registerBusiness(event) {
     } catch(e) { if(box) box.textContent=e.message; }
 }
 
+function renderLoginBusinessWelcome(name) {
+    const wrapper = document.getElementById("loginBusinessWelcome");
+    const nameElement = document.getElementById("loginBusinessName");
+    const cleanName = String(name || "").trim();
+    if (nameElement) nameElement.textContent = cleanName;
+    if (wrapper) wrapper.hidden = !cleanName;
+}
+function cacheLoginBusinessName(name) {
+    const cleanName = String(name || "").trim();
+    if (!cleanName) return;
+    localStorage.setItem(LOGIN_BUSINESS_NAME_KEY, cleanName);
+    renderLoginBusinessWelcome(cleanName);
+}
+async function loadLoginBusinessWelcome() {
+    renderLoginBusinessWelcome(localStorage.getItem(LOGIN_BUSINESS_NAME_KEY) || "");
+    try {
+        const response = await fetch(API + "/public/device-business");
+        if (!response.ok) return;
+        const data = await response.json();
+        cacheLoginBusinessName(data.businessName || "");
+    } catch (_) {}
+}
 async function loginUser(event) {
     event?.preventDefault();
     const username=document.getElementById("loginUsername")?.value.trim()||"";
@@ -284,17 +417,19 @@ async function loginUser(event) {
     try{
         const r=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
         const data=await r.json().catch(()=>({})); if(!r.ok) throw new Error(data.error||"Login failed");
-        authToken=data.token; currentUser=data.user; sessionStorage.setItem("cafeAuthToken",authToken);
+        authToken=data.token; currentUser=data.user; currentDevice=data.device||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.setItem("cafeAuthToken",authToken);
         const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
         scheduleSessionExpiry(data.expiresAt || (Date.now() + fallbackSessionHours * 60 * 60 * 1000));
-        primeKOTAlertAudio(); await startAuthenticatedApp();
+        primeKOTAlertAudio(); await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");}
+async function logoutUser(){clearSessionExpiryTimer();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){if(!authToken){document.getElementById("loginScreen")?.style.setProperty("display","flex");return false;}try {
     const r = await api("/auth/me");
 
     currentUser = r.user;
+    currentDevice = r.device || null;
+    cacheLoginBusinessName(currentUser?.business_name);
 
     const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
     scheduleSessionExpiry(r.expiresAt || (Date.now() + fallbackSessionHours * 60 * 60 * 1000));
@@ -484,24 +619,13 @@ function handleProfilePanelEscape(e){
 function profileAction(action){
     closeProfilePanel();
     switch(action){
-        case "notification":
-            showProfileToast("🔔 Test notification sent.");
-            break;
-        case "sync":
-            showProfileToast("🔄 Syncing data…");
-            break;
-        case "whats-new":
-            showProfileToast("✨ You're on the latest version of Cafe POS.");
-            break;
-        case "change-business":
-            showBusinessProfileDialog();
-            break;
-        case "about":
-            showProfileToast("☕ Cafe POS — Step 19 build.");
-            break;
+        case "notification": showProfileToast("🔔 Test notification sent."); break;
+        case "sync": showProfileToast("🔄 Syncing data…"); break;
+        case "whats-new": showProfileToast("✨ You're on the latest version of Cafe Pilot."); break;
+        case "change-business": showBusinessProfileDialog(); break;
+        case "about": openBusinessAboutDialog(); break;
     }
 }
-
 function showProfileToast(message){
     let toast=document.getElementById("profileToast");
     if(!toast){
@@ -514,6 +638,32 @@ function showProfileToast(message){
     toast.classList.add("show");
     clearTimeout(toast._hideTimer);
     toast._hideTimer=setTimeout(function(){ toast.classList.remove("show"); },2600);
+}
+function setAboutText(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = String(value || "—");
+}
+function openBusinessAboutDialog() {
+    if (!currentUser) return showProfileToast("Sign in to view business information.");
+    const location = [currentUser.business_address, currentUser.city, currentUser.state].filter(Boolean).join(", ");
+    const branch = [currentUser.business_code, currentUser.city].filter(Boolean).join(" · ") || currentUser.business_name;
+    setAboutText("aboutBusinessName", currentUser.business_name || "Current Business");
+    setAboutText("aboutBusinessMeta", [currentUser.business_code, currentUser.business_type].filter(Boolean).join(" · "));
+    setAboutText("aboutBranch", branch);
+    setAboutText("aboutBusinessType", currentUser.business_type || "Cafe");
+    setAboutText("aboutOwner", currentUser.owner_name || currentUser.display_name || "—");
+    setAboutText("aboutDevice", currentDevice ? [currentDevice.device_name, currentDevice.device_type].filter(Boolean).join(" · ") : "—");
+    setAboutText("aboutPhone", currentUser.business_phone || "—");
+    setAboutText("aboutEmail", currentUser.business_email || "—");
+    setAboutText("aboutAddress", location || "—");
+    setAboutText("aboutGstin", currentUser.gstin || "—");
+    setAboutText("aboutCurrency", currentUser.currency || appSettings.currency || "₹");
+    const modal = document.getElementById("businessAboutModal");
+    if (modal) modal.style.display = "flex";
+}
+function closeBusinessAbout() {
+    const modal = document.getElementById("businessAboutModal");
+    if (modal) modal.style.display = "none";
 }
 function showBusinessProfileDialog() {
     if (!currentUser?.business_name) { showProfileToast("No business profile found."); return; }
@@ -528,7 +678,7 @@ function showBusinessProfileDialog() {
     alert(lines.join("\\n"));
 }
 
-async function startAuthenticatedApp(){document.getElementById("loginScreen")?.style.setProperty("display","none");applyPermissionsToUI();await loadSettings();await loadBillingAdjustments();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();await Promise.all([hasPermission("dashboard")?updateDashboard():Promise.resolve(),hasPermission("new_order")?loadMenu():Promise.resolve(),hasPermission("menu")?loadMenuManagement():Promise.resolve(),hasPermission("tables")?loadTables():Promise.resolve(),hasPermission("access")?loadAccess():Promise.resolve(),(appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())]);updateCart();setOrderType("Dine-in");startKOTAlertPolling();}
+async function startAuthenticatedApp(){document.getElementById("loginScreen")?.style.setProperty("display","none");applyPermissionsToUI();await loadSettings();await Promise.all([loadBillingAdjustments(),loadMarketingDeals()]);stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();await Promise.all([hasPermission("dashboard")?updateDashboard():Promise.resolve(),hasPermission("new_order")?loadMenu():Promise.resolve(),hasPermission("menu")?loadMenuManagement():Promise.resolve(),hasPermission("tables")?loadTables():Promise.resolve(),hasPermission("access")?loadAccess():Promise.resolve(),hasPermission("printer")?loadPrinters():Promise.resolve(),(appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())]);updateCart();setOrderType("Dine-in");startKOTAlertPolling();}
 
 // ==========================================
 // NAVIGATION
@@ -540,10 +690,15 @@ function showPage(pageName) {
         return;
     }
 
-    const permissionModule = pageName === "new-order" ? "new_order" : (pageName === "kot-groups" ? "kot_groups" : (pageName === "advanced-reports" ? "advanced_reports" : pageName));
+    const permissionModule = pageName === "new-order" ? "new_order" : (pageName === "table-view" ? "tables" : (pageName === "kot-groups" ? "kot_groups" : (pageName === "advanced-reports" ? "advanced_reports" : pageName)));
     if (!currentUser || !hasPermission(permissionModule, "view")) {
         if (currentUser) alert("You do not have permission to open this module.");
         return;
+    }
+
+    if (pageName !== "new-order") {
+        closeBillingCustomerPanel();
+        if (document.getElementById("billModal")?.classList.contains("bill-preview-sidecar")) closeBillModal();
     }
 
     // Hide all pages
@@ -673,10 +828,8 @@ function showPage(pageName) {
     }
 
 
-    if (pageName === "tables") {
-
+    if (pageName === "tables" || pageName === "table-view") {
         loadTables();
-
     }
 
 
@@ -706,61 +859,33 @@ function showPage(pageName) {
 // ORDER TYPE
 // ==========================================
 
-function setOrderType(type) {
-
+function setOrderType(type, preserveSaleChannel = false) {
     orderType = type;
-
-    const label =
-        document.getElementById("orderType");
-
-    if (label) {
-
-        label.textContent = type;
-
+    const label = document.getElementById("orderType");
+    if (label) label.textContent = type;
+    document.getElementById("dineBtn")?.classList.toggle("selected", type === "Dine-in");
+    document.getElementById("takeBtn")?.classList.toggle("selected", type === "Takeaway");
+    if (!preserveSaleChannel) {
+        const preferences = getPOSChannelPreferences();
+        const modulePrefs = type === "Dine-in" ? preferences.tableView : preferences.newOrder;
+        const fallback = type === "Dine-in" ? "dine_in" : "takeaway";
+        let nextChannel = modulePrefs.defaultChannel || fallback;
+        if (type === "Dine-in" && !modulePrefs.channels.includes("dine_in")) nextChannel = modulePrefs.channels[0] || "dine_in";
+        if (type === "Takeaway" && POS_CHANNELS.find(channel => channel.key === nextChannel)?.orderType !== "Takeaway") {
+            nextChannel = modulePrefs.channels.find(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway") || "takeaway";
+        }
+        selectedPOSChannelKey = nextChannel;
     }
-
-
-    document
-        .getElementById("dineBtn")
-        ?.classList.toggle(
-            "selected",
-            type === "Dine-in"
-        );
-
-
-    document
-        .getElementById("takeBtn")
-        ?.classList.toggle(
-            "selected",
-            type === "Takeaway"
-        );
-
-
-    const area =
-        document.getElementById("tableArea");
-
-    if (area) {
-
-        area.style.display =
-            type === "Dine-in"
-                ? "block"
-                : "none";
-
+    if (type !== "Dine-in") {
+        const tableInput = document.getElementById("tableNumber");
+        if (tableInput) tableInput.value = "";
     }
-
-
-    if (type === "Dine-in") {
-        loadTables();
-    }
+    repriceCartForCurrentChannel();
+    renderBillingSaleChannelOptions();
+    if (type === "Dine-in") loadTables();
     updateBillingTableSelection();
-
+    renderBillingAdjustmentSelectors();
 }
-
-
-// ==========================================
-// CART
-// ==========================================
-
 function addToCart(id,name,price,menuItem=null,variant=null){
     const cartKey=variant?`${id}:${variant.id}`:String(id); const existing=cart.find(x=>String(x.cartKey)===cartKey);
     if(existing) existing.quantity++; else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),quantity:1,unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive'});
@@ -798,12 +923,49 @@ function calculateSubtotal() {
 
 function getSelectedBillingAdjustment(id) {
     if (!id) return null;
+    const selectedId = String(id);
+    if (selectedId.startsWith("marketing:")) {
+        const deal = marketingDeals.find(x => String(x.id) === selectedId.slice("marketing:".length));
+        if (!isMarketingDealAvailableForCheckout(deal)) return null;
+        return {
+            ...deal,
+            source: "marketing",
+            calculation: deal.valueType === "percentage" ? "percent" : "fixed"
+        };
+    }
     const rule = billingAdjustments.find(x => Number(x.id) === Number(id) && x.active !== false);
     if (!rule) return null;
     const applies = String(rule.applies_to || "all").toLowerCase();
     const channel = orderType === "Dine-in" ? "dine-in" : orderType === "Takeaway" ? "takeaway" : String(orderType || "").toLowerCase();
     if (applies !== "all" && applies !== channel) return null;
     return rule;
+}
+
+function isMarketingDealAvailableForCheckout(deal) {
+    return !marketingDealUnavailableReason(deal);
+}
+
+function marketingDealUnavailableReason(deal) {
+    if (!deal || deal.active === false) return "Inactive";
+    if (String(deal.type || "").trim().toLowerCase() !== "discount") return `${deal.type || "Deal"} cannot be applied as a bill discount`;
+    const now = new Date();
+    const today = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
+    if (deal.startDate && String(deal.startDate) > today) return `Starts ${deal.startDate}`;
+    if (deal.endDate && String(deal.endDate) < today) return `Ended ${deal.endDate}`;
+    const channels = Array.isArray(deal.channels) ? deal.channels : [];
+    const normalizeChannel = value => String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+    if (channels.length && !channels.map(normalizeChannel).includes(normalizeChannel(currentSaleChannelKey()))) return "Unavailable on this channel";
+    return "";
+}
+
+function marketingDealAppliesToLine(deal, line) {
+    const menuItem = currentMenu.find(item => String(item.id) === String(line.item.id));
+    if (deal.itemId && String(deal.itemId) !== String(line.item.id)) return false;
+    if (deal.category) {
+        const category = menuItem?.category || line.item.category || "";
+        if (String(category).trim().toLowerCase() !== String(deal.category).trim().toLowerCase()) return false;
+    }
+    return true;
 }
 
 function getBillingBreakdown() {
@@ -822,15 +984,19 @@ function getBillingBreakdown() {
 
     const subtotal = lines.reduce((sum, x) => sum + x.net, 0);
 
+    const isMarketingDeal = discountRule?.source === "marketing";
+    const hasDiscountTarget = isMarketingDeal && Boolean(discountRule.itemId || discountRule.category);
+    const eligibleLines = hasDiscountTarget ? lines.filter(line => marketingDealAppliesToLine(discountRule, line)) : lines;
+    const discountBase = eligibleLines.reduce((sum, line) => sum + line.net, 0);
     let discount = 0;
     if (discountRule) {
         discount = discountRule.calculation === "percent"
-            ? subtotal * Math.max(0, Number(discountRule.value || 0)) / 100
+            ? discountBase * Math.max(0, Number(discountRule.value || 0)) / 100
             : Math.max(0, Number(discountRule.value || 0));
     }
-    discount = Math.min(subtotal, Math.max(0, discount));
+    discount = Math.min(discountBase, Math.max(0, discount));
 
-    const discountRatio = subtotal > 0 ? discount / subtotal : 0;
+    const discountRatio = discountBase > 0 ? discount / discountBase : 0;
     let gst = 0;
     let inclusiveTax = 0;
     let exclusiveTax = 0;
@@ -838,7 +1004,8 @@ function getBillingBreakdown() {
     const taxesByRate = {};
 
     for (const line of lines) {
-        const adjustedNet = Math.max(0, line.net * (1 - discountRatio));
+        const lineIsEligible = !hasDiscountTarget || marketingDealAppliesToLine(discountRule, line);
+        const adjustedNet = Math.max(0, line.net * (1 - (lineIsEligible ? discountRatio : 0)));
         const lineTax = adjustedNet * line.rate / 100;
         gst += lineTax;
         if (line.inclusive) inclusiveTax += lineTax;
@@ -861,7 +1028,7 @@ function getBillingBreakdown() {
     return {
         subtotal, discount, serviceCharge, gst, inclusiveTax, exclusiveTax,
         total, taxable, gstRate: null, taxesByRate,
-        discountId: discountRule?.id || null,
+        discountId: discountRule?.source === "marketing" ? null : discountRule?.id || null,
         chargeId: chargeRule?.id || null,
         discountName: discountRule?.name || "",
         chargeName: chargeRule?.name || ""
@@ -914,6 +1081,33 @@ function updateBill() {
 }
 
 
+function previewCurrentBill() {
+    const breakdown = getBillingBreakdown();
+    const order = currentOpenOrderData?.order || {};
+    openBillPreview({
+        viewMode: "side-panel",
+        orderNumber: order.order_number || "New Order",
+        invoiceNumber: currentOpenOrderData?.invoice?.invoice_number || null,
+        orderType,
+        tableNumber: document.getElementById("tableNumber")?.value || null,
+        subtotal: breakdown.subtotal,
+        discount: breakdown.discount,
+        discountName: breakdown.discountName,
+        serviceCharge: breakdown.serviceCharge,
+        chargeName: breakdown.chargeName,
+        gst: breakdown.gst,
+        total: breakdown.total,
+        paymentMethod: order.payment_method || "Pending",
+        customerName: document.getElementById("billingCustomerNameQuick")?.value.trim() || "",
+        customerPhone: document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "",
+        customerEmail: document.getElementById("billingCustomerEmailQuick")?.value.trim() || "",
+        items: cart.map(item => ({
+            name: item.name,
+            price: Number(item.price),
+            quantity: Number(item.quantity)
+        }))
+    });
+}
 function updateCart() {
 
     const box =
@@ -936,6 +1130,7 @@ function updateCart() {
             '<p class="empty">No items added.</p>';
 
         updateBill();
+        refreshSideBillPreview();
 
         return;
 
@@ -1003,7 +1198,13 @@ function updateCart() {
 
 
     updateBill();
+    refreshSideBillPreview();
 
+}
+
+function refreshSideBillPreview() {
+    const modal = document.getElementById("billModal");
+    if (modal?.classList.contains("bill-preview-sidecar") && modal.style.display !== "none") previewCurrentBill();
 }
 
 
@@ -1011,25 +1212,194 @@ function updateCart() {
 // MENU
 // ==========================================
 
+const POS_CHANNELS = [
+    { key: "dine_in", label: "Dine-In", orderType: "Dine-in" },
+    { key: "takeaway", label: "Takeaway Meal", orderType: "Takeaway" },
+    { key: "delivery", label: "Delivery", orderType: "Takeaway" },
+    { key: "online", label: "Online", orderType: "Takeaway" }
+];
+function defaultPOSChannelPreferences() {
+    return {
+        newOrder: { channels: ["dine_in", "takeaway", "delivery", "online"], defaultChannel: "dine_in" },
+        tableView: { channels: ["dine_in"], defaultChannel: "dine_in" }
+    };
+}
+function normalizePOSChannelPreferences(value) {
+    const defaults = defaultPOSChannelPreferences();
+    const normalizeModule = function(moduleValue, fallback) {
+        const valid = Array.isArray(moduleValue?.channels) ? moduleValue.channels.filter(key => POS_CHANNELS.some(channel => channel.key === key)) : [];
+        const channels = valid.length ? [...new Set(valid)] : fallback.channels.slice();
+        const defaultChannel = channels.includes(moduleValue?.defaultChannel) ? moduleValue.defaultChannel : channels[0];
+        return { channels, defaultChannel };
+    };
+    const newOrder = normalizeModule(value?.newOrder, defaults.newOrder);
+    if (!newOrder.channels.some(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway")) newOrder.channels.push("takeaway");
+    return {
+        newOrder,
+        tableView: normalizeModule(value?.tableView, defaults.tableView)
+    };
+}
+function getPOSChannelPreferences() {
+    return normalizePOSChannelPreferences(appSettings.posChannelPreferences);
+}
+function renderBillingSaleChannelOptions() {
+    const select = document.getElementById("billingSaleChannel");
+    if (!select) return;
+    const preferences = getPOSChannelPreferences();
+    const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
+    const channels = modulePrefs.channels.length ? modulePrefs.channels : [orderType === "Dine-in" ? "dine_in" : "takeaway"];
+    if (!channels.includes(selectedPOSChannelKey)) selectedPOSChannelKey = modulePrefs.defaultChannel || channels[0];
+    select.innerHTML = channels.map(key => {
+        const channel = POS_CHANNELS.find(entry => entry.key === key);
+        return channel ? "<option value=\"" + esc(channel.key) + "\">" + esc(channel.label) + "</option>" : "";
+    }).join("");
+    if (channels.includes(selectedPOSChannelKey)) select.value = selectedPOSChannelKey;
+    else {
+        selectedPOSChannelKey = modulePrefs.defaultChannel || channels[0];
+        select.value = selectedPOSChannelKey;
+    }
+}
+async function selectBillingSaleChannel(channelKey) {
+    const preferences = getPOSChannelPreferences();
+    const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
+    if (!modulePrefs.channels.includes(channelKey)) return;
+    const channel = POS_CHANNELS.find(entry => entry.key === channelKey);
+    if (!channel) return;
+    selectedPOSChannelKey = channelKey;
+    if (channel.orderType !== orderType) setOrderType(channel.orderType, true);
+    renderBillingSaleChannelOptions();
+    renderBillingAdjustmentSelectors();
+    await loadMenu();
+    cart = cart.map(entry => {
+        const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
+        const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
+        return item ? { ...entry, price: resolveMenuPrice(item, variant || null) } : entry;
+    });
+    updateCart();
+}
 function currentSaleChannelKey() {
-    return orderType === 'Dine-in' ? 'dine_in' : orderType === 'Takeaway' ? 'takeaway' : String(orderType || '').toLowerCase().replace(/\s+/g,'_');
+    return selectedPOSChannelKey || (orderType === "Dine-in" ? "dine_in" : "takeaway");
 }
 function resolveMenuPrice(item, variant=null) {
-    const prices=(variant?.channel_prices||item?.channel_prices||{});
-    const v=Number(prices[currentSaleChannelKey()]);
-    return Number.isFinite(v) ? v : Number((variant?.price ?? item?.price) || 0);
+    const channel = currentSaleChannelKey();
+    const candidates = [
+        variant?.channel_prices?.[channel],
+        variant?.price,
+        item?.channel_prices?.[channel],
+        item?.price
+    ];
+    for (const candidate of candidates) {
+        if (candidate === null || candidate === undefined || candidate === "") continue;
+        const value = Number(candidate);
+        if (Number.isFinite(value) && value >= 0) return value;
+    }
+    return 0;
+}
+function repriceCartForCurrentChannel() {
+    if (!cart.length || !currentMenu.length) return;
+    cart = cart.map(entry => {
+        const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
+        const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
+        return item ? { ...entry, price: resolveMenuPrice(item, variant || null) } : entry;
+    });
+    updateCart();
 }
 function menuTaxLabel(item){ return item?.tax_label || (Number(item?.tax_rate||0) ? `GST ${Number(item.tax_rate)}%` : 'Tax 0%'); }
+function getAvailableMenuVariants(item) {
+    return Array.isArray(item?.variants)
+        ? item.variants.filter(variant => variant && variant.available !== false && variant.available !== 0 && !["false", "0"].includes(String(variant.available).toLowerCase()))
+        : [];
+}
+function selectBillingMenuItem(item) {
+    if (Array.isArray(item?.variants) && item.variants.length) {
+        openVariantPicker(item);
+        return;
+    }
+    addToCart(item.id, item.name, resolveMenuPrice(item), item);
+}
 function openVariantPicker(item){
-    const variants=(item.variants||[]).filter(v=>v.available!==false);
-    if(!variants.length){addToCart(item.id,item.name,resolveMenuPrice(item),item);return;}
+    const variants=getAvailableMenuVariants(item);
+    if(!variants.length){alert("This menu item has no available variants right now.");return;}
     const modal=document.getElementById('variantPickerModal'), body=document.getElementById('variantPickerBody');
     if(!modal||!body)return;
-    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}</strong><span>${esc(menuTaxLabel(item))}</span></div><div class="variant-choice-grid">${variants.map(v=>`<button class="variant-choice" type="button" onclick="chooseVariant(${item.id},${v.id})"><span><strong>${esc(v.name)}</strong><small>${esc(v.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,v))}</b></button>`).join('')}</div>`;
+    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}</strong><span>${esc(menuTaxLabel(item))}</span></div><p class="variant-picker-hint">Choose a size or variant to add it to the bill.</p><div class="variant-choice-grid">${variants.map(v=>`<button class="variant-choice" type="button" data-variant-id="${esc(v.id)}"><span><strong>${esc(v.name)}</strong><small>${esc(v.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,v))}</b></button>`).join('')}</div>`;
+    body.querySelectorAll("[data-variant-id]").forEach(button => {
+        button.addEventListener("click", () => chooseVariant(item.id, button.dataset.variantId));
+    });
     modal.style.display='flex';
 }
 function closeVariantPicker(){document.getElementById('variantPickerModal')?.style.setProperty('display','none');}
-function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=(item?.variants||[]).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;addToCart(item.id,`${item.name} — ${v.name}`,resolveMenuPrice(item,v),item,v);closeVariantPicker();}
+function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;addToCart(item.id,`${item.name} — ${v.name}`,resolveMenuPrice(item,v),item,v);closeVariantPicker();}
+
+async function openBillingCustomerPanel() {
+    document.querySelector("#new-order .billing-shell")?.classList.add("customer-step");
+    document.querySelector(".billing-customer-open-btn")?.setAttribute("aria-expanded", "true");
+    if (!Array.isArray(currentCustomers) || currentCustomers.length === 0) await loadCustomers();
+    document.getElementById("billingCustomerPhoneQuick")?.focus();
+}
+
+function closeBillingCustomerPanel() {
+    document.querySelector("#new-order .billing-shell")?.classList.remove("customer-step");
+    document.querySelector(".billing-customer-open-btn")?.setAttribute("aria-expanded", "false");
+}
+
+function setBillingCustomerLookupMode(mode, selectedButton) {
+    const input = document.getElementById("billingCustomerPhoneQuick");
+    const label = document.querySelector(".billing-customer-phone-label");
+    const countryCode = document.querySelector(".billing-country-code");
+    document.querySelectorAll(".billing-customer-mode").forEach(button => button.classList.toggle("active", button === selectedButton));
+    const isId = mode === "id";
+    if (input) {
+        input.type = isId ? "text" : "tel";
+        input.value = "";
+        input.placeholder = isId ? "Search customer ID" : "Search customer mobile number";
+        input.focus();
+    }
+    if (label) label.textContent = isId ? "Customer ID" : "Mobile Number";
+    if (countryCode) countryCode.hidden = isId;
+    const results = document.getElementById("billingCustomerLookupResults");
+    if (results) {
+        results.hidden = true;
+        results.innerHTML = "";
+    }
+}
+
+function searchBillingCustomers(query) {
+    const results = document.getElementById("billingCustomerLookupResults");
+    if (!results) return;
+    const mode = document.querySelector(".billing-customer-mode.active")?.dataset.lookupMode || "phone";
+    const rawQuery = String(query || "").trim();
+    const searchValue = mode === "phone" ? rawQuery.replace(/\D/g, "") : rawQuery.toLowerCase();
+    if (!searchValue) {
+        results.hidden = true;
+        results.innerHTML = "";
+        return;
+    }
+    const matches = (Array.isArray(currentCustomers) ? currentCustomers : []).filter(customer => {
+        if (mode === "id") return String(customer.id || "").toLowerCase().includes(searchValue);
+        return String(customer.phone || "").replace(/\D/g, "").includes(searchValue);
+    }).slice(0, 6);
+    results.innerHTML = matches.length
+        ? matches.map(customer => `<button type="button" class="billing-customer-result" role="option" data-customer-id="${esc(customer.id)}"><strong>${esc(customer.name)}</strong><span>${esc(customer.phone || "")}</span></button>`).join("")
+        : `<div class="billing-customer-no-results" role="status">No matching customer. Enter the customer's details below to add them to this order.</div>`;
+    results.hidden = false;
+    results.querySelectorAll("[data-customer-id]").forEach(button => {
+        button.addEventListener("click", () => {
+            const customer = currentCustomers.find(entry => String(entry.id) === button.dataset.customerId);
+            if (!customer) return;
+            const phoneMode = document.querySelector('.billing-customer-mode[data-lookup-mode="phone"]');
+            if (phoneMode) setBillingCustomerLookupMode("phone", phoneMode);
+            const phone = document.getElementById("billingCustomerPhoneQuick");
+            const name = document.getElementById("billingCustomerNameQuick");
+            const email = document.getElementById("billingCustomerEmailQuick");
+            if (phone) phone.value = customer.phone || "";
+            if (name) name.value = customer.name || "";
+            if (email) email.value = customer.email || "";
+            results.hidden = true;
+            results.innerHTML = "";
+        });
+    });
+}
 
 let menuCategories=[];
 async function loadMenuCategories(){
@@ -1125,27 +1495,35 @@ async function loadMenu() {
             const card = document.createElement("div");
             card.className = "food-card modern-food-card";
             card.dataset.category = String(item.category || "").trim();
-            card.onclick = () => item.variants?.length
-                ? openVariantPicker(item)
-                : addToCart(item.id, item.name, resolveMenuPrice(item), item);
+            const variants = getAvailableMenuVariants(item);
+            const hasVariants = Array.isArray(item.variants) && item.variants.length > 0;
+            const variantsUnavailable = hasVariants && variants.length === 0;
+            card.classList.toggle("variants-unavailable", variantsUnavailable);
+            card.setAttribute("aria-disabled", variantsUnavailable ? "true" : "false");
+            card.onclick = () => {
+                if (!variantsUnavailable) selectBillingMenuItem(item);
+            };
 
             const image = item.image_url || item.imageUrl || "";
+            const startingPrice = variants.length
+                ? Math.min(...variants.map(variant => resolveMenuPrice(item, variant)))
+                : resolveMenuPrice(item);
             card.innerHTML = `
                 <div class="food-card-image">
                     ${image
                         ? `<img src="${esc(image)}" alt="${esc(item.name)}">`
                         : `<div class="food-icon">${menuIcon(item.category)}</div>`}
-                    ${item.variants?.length ? `<span class="variant-badge">${item.variants.length} size${item.variants.length > 1 ? "s" : ""}</span>` : ""}
+                    ${hasVariants ? `<span class="variant-badge">${variantsUnavailable ? "Unavailable" : `${variants.length} size${variants.length > 1 ? "s" : ""}`}</span>` : ""}
                 </div>
                 <div class="food-card-content">
                     <h3>${esc(item.name)}</h3>
                     <p class="food-meta">${esc(item.category || "Uncategorized")} · ${esc(item.unit || "ea")}</p>
-                    <div class="food-card-bottom"><strong>${money(resolveMenuPrice(item))}</strong><button type="button">Add</button></div>
+                    <div class="food-card-bottom"><strong>${variants.length ? `From ${money(startingPrice)}` : variantsUnavailable ? "Unavailable" : money(startingPrice)}</strong><button type="button" ${variantsUnavailable ? "disabled" : ""}>${hasVariants ? "Choose" : "Add"}</button></div>
                 </div>`;
             const addBtn = card.querySelector("button");
             if (addBtn) addBtn.onclick = e => {
                 e.stopPropagation();
-                item.variants?.length ? openVariantPicker(item) : addToCart(item.id,item.name,resolveMenuPrice(item),item);
+                if (!variantsUnavailable) selectBillingMenuItem(item);
             };
             grid.appendChild(card);
         });
@@ -1236,344 +1614,274 @@ function filterCategory(category, button) {
 // PAYMENT
 // ==========================================
 
-function openPayment() {
+let paymentCategory = "full";
+let selectedPaymentMethod = "";
+let paymentCollectedSoFar = 0;
+let paymentDueNow = 0;
+let splitPayments = [];
 
-    if (!cart.length) {
+async function openPayment() {
+    if (!cart.length) return alert("Please add at least one item.");
+    if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) return alert("Please select a table for Dine-in.");
 
-        return alert(
-            "Please add at least one item."
-        );
-
+    paymentCollectedSoFar = 0;
+    if (currentOpenOrderId) {
+        try {
+            const summary = await api(`/orders/${currentOpenOrderId}/payment-summary`);
+            paymentCollectedSoFar = Math.max(0, Number(summary.amountCollected || 0));
+        } catch (error) {
+            return alert("Unable to load previous payments: " + error.message);
+        }
     }
 
-
-    if (
-        orderType === "Dine-in" &&
-        !document.getElementById(
-            "tableNumber"
-        )?.value
-    ) {
-
-        return alert(
-            "Please select a table for Dine-in."
-        );
-
-    }
-
-
-    const total = getBillingBreakdown().total;
-
-
-    const paymentAmount =
-        document.getElementById(
-            "paymentAmount"
-        );
-
-
-    if (paymentAmount) {
-
-        paymentAmount.textContent =
-            money(total);
-
-    }
-
-
-    const cashReceived =
-        document.getElementById(
-            "cashReceived"
-        );
-
-
-    if (cashReceived) {
-
-        cashReceived.value = "";
-
-    }
-
-
-    const changeAmount =
-        document.getElementById(
-            "changeAmount"
-        );
-
-
-    if (changeAmount) {
-
-        changeAmount.textContent =
-            money(0);
-
-    }
-
-
-    const cashSection =
-        document.getElementById(
-            "cashSection"
-        );
-
-
-    if (cashSection) {
-
-        cashSection.style.display =
-            "none";
-
-    }
-
-
-    const modal =
-        document.getElementById(
-            "paymentModal"
-        );
-
-
-    if (modal) {
-
-        modal.style.display =
-            "flex";
-
-    }
-
+    const breakdown = getBillingBreakdown();
+    paymentDueNow = Math.max(0, Number(breakdown.total || 0) - paymentCollectedSoFar);
+    paymentCategory = "full";
+    selectedPaymentMethod = preferredPaymentMethod();
+    renderPaymentMethods();
+    splitPayments = [];
+    document.querySelectorAll('input[name="paymentCategory"]').forEach(input => input.checked = input.value === "full");
+    const received = document.getElementById("cashReceived");
+    if (received) received.value = paymentDueNow.toFixed(2);
+    const splitAmount = document.getElementById("splitPaymentAmount");
+    if (splitAmount) splitAmount.value = "";
+    const date = document.getElementById("paymentOrderDate");
+    if (date) date.textContent = new Date().toLocaleString();
+    const type = document.getElementById("paymentOrderType");
+    if (type) type.textContent = orderType + (document.getElementById("tableNumber")?.value ? " · " + document.getElementById("tableNumber").value : "");
+    document.getElementById("paymentCurrencySymbol") && (document.getElementById("paymentCurrencySymbol").textContent = appSettings.currency || "₹");
+    document.querySelectorAll("[data-payment-method]").forEach(button => {
+        button.classList.toggle("selected", button.dataset.paymentMethod === selectedPaymentMethod);
+        button.setAttribute("aria-pressed", button.dataset.paymentMethod === selectedPaymentMethod ? "true" : "false");
+    });
+    setPaymentCategory("full");
+    const modal = document.getElementById("paymentModal");
+    if (modal) modal.style.display = "flex";
 }
-
 
 function closePayment() {
-
-    const modal =
-        document.getElementById(
-            "paymentModal"
-        );
-
-
-    if (modal) {
-
-        modal.style.display =
-            "none";
-
-    }
-
+    const modal = document.getElementById("paymentModal");
+    if (modal) modal.style.display = "none";
 }
 
-
-function updateCashChange() {
-
-    const total = getBillingBreakdown().total;
-
-
-    const received =
-        Number(
-            document.getElementById(
-                "cashReceived"
-            )?.value || 0
-        );
-
-
-    const change =
-        Math.max(
-            0,
-            received - total
-        );
-
-
-    const element =
-        document.getElementById(
-            "changeAmount"
-        );
-
-
-    if (element) {
-
-        element.textContent =
-            money(change);
-
+function setPaymentCategory(category) {
+    const previousCategory = paymentCategory;
+    paymentCategory = ["full", "partial", "split", "non-chargeable"].includes(category) ? category : "full";
+    const nonChargeable = paymentCategory === "non-chargeable";
+    const single = document.getElementById("singlePaymentEntry");
+    const split = document.getElementById("splitPaymentEntry");
+    const notice = document.getElementById("nonChargeableNotice");
+    const methods = document.querySelector(".pos-payment-method-section");
+    if (single) single.hidden = nonChargeable || paymentCategory === "split";
+    if (split) split.hidden = nonChargeable || paymentCategory !== "split";
+    if (notice) notice.hidden = !nonChargeable;
+    if (methods) methods.hidden = nonChargeable;
+    const label = document.getElementById("paymentReceivedLabel");
+    if (label) label.textContent = paymentCategory === "partial" ? "Amount to collect" : isCashPaymentMethod(selectedPaymentMethod) ? "Cash received" : "Payment amount";
+    const hint = document.getElementById("paymentMethodHint");
+    if (hint) hint.textContent = paymentCategory === "split" ? "Choose a method for each amount" : "Choose one method";
+    const received = document.getElementById("cashReceived");
+    if (received && paymentCategory === "full") received.value = paymentDueNow.toFixed(2);
+    if (received && paymentCategory === "partial" && previousCategory !== "partial") received.value = "";
+    if (paymentCategory !== "split") {
+        splitPayments = [];
+        renderSplitPayments();
     }
-
+    updatePaymentSummary();
 }
 
-
-function choosePayment(method) {
-
-    if (method === "Cash") {
-
-        const section =
-            document.getElementById(
-                "cashSection"
-            );
-
-
-        if (section) {
-
-            section.style.display =
-                "block";
-
-        }
-
-        return;
-
-    }
-
-
-    completeOrder(method);
-
+function selectPaymentMethod(method) {
+    selectedPaymentMethod = String(method || preferredPaymentMethod());
+    document.querySelectorAll("[data-payment-method]").forEach(button => {
+        const selected = button.dataset.paymentMethod === selectedPaymentMethod;
+        button.classList.toggle("selected", selected);
+        button.setAttribute("aria-pressed", selected ? "true" : "false");
+    });
+    const label = document.getElementById("paymentReceivedLabel");
+    if (label && paymentCategory !== "split") label.textContent = paymentCategory === "partial" ? "Amount to collect" : isCashPaymentMethod(selectedPaymentMethod) ? "Cash received" : "Payment amount";
+    const received = document.getElementById("cashReceived");
+    if (received && paymentCategory === "full" && !isCashPaymentMethod(selectedPaymentMethod)) received.value = paymentDueNow.toFixed(2);
+    updatePaymentSummary();
 }
 
+function addSplitPayment() {
+    const amount = Number(document.getElementById("splitPaymentAmount")?.value || 0);
+    if (!Number.isFinite(amount) || amount <= 0) return alert("Enter a payment amount greater than zero.");
+    splitPayments.push({ method: selectedPaymentMethod, amount: Math.round(amount * 100) / 100 });
+    const input = document.getElementById("splitPaymentAmount");
+    if (input) input.value = "";
+    renderSplitPayments();
+    updatePaymentSummary();
+}
+function removeSplitPayment(index) {
+    splitPayments.splice(index, 1);
+    renderSplitPayments();
+    updatePaymentSummary();
+}
+function renderSplitPayments() {
+    const list = document.getElementById("splitPaymentList");
+    if (!list) return;
+    list.innerHTML = splitPayments.map((payment, index) => `<div class="split-payment-row"><span>${esc(payment.method)}</span><strong>${money(payment.amount)}</strong><button type="button" aria-label="Remove payment" onclick="removeSplitPayment(${index})">×</button></div>`).join("");
+}
+function updatePaymentSummary() {
+    const b = getBillingBreakdown();
+    const setMoney = (id, value) => { const element = document.getElementById(id); if (element) element.textContent = money(value); };
+    setMoney("paymentSubtotal", b.subtotal);
+    setMoney("paymentCharges", b.serviceCharge);
+    setMoney("paymentTax", b.gst);
+    setMoney("paymentDiscount", b.discount);
+    setMoney("paymentBillTotal", b.total);
+    setMoney("paymentBillTotalHeader", b.total);
+    const due = Math.max(0, Number(b.total || 0) - paymentCollectedSoFar);
+    let currentCollection = 0;
+    if (paymentCategory === "partial") currentCollection = Math.max(0, Number(document.getElementById("cashReceived")?.value || 0));
+    if (paymentCategory === "split") currentCollection = splitPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    if (paymentCategory === "full") currentCollection = due;
+    if (paymentCategory === "non-chargeable") currentCollection = 0;
+    setMoney("paymentAmountCollected", paymentCollectedSoFar + currentCollection);
+    setMoney("paymentAmountDue", paymentCategory === "non-chargeable" ? 0 : Math.max(0, due - currentCollection));
+    const entered = Number(document.getElementById("cashReceived")?.value || 0);
+    const applied = paymentCategory === "partial" ? entered : due;
+    setMoney("changeAmount", isCashPaymentMethod(selectedPaymentMethod) && paymentCategory !== "split" ? Math.max(0, entered - applied) : 0);
+    const allocations = document.getElementById("paymentAllocations");
+    if (allocations) allocations.innerHTML = splitPayments.map(payment => `<div><span>${esc(payment.method)}</span><strong>${money(payment.amount)}</strong></div>`).join("");
+}
+function updateCashChange() { updatePaymentSummary(); }
+function choosePayment(method) { selectPaymentMethod(method); }
+
+async function confirmPOSPayment() {
+    const due = Math.max(0, Number(getBillingBreakdown().total || 0) - paymentCollectedSoFar);
+    if (paymentCategory === "non-chargeable") {
+        return completeOrder("Non-chargeable", { nonChargeable: true, amountDue: due, keepOpen: false });
+    }
+    if (paymentCategory === "partial") {
+        const amount = Math.round(Number(document.getElementById("cashReceived")?.value || 0) * 100) / 100;
+        if (!Number.isFinite(amount) || amount <= 0 || amount >= due) return alert("Enter an amount greater than zero and less than the remaining balance. Use Full Payment to settle the full balance.");
+        if (isCashPaymentMethod(selectedPaymentMethod) && Number(document.getElementById("cashReceived")?.value || 0) < amount) return alert("Cash received is less than the payment amount.");
+        return completeOrder(selectedPaymentMethod, { payments: [{ method: selectedPaymentMethod, amount }], amountDue: due, keepOpen: true });
+    }
+    if (paymentCategory === "split") {
+        const amount = Math.round(splitPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
+        if (splitPayments.length < 2) return alert("Add at least two payment methods for a split payment.");
+        if (Math.abs(amount - due) > 0.01) return alert("Split payments must add up to the remaining balance of " + money(due) + ".");
+        return completeOrder(splitPayments.map(payment => payment.method).join(" + "), { payments: splitPayments.slice(), amountDue: due, keepOpen: false });
+    }
+    const tendered = Number(document.getElementById("cashReceived")?.value || 0);
+    if (isCashPaymentMethod(selectedPaymentMethod) && tendered < due) return alert("Cash received is less than the remaining bill amount.");
+    return completeOrder(selectedPaymentMethod, { payments: [{ method: selectedPaymentMethod, amount: due }], amountDue: due, keepOpen: false });
+}
 
 let completingOrder = false;
 
-async function completeOrder(paymentMethod) {
+async function completeOrder(paymentMethod, paymentOptions = {}) {
     if (completingOrder) return;
-
-    if (!cart.length) {
-        return alert("There are no items in the order.");
-    }
-
+    if (!cart.length) return alert("There are no items in the order.");
     completingOrder = true;
-
     const subtotal = calculateSubtotal();
     const b = getBillingBreakdown();
     const gst = b.gst;
     const total = b.total;
-
-    if (paymentMethod === "Cash") {
-        const received = Number(
-            document.getElementById("cashReceived")?.value || 0
-        );
-
-        if (received < total) {
-            completingOrder = false;
-            return alert("Cash received is less than the bill amount.");
-        }
-    }
+    const paymentsToRecord = Array.isArray(paymentOptions.payments) ? paymentOptions.payments : [{ method: paymentMethod, amount: total }];
 
     try {
         const tableNumber = document.getElementById("tableNumber")?.value || null;
         const customerName = document.getElementById("billingCustomerNameQuick")?.value.trim() || "";
         const customerPhone = document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "";
         const customerEmail = document.getElementById("billingCustomerEmailQuick")?.value.trim() || "";
-
         if (customerName || customerPhone || customerEmail) {
-            if (!customerName || !customerPhone) {
-                return alert("Please enter both customer name and phone number, or leave customer details blank.");
-            }
+            if (!customerName || !customerPhone) throw new Error("Please enter both customer name and phone number, or leave customer details blank.");
         }
-
         let billingCustomer = null;
         if (customerName && customerPhone) {
-            const customerResult = await api("/customers/save-for-billing", {
-                method: "POST",
-                body: JSON.stringify({ name: customerName, phone: customerPhone, email: customerEmail || null })
-            });
+            const customerResult = await api("/customers/save-for-billing", { method: "POST", body: JSON.stringify({ name: customerName, phone: customerPhone, email: customerEmail || null }) });
             billingCustomer = customerResult.customer || null;
+            cacheBillingCustomer(billingCustomer);
         }
-
         const orderPayload = {
-            orderType,
-            tableNumber,
-            subtotal,
-            gst,
-            total,
-            paymentMethod,
+            orderType, tableNumber, subtotal, gst, total, paymentMethod,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null,
-            discount: b.discount,
-            serviceCharge: b.serviceCharge,
-            discountAdjustmentId: b.discountId,
-            chargeAdjustmentId: b.chargeId,
+            discount: b.discount, serviceCharge: b.serviceCharge,
+            discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
             notes: document.getElementById("billingOrderNotes")?.value.trim() || null,
-            items: cart.map(item => ({
-                menuId: item.id,
-                variantId: item.variantId || null,
-                name: item.name,
-                price: item.price,
-                quantity: item.quantity,
-                unit: item.unit,
-                taxRate: item.taxRate,
-                taxMode: item.taxMode
-            }))
+            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode }))
         };
-
         let order;
         let orderNumber;
         let billItems;
-
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
-            const updated = await api(`/orders/${orderId}`, {
-                method: "PUT",
-                body: JSON.stringify(orderPayload)
-            });
+            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify(orderPayload) });
             order = updated.order;
             orderNumber = order.order_number;
-            billItems = cart.map(item => ({name:item.name, price:Number(item.price), quantity:Number(item.quantity)}));
+            billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity) }));
         } else {
             orderNumber = (appSettings.orderPrefix || "ORD-") + Date.now().toString().slice(-8);
             const kotEnabled = appSettings.kotEnabled !== false;
-            const result = await api("/orders", {
-                method: "POST",
-                body: JSON.stringify({
-                    orderNumber,
-                    ...orderPayload,
-                    initialStatus: kotEnabled ? "Pending" : "Completed",
-                    createKot: kotEnabled
-                })
-            });
+            const initialStatus = paymentOptions.keepOpen ? "Open" : (kotEnabled ? "Pending" : "Completed");
+            const result = await api("/orders", { method: "POST", body: JSON.stringify({ orderNumber, ...orderPayload, initialStatus, createKot: !paymentOptions.keepOpen && kotEnabled }) });
             order = result.order;
             billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity) }));
         }
 
-        await api("/payments", {
-            method: "POST",
-            body: JSON.stringify({
-                orderId: order.id,
-                orderNumber: order.order_number || orderNumber,
-                amount: total,
-                paymentMethod,
-                paymentStatus: "Success",
-                transactionId: null
-            })
-        });
+        const paymentStatus = paymentOptions.nonChargeable ? "Non-chargeable" : "Success";
+        for (const payment of paymentsToRecord) {
+            await api("/payments", { method: "POST", body: JSON.stringify({ orderId: order.id, orderNumber: order.order_number || orderNumber, amount: paymentOptions.nonChargeable ? 0 : Number(payment.amount), paymentMethod: paymentOptions.nonChargeable ? "Non-chargeable" : payment.method, paymentStatus, transactionId: null }) });
+        }
 
-        const invoiceResult = await api("/invoices", {
-            method: "POST",
-            body: JSON.stringify({
-                orderId: order.id,
-                customerId: order.customer_id || billingCustomer?.id || null
-            })
-        });
+        if (paymentOptions.keepOpen) {
+            closePayment();
+            cart = [];
+            currentOpenOrderId = null;
+            currentOpenOrderData = null;
+            const tableInput = document.getElementById("tableNumber");
+            if (tableInput) tableInput.value = "";
+            updateCart();
+            await loadTables();
+            await updateDashboard();
+            await updateOrdersTable();
+            showPage("orders");
+            showProfileToast("Partial payment recorded. The order remains open with a balance due.");
+            return;
+        }
 
+        const invoiceResult = await api("/invoices", { method: "POST", body: JSON.stringify({ orderId: order.id, customerId: order.customer_id || billingCustomer?.id || null }) });
         const completion = await api(`/orders/${order.id}/complete`, { method: "PUT" });
         const completedOrder = completion.order || order;
         const kotEnabled = appSettings.kotEnabled !== false;
-
         closePayment();
         cart = [];
         currentOpenOrderId = null;
         currentOpenOrderData = null;
+        const tableInput = document.getElementById("tableNumber");
+        if (tableInput) tableInput.value = "";
         updateCart();
-
-        if (kotEnabled && appSettings.printKitchenOnOrder) {
+        if (kotEnabled && appSettings.printKitchenOnOrder && !paymentOptions.nonChargeable) {
             try { await printKOT(order.id); } catch (_) {}
         }
-
         openBillPreview({
             orderNumber: completedOrder.order_number || orderNumber,
             invoiceNumber: invoiceResult.invoice?.invoice_number || null,
             orderType: completedOrder.order_type || orderType,
             tableNumber: completedOrder.table_number || tableNumber,
             subtotal: Number(completedOrder.subtotal || subtotal),
+            discount: Number(completedOrder.discount ?? b.discount),
+            discountName: b.discountName,
+            serviceCharge: Number(completedOrder.service_charge ?? b.serviceCharge),
+            chargeName: b.chargeName,
             gst: Number(completedOrder.gst || gst),
             total: Number(completedOrder.total || total),
-            paymentMethod,
-            customerId: completedOrder.customer_id || billingCustomer?.id || null,
+            paymentMethod, customerId: completedOrder.customer_id || billingCustomer?.id || null,
             customerName: completedOrder.customer_name || billingCustomer?.name || customerName || null,
             customerPhone: completedOrder.customer_phone || billingCustomer?.phone || customerPhone || null,
             customerEmail: completedOrder.customer_email || billingCustomer?.email || customerEmail || null,
             items: billItems
         });
-
+        window.printThermalBill();
         await loadTables();
         await updateDashboard();
         await updateOrdersTable();
         showPage("orders");
-
     } catch (error) {
         console.error(error);
         alert("Failed to complete payment: " + error.message);
@@ -1581,7 +1889,6 @@ async function completeOrder(paymentMethod) {
         completingOrder = false;
     }
 }
-
 async function saveOpenOrder() {
     if (!cart.length) return alert("Please add at least one item to save the order.");
     if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) {
@@ -1607,6 +1914,7 @@ async function saveOpenOrder() {
                 body: JSON.stringify({ name: customerName, phone: customerPhone, email: customerEmail || null })
             });
             billingCustomer = r.customer || null;
+            cacheBillingCustomer(billingCustomer);
         }
 
         const items = cart.map(item => ({
@@ -1718,6 +2026,7 @@ window.openBillPreview = function(data) {
     window.currentBillData = data || {};
 
     const modal = document.getElementById("billModal");
+    modal?.classList.toggle("bill-preview-sidecar", data?.viewMode === "side-panel");
 
         const billActions =
         document.querySelector(
@@ -1821,6 +2130,26 @@ window.openBillPreview = function(data) {
     document.getElementById("billSubtotal").textContent =
         money(data.subtotal || 0);
 
+    const billDiscountRow = document.getElementById("billDiscountRow");
+    const billDiscountAmount = Number(data.discount || 0);
+    if (billDiscountRow) {
+        billDiscountRow.style.display = billDiscountAmount > 0 ? "flex" : "none";
+        const label = document.getElementById("billDiscountLabel");
+        if (label) label.textContent = data.discountName ? `Discount · ${data.discountName}` : "Discount";
+        const amount = document.getElementById("billDiscountAmount");
+        if (amount) amount.textContent = `−${money(billDiscountAmount)}`;
+    }
+
+    const billChargeRow = document.getElementById("billChargeRow");
+    const billChargeAmount = Number(data.serviceCharge || 0);
+    if (billChargeRow) {
+        billChargeRow.style.display = billChargeAmount > 0 ? "flex" : "none";
+        const label = document.getElementById("billChargeLabel");
+        if (label) label.textContent = data.chargeName ? `Charge · ${data.chargeName}` : "Charges";
+        const amount = document.getElementById("billChargeAmount");
+        if (amount) amount.textContent = money(billChargeAmount);
+    }
+
     document.getElementById("billGST").textContent =
         money(data.gst || 0);
 
@@ -1891,6 +2220,7 @@ window.closeBillModal = function() {
 
     if (modal) {
         modal.style.display = "none";
+        modal.classList.remove("bill-preview-sidecar");
     }
 
 };
@@ -1922,6 +2252,29 @@ window.printThermalBill = function() {
         );
     }
 
+    const defaultPrinter = (window.cafePrinters || []).find(function(printer) {
+        return printer.is_default && printer.active !== false;
+    });
+    if (defaultPrinter?.connection_type === "network") {
+        api("/printers/" + defaultPrinter.id + "/print", {
+            method: "POST",
+            body: JSON.stringify({ receipt: data, settings: appSettings })
+        }).then(function() {
+            showProfileToast("Bill sent to " + defaultPrinter.name + ".");
+        }).catch(function(error) {
+            alert("Could not print to " + defaultPrinter.name + ": " + error.message);
+        });
+        return;
+    }
+    if (defaultPrinter?.connection_type === "bluetooth") {
+        sendBluetoothPrinterText(defaultPrinter, printerReceiptText(data)).then(function() {
+            showProfileToast("Bill sent to " + defaultPrinter.name + ".");
+        }).catch(function(error) {
+            alert("Could not print to " + defaultPrinter.name + ": " + error.message);
+        });
+        return;
+    }
+
     const width =
         document.getElementById(
             "thermalPaperWidth"
@@ -1941,6 +2294,20 @@ window.printThermalBill = function() {
         Array.isArray(data.items)
             ? data.items
             : [];
+
+    const billModal = document.getElementById("billModal");
+    if (billModal && billModal.style.display !== "none") {
+        const printStyle = document.createElement("style");
+        printStyle.textContent = `@media print { @page { size: ${safeWidth} auto; margin: 0; } }`;
+        document.head.appendChild(printStyle);
+        const cleanPrintStyle = function() {
+            printStyle.remove();
+            window.removeEventListener("afterprint", cleanPrintStyle);
+        };
+        window.addEventListener("afterprint", cleanPrintStyle, { once: true });
+        window.print();
+        return;
+    }
 
     const printWindow =
         window.open(
@@ -2130,23 +2497,23 @@ window.printThermalBill = function() {
             <div class="center">
 
                 <div class="cafe-name">
-                    Chai Sutta Bar
+                    ${esc(appSettings.restaurantName || "CAFE POS")}
                 </div>
 
                  <div class="subtitle">
-                      Cafe Management System
+                      ${esc(appSettings.header || "")}
                  </div>
 
                  <div class="subtitle">
-                       123 Main Msrket , Indri
+                       ${esc(appSettings.address || "")}
                     </div>
 
                  <div class="subtitle">
-                      Phone: +91 98765 43210
+                      ${appSettings.phone ? "Phone: " + esc(appSettings.phone) : ""}
                   </div>
 
                  <div class="subtitle">
-                       GSTIN: 22AAAAA0000A1Z5
+                       ${appSettings.gstin ? "GSTIN: " + esc(appSettings.gstin) : ""}
                  </div>
 
 
@@ -2275,7 +2642,7 @@ window.printThermalBill = function() {
             </div>
 
             <div class="summary-row">
-                <span>GST (5%)</span>
+                <span>GST (${Number(appSettings.gstRate || 0)}%)</span>
 
                 <strong>
                     ${money(
@@ -4855,10 +5222,10 @@ const ACCESS_MODULES = [
     { key: "access", label: "Access" },
     { key: "expenses", label: "Expenses" },
     { key: "loyalty", label: "Loyalty" },
-    { key: "backup", label: "Backup" },
+    { key: "marketing", label: "Marketing" },
     { key: "invoice_designer", label: "Invoice Designer" },
     { key: "advanced_reports", label: "Advanced Reports" },
-    { key: "deployment", label: "Deployment" }
+    { key: "printer", label: "Printer" }
 ];
 
 const ACCESS_ACTIONS = ["view", "create", "edit", "delete", "export", "print"];
@@ -5157,13 +5524,22 @@ function readSettingValue(id) {
 
 async function loadBillingAdjustments() {
     try {
-        billingAdjustments = await api("/billing-adjustments");
+        billingAdjustments = normalizeBillingAdjustments(await api("/billing-adjustments"));
         renderBillingAdjustmentSelectors();
     } catch (e) {
         console.warn("Billing adjustments unavailable:", e.message);
         billingAdjustments = [];
         renderBillingAdjustmentSelectors();
     }
+}
+
+function normalizeBillingAdjustments(items) {
+    return (Array.isArray(items) ? items : []).map(item => ({
+        ...item,
+        kind: item.kind || item.type || "discount",
+        calculation: item.calculation || (item.value_type === "percent" ? "percent" : "fixed"),
+        applies_to: item.applies_to === "dine_in" ? "dine-in" : (item.applies_to || "all")
+    }));
 }
 
 function renderBillingAdjustmentSelectors() {
@@ -5180,6 +5556,14 @@ function renderBillingAdjustmentSelectors() {
     if (discount) {
         const selected = discount.value;
         discount.innerHTML = `<option value="">No discount</option>` +
+            marketingDeals.filter(deal => deal.active !== false).map(deal => {
+                const unavailable = marketingDealUnavailableReason(deal);
+                const offer = String(deal.type || "").trim().toLowerCase() === "discount"
+                    ? (deal.valueType === "percentage" ? `${esc(deal.value)}%` : money(deal.value))
+                    : esc(deal.type || "Marketing deal");
+                const note = unavailable ? ` · ${esc(unavailable)}` : " · Marketing";
+                return `<option value="marketing:${esc(deal.id)}" ${unavailable ? "disabled" : ""}>${esc(deal.name)} · ${offer}${note}</option>`;
+            }).join("") +
             billingAdjustments.filter(x => x.kind === "discount" && visibleRule(x)).map(x =>
                 `<option value="${x.id}">${esc(x.name)} · ${x.calculation === "percent" ? esc(x.value) + "%" : money(x.value)}</option>`
             ).join("");
@@ -5252,10 +5636,10 @@ async function saveBillingAdjustment(){
     const id=document.getElementById("billingAdjustmentEditingId")?.value;
     const payload={
         name:document.getElementById("billingAdjustmentName")?.value.trim(),
-        kind:document.getElementById("billingAdjustmentKind")?.value,
-        calculation:document.getElementById("billingAdjustmentCalculation")?.value,
+        type:document.getElementById("billingAdjustmentKind")?.value,
+        valueType:document.getElementById("billingAdjustmentCalculation")?.value==="percent"?"percent":"amount",
         value:Number(document.getElementById("billingAdjustmentValue")?.value||0),
-        appliesTo:document.getElementById("billingAdjustmentApplies")?.value||"all",
+        appliesTo:(document.getElementById("billingAdjustmentApplies")?.value||"all")==="dine-in"?"dine_in":(document.getElementById("billingAdjustmentApplies")?.value||"all"),
         description:document.getElementById("billingAdjustmentDescription")?.value.trim()||""
     };
     if(!payload.name||!Number.isFinite(payload.value)||payload.value<0)return alert("Enter a valid name and amount.");
@@ -5266,7 +5650,7 @@ async function saveBillingAdjustment(){
 }
 
 async function loadBillingAdjustmentMaster() {
-    try { billingAdjustments = await api("/billing-adjustments"); renderBillingAdjustmentMaster(); renderBillingAdjustmentSelectors(); }
+    try { billingAdjustments = normalizeBillingAdjustments(await api("/billing-adjustments")); renderBillingAdjustmentMaster(); renderBillingAdjustmentSelectors(); }
     catch (e) { console.error("Adjustment master load failed:", e); }
 }
 
@@ -5292,41 +5676,174 @@ async function toggleBillingAdjustment(id){try{await api(`/billing-adjustments/$
 
 async function deleteBillingAdjustment(id){if(!confirm("Delete this discount/charge?"))return;try{await api(`/billing-adjustments/${id}`,{method:"DELETE"});await loadBillingAdjustmentMaster();}catch(e){alert(e.message);}}
 
+let marketingDeals = [];
+let editingMarketingDealId = null;
+const MARKETING_DEAL_TYPES = ["Discount", "Buy X", "Buy X Get X", "Buy X Get Y", "Voucher", "Payment Deals", "Meal Deals", "Slab-Based Discount"];
+
+async function loadMarketingDeals() {
+    const grid = document.getElementById("marketingDealsGrid");
+    if (grid) grid.innerHTML = '<div class="marketing-empty-state">Loading deals…</div>';
+    try {
+        const result = await api("/marketing/deals");
+        marketingDeals = Array.isArray(result.deals) ? result.deals : [];
+        renderMarketingDeals();
+        renderBillingAdjustmentSelectors();
+    } catch (error) {
+        marketingDeals = [];
+        renderBillingAdjustmentSelectors();
+        if (grid) grid.innerHTML = `<div class="marketing-empty-state">Unable to load deals: ${esc(error.message)}</div>`;
+    }
+}
+function renderMarketingDeals() {
+    const grid = document.getElementById("marketingDealsGrid");
+    if (!grid) return;
+    const term = String(document.getElementById("marketingDealSearch")?.value || "").trim().toLowerCase();
+    const type = document.getElementById("marketingDealTypeFilter")?.value || "";
+    const shown = marketingDeals.filter(deal => (!term || `${deal.name || ""} ${deal.type || ""} ${deal.category || ""}`.toLowerCase().includes(term)) && (!type || deal.type === type));
+    const activeCount = document.getElementById("marketingActiveCount");
+    if (activeCount) activeCount.textContent = String(marketingDeals.filter(deal => deal.active !== false).length);
+    const channelCount = document.getElementById("marketingChannelCount");
+    if (channelCount) channelCount.textContent = String(new Set(marketingDeals.flatMap(deal => deal.channels || [])).size || POS_CHANNELS.length);
+    if (!shown.length) {
+        grid.innerHTML = `<div class="marketing-empty-state">${marketingDeals.length ? "No deals match those filters." : "No deals created yet. Create a deal to get started."}</div>`;
+        return;
+    }
+    grid.innerHTML = shown.map(deal => {
+        const schedule = [deal.startDate, deal.endDate].filter(Boolean).join(" – ") || "No date limit";
+        const offer = deal.type && deal.type.startsWith("Buy") ? `Buy ${Number(deal.buyQuantity || 1)} · Get ${Number(deal.getQuantity || 1)}` : deal.value ? `${deal.valueType === "percentage" ? `${deal.value}% off` : money(deal.value)}` : "Custom offer";
+        const channels = (deal.channels || []).map(key => POS_CHANNELS.find(channel => channel.key === key)?.label).filter(Boolean).join(", ") || "All channels";
+        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${deal.itemName ? ` · ${esc(deal.itemName)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm('${esc(deal.id)}')">Edit</button><button type="button" onclick="toggleMarketingDeal('${esc(deal.id)}')">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal('${esc(deal.id)}')">Delete</button></div></article>`;
+    }).join("");
+}
+function populateMarketingDealOptions(selected = {}) {
+    const categories = [...new Set(currentMenu.map(item => String(item.category || "").trim()).filter(Boolean))].sort();
+    const categorySelect = document.getElementById("marketingDealCategory");
+    if (categorySelect) categorySelect.innerHTML = '<option value="">All categories</option>' + categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
+    const items = currentMenu.filter(item => !selected.category || item.category === selected.category);
+    const itemMarkup = '<option value="">All items</option>' + items.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
+    const itemSelect = document.getElementById("marketingDealItem");
+    const rewardSelect = document.getElementById("marketingRewardItem");
+    if (itemSelect) itemSelect.innerHTML = itemMarkup;
+    if (rewardSelect) rewardSelect.innerHTML = '<option value="">Same item</option>' + currentMenu.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
+    if (categorySelect) categorySelect.value = selected.category || "";
+    if (itemSelect) itemSelect.value = selected.itemId || "";
+    if (rewardSelect) rewardSelect.value = selected.rewardItemId || "";
+}
+function openMarketingDealForm(id = null) {
+    editingMarketingDealId = id;
+    const deal = id === null ? null : marketingDeals.find(item => String(item.id) === String(id));
+    document.getElementById("marketingDealModalTitle").textContent = deal ? "Edit Deal" : "Create Deal";
+    document.getElementById("marketingDealName").value = deal?.name || "";
+    document.getElementById("marketingDealType").value = deal?.type || "Discount";
+    populateMarketingDealOptions(deal || {});
+    document.getElementById("marketingBuyQuantity").value = deal?.buyQuantity || 1;
+    document.getElementById("marketingGetQuantity").value = deal?.getQuantity || 1;
+    document.getElementById("marketingValueType").value = deal?.valueType || "amount";
+    document.getElementById("marketingDealValue").value = deal?.value ?? "";
+    document.getElementById("marketingDealStart").value = deal?.startDate || "";
+    document.getElementById("marketingDealEnd").value = deal?.endDate || "";
+    document.getElementById("marketingMaxOccurrences").value = deal?.maxOccurrences ?? "";
+    document.getElementById("marketingMinGroupSize").value = deal?.minGroupSize ?? "";
+    document.getElementById("marketingRecurringPeriod").value = deal?.recurringPeriod || "None";
+    const selectedChannels = new Set(deal?.channels || POS_CHANNELS.map(channel => channel.key));
+    const channelBox = document.getElementById("marketingDealChannels");
+    if (channelBox) channelBox.innerHTML = POS_CHANNELS.map(channel => `<label><input type="checkbox" value="${channel.key}" ${selectedChannels.has(channel.key) ? "checked" : ""}>${esc(channel.label)}</label>`).join("");
+    document.getElementById("marketingForNewCustomers").checked = Boolean(deal?.forNewCustomers);
+    document.getElementById("marketingUseMembership").checked = Boolean(deal?.useMembership);
+    document.getElementById("marketingRequireAuthentication").checked = Boolean(deal?.requireAuthentication);
+    document.getElementById("marketingEnforceAtCheckout").checked = Boolean(deal?.enforceAtCheckout);
+    updateMarketingDealFields();
+    document.getElementById("marketingDealModal").style.display = "flex";
+}
+function closeMarketingDealForm() { document.getElementById("marketingDealModal")?.style.setProperty("display", "none"); }
+function updateMarketingDealFields() {
+    const type = document.getElementById("marketingDealType")?.value || "Discount";
+    const buy = type.startsWith("Buy");
+    const get = type.includes("Get") || type === "Meal Deals";
+    document.getElementById("marketingBuyQuantityField").style.display = buy ? "" : "none";
+    document.getElementById("marketingGetQuantityField").style.display = get ? "" : "none";
+    document.getElementById("marketingRewardItemField").style.display = (type === "Buy X Get Y" || type === "Meal Deals") ? "" : "none";
+}
+async function saveMarketingDeal() {
+    const name = document.getElementById("marketingDealName").value.trim();
+    if (!name) return alert("Enter a name for this deal.");
+    const type = document.getElementById("marketingDealType").value;
+    if (!MARKETING_DEAL_TYPES.includes(type)) return alert("Choose a valid deal type.");
+    const prior = editingMarketingDealId === null ? null : marketingDeals.find(item => String(item.id) === String(editingMarketingDealId));
+    const deal = {
+        id: prior?.id || String(Date.now()), name, type,
+        category: document.getElementById("marketingDealCategory").value,
+        itemId: document.getElementById("marketingDealItem").value || null,
+        itemName: currentMenu.find(item => String(item.id) === document.getElementById("marketingDealItem").value)?.name || "",
+        buyQuantity: Math.max(1, Number(document.getElementById("marketingBuyQuantity").value || 1)),
+        getQuantity: Math.max(1, Number(document.getElementById("marketingGetQuantity").value || 1)),
+        rewardItemId: document.getElementById("marketingRewardItem").value || null,
+        valueType: document.getElementById("marketingValueType").value,
+        value: Math.max(0, Number(document.getElementById("marketingDealValue").value || 0)),
+        startDate: document.getElementById("marketingDealStart").value || null,
+        endDate: document.getElementById("marketingDealEnd").value || null,
+        maxOccurrences: Number(document.getElementById("marketingMaxOccurrences").value || 0) || null,
+        minGroupSize: Number(document.getElementById("marketingMinGroupSize").value || 0) || null,
+        recurringPeriod: document.getElementById("marketingRecurringPeriod").value,
+        channels: [...document.querySelectorAll("#marketingDealChannels input:checked")].map(input => input.value),
+        forNewCustomers: document.getElementById("marketingForNewCustomers").checked,
+        useMembership: document.getElementById("marketingUseMembership").checked,
+        requireAuthentication: document.getElementById("marketingRequireAuthentication").checked,
+        enforceAtCheckout: document.getElementById("marketingEnforceAtCheckout").checked,
+        active: prior?.active !== false
+    };
+    const next = marketingDeals.filter(item => String(item.id) !== String(deal.id)).concat(deal);
+    try {
+        await api("/marketing/deals", { method: "PUT", body: JSON.stringify({ deals: next }) });
+        marketingDeals = next;
+        closeMarketingDealForm();
+        renderMarketingDeals();
+        renderBillingAdjustmentSelectors();
+        showProfileToast("Deal saved.");
+    } catch (error) { alert("Could not save deal: " + error.message); }
+}
+async function toggleMarketingDeal(id) {
+    const next = marketingDeals.map(deal => String(deal.id) === String(id) ? { ...deal, active: deal.active === false } : deal);
+    try { await api("/marketing/deals", { method: "PUT", body: JSON.stringify({ deals: next }) }); marketingDeals = next; renderMarketingDeals(); renderBillingAdjustmentSelectors(); }
+    catch (error) { alert(error.message); }
+}
+async function deleteMarketingDeal(id) {
+    if (!confirm("Delete this deal?")) return;
+    const next = marketingDeals.filter(deal => String(deal.id) !== String(id));
+    try { await api("/marketing/deals", { method: "PUT", body: JSON.stringify({ deals: next }) }); marketingDeals = next; renderMarketingDeals(); renderBillingAdjustmentSelectors(); }
+    catch (error) { alert(error.message); }
+}
 async function selectBillingTable(tableNumber, status) {
-    if (orderType !== "Dine-in") setOrderType("Dine-in");
+    const normalized = String(status || "").toLowerCase();
+    if (normalized !== "available" && normalized !== "occupied") return;
     const input = document.getElementById("tableNumber");
     if (input) input.value = tableNumber;
 
-    const normalized = String(status || "").toLowerCase();
     if (normalized === "occupied") {
         try {
             const orders = await api("/orders");
             const active = orders
-                .filter(o => String(o.table_number) === String(tableNumber))
-                .filter(o => !["completed", "cancelled"].includes(String(o.status || "").toLowerCase()))
-                .sort((a,b) => new Date(b.created_at) - new Date(a.created_at))[0];
-
-            if (!active) {
-                await loadMenu();
-                return alert(`Table ${tableNumber} is occupied, but no active order was found.`);
-            }
-
+                .filter(order => String(order.table_number) === String(tableNumber))
+                .filter(order => !["completed", "cancelled"].includes(String(order.status || "").toLowerCase()))
+                .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+            if (!active) return alert("Table " + tableNumber + " is occupied, but no active order was found.");
             if (String(active.status).toLowerCase() === "open") {
                 await editOpenOrder(active.id);
                 return;
             }
-
             await viewOrder(active.id);
             return;
-        } catch (e) {
-            return alert("Unable to open the table order: " + e.message);
+        } catch (error) {
+            return alert("Unable to open the table order: " + error.message);
         }
     }
 
+    selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel || "dine_in";
+    setOrderType("Dine-in", true);
     updateBillingTableSelection();
+    showPage("new-order");
     await loadMenu();
 }
-
 function updateBillingTableSelection() {
     const selected = document.getElementById("tableNumber")?.value || "";
     document.querySelectorAll(".billing-table-card").forEach(btn => {
@@ -5334,9 +5851,73 @@ function updateBillingTableSelection() {
     });
 }
 
+function renderPOSPreferences() {
+    const container = document.getElementById("posPreferencesRows");
+    if (!container) return;
+    const preferences = getPOSChannelPreferences();
+    const modules = [{ key: "newOrder", label: "Take New Order" }, { key: "tableView", label: "Table View" }];
+    container.innerHTML = modules.map(module => {
+        const settings = preferences[module.key];
+        const checks = POS_CHANNELS.map(channel => {
+            const id = "posChannel_" + module.key + "_" + channel.key;
+            return "<label class=\"pos-channel-check\" for=\"" + id + "\"><input id=\"" + id + "\" data-pos-module=\"" + module.key + "\" data-pos-channel=\"" + channel.key + "\" type=\"checkbox\" " + (settings.channels.includes(channel.key) ? "checked" : "") + " onchange=\"updatePOSDefaultOptions('" + module.key + "')\"><span>" + esc(channel.label) + "</span></label>";
+        }).join("");
+        const options = settings.channels.map(key => {
+            const channel = POS_CHANNELS.find(entry => entry.key === key);
+            return channel ? "<option value=\"" + esc(key) + "\">" + esc(channel.label) + "</option>" : "";
+        }).join("");
+        return "<div class=\"pos-preferences-row\"><strong>" + esc(module.label) + "</strong><div class=\"pos-channel-checks\">" + checks + "</div><select id=\"posDefault_" + module.key + "\" aria-label=\"" + esc(module.label) + " default channel\">" + options + "</select></div>";
+    }).join("");
+}
+function updatePOSDefaultOptions(moduleKey) {
+    const selected = [...document.querySelectorAll("[data-pos-module=\"" + moduleKey + "\"]:checked")].map(input => input.dataset.posChannel);
+    if (moduleKey === "newOrder" && !selected.some(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway")) {
+        const fallback = document.getElementById("posChannel_newOrder_takeaway");
+        if (fallback) fallback.checked = true;
+        if (!selected.includes("takeaway")) selected.push("takeaway");
+    }
+    if (!selected.length) {
+        const fallback = moduleKey === "tableView" ? "dine_in" : "takeaway";
+        const input = document.getElementById("posChannel_" + moduleKey + "_" + fallback) || document.getElementById("posChannel_" + moduleKey + "_dine_in");
+        if (input) input.checked = true;
+        selected.push(input?.dataset.posChannel || "dine_in");
+    }
+    const select = document.getElementById("posDefault_" + moduleKey);
+    if (!select) return;
+    const prior = select.value;
+    select.innerHTML = selected.map(key => {
+        const channel = POS_CHANNELS.find(entry => entry.key === key);
+        return channel ? "<option value=\"" + esc(key) + "\">" + esc(channel.label) + "</option>" : "";
+    }).join("");
+    select.value = selected.includes(prior) ? prior : selected[0];
+}
+function readPOSPreferencesFromForm() {
+    const result = {};
+    ["newOrder", "tableView"].forEach(moduleKey => {
+        const channels = [...document.querySelectorAll("[data-pos-module=\"" + moduleKey + "\"]:checked")].map(input => input.dataset.posChannel);
+        const fallback = moduleKey === "tableView" ? "dine_in" : "takeaway";
+        const selectedChannels = channels.length ? channels : [fallback];
+        const select = document.getElementById("posDefault_" + moduleKey);
+        result[moduleKey] = { channels: selectedChannels, defaultChannel: selectedChannels.includes(select?.value) ? select.value : selectedChannels[0] };
+    });
+    return normalizePOSChannelPreferences(result);
+}
 async function loadSettings() {
+    appSettings = {
+        ...DEFAULT_APP_SETTINGS,
+        restaurantName: currentUser?.business_name || DEFAULT_APP_SETTINGS.restaurantName,
+        address: currentUser?.business_address || "",
+        phone: currentUser?.business_phone || "",
+        gstin: currentUser?.gstin || "",
+        currency: currentUser?.currency || DEFAULT_APP_SETTINGS.currency
+    };
+    if (!currentUser?.business_id) {
+        appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
+        renderPaymentModeManager();
+        return;
+    }
     try {
-        const local = JSON.parse(localStorage.getItem("cafeAppSettings") || "null");
+        const local = JSON.parse(localStorage.getItem(settingsLocalStorageKey()) || "null");
         if (local && typeof local === "object") appSettings = { ...appSettings, ...local };
     } catch (_) {}
 
@@ -5346,6 +5927,9 @@ async function loadSettings() {
     } catch (error) {
         console.warn("Settings API unavailable:", error.message);
     }
+
+    appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
+    appSettings.defaultPayment = preferredPaymentMethod();
 
     setSettingValue("settingRestaurantName", appSettings.restaurantName);
     setSettingValue("settingAddress", appSettings.address);
@@ -5379,10 +5963,13 @@ async function loadSettings() {
     setSettingValue("settingAllowOrderNotes", appSettings.allowOrderNotes); setSettingValue("settingShowItemNotes", appSettings.showItemNotes);
     setSettingValue("settingLowStockThreshold", appSettings.lowStockThreshold); setSettingValue("settingCustomerMessage", appSettings.customerMessage);
     setSettingValue("settingEnableNotifications", appSettings.enableNotifications); setSettingValue("settingEnableKOTSound", appSettings.enableKOTSound); setSettingValue("settingKOTAlertInterval", appSettings.kotAlertInterval);
-    setSettingValue("settingBackupRetention", appSettings.backupRetention); setSettingValue("settingSessionTimeout", appSettings.sessionTimeout);
-    setSettingValue("settingAutoBackup", appSettings.autoBackup); setSettingValue("settingAuditLog", appSettings.auditLog);
+    setSettingValue("settingSessionTimeout", appSettings.sessionTimeout);
+    setSettingValue("settingAuditLog", appSettings.auditLog);
     setSettingValue("settingUiDensity", appSettings.uiDensity); setSettingValue("settingAccentLabel", appSettings.accentLabel); setSettingValue("settingLargeBilling", appSettings.largeBilling);
     setSettingValue("settingKOTEnabled", appSettings.kotEnabled !== false); setSettingValue("settingKOTDisabledBehavior", appSettings.kotDisabledBehavior || "hide");
+    renderPaymentModeManager();
+    renderPOSPreferences();
+    renderBillingSaleChannelOptions();
     applyPermissionsToUI();
 }
 
@@ -5411,7 +5998,8 @@ async function saveSettings() {
         autoClose: readSettingValue("settingAutoClose"),
         currency: readSettingValue("settingCurrency") || "₹",
         gstRate: Number(readSettingValue("settingGstRate")) || 0,
-        defaultPayment: readSettingValue("settingDefaultPayment") || "Cash",
+        defaultPayment: readSettingValue("settingDefaultPayment") || preferredPaymentMethod(),
+        paymentModes: normalizePaymentModes(appSettings.paymentModes),
         orderPrefix: readSettingValue("settingOrderPrefix") || "ORD-", invoicePrefix: readSettingValue("settingInvoicePrefix") || "INV-",
         allowZeroAmount: readSettingValue("settingAllowZeroAmount"), roundTotals: readSettingValue("settingRoundTotals"),
         logoUrl: readSettingValue("settingLogoUrl") || "", upiId: readSettingValue("settingUpiId") || "", receiptFont: readSettingValue("settingReceiptFont") || "Arial",
@@ -5419,13 +6007,13 @@ async function saveSettings() {
         openingTime: readSettingValue("settingOpeningTime") || "09:00", closingTime: readSettingValue("settingClosingTime") || "23:00", defaultOrderType: readSettingValue("settingDefaultOrderType") || "Dine-in",
         allowOrderNotes: readSettingValue("settingAllowOrderNotes"), showItemNotes: readSettingValue("settingShowItemNotes"), lowStockThreshold: Number(readSettingValue("settingLowStockThreshold")) || 0,
         customerMessage: readSettingValue("settingCustomerMessage") || "Thank you for visiting!", enableNotifications: readSettingValue("settingEnableNotifications"), enableKOTSound: readSettingValue("settingEnableKOTSound"), kotAlertInterval: Math.min(60, Math.max(3, Number(readSettingValue("settingKOTAlertInterval")) || 5)),
-        backupRetention: Number(readSettingValue("settingBackupRetention")) || 30, sessionTimeout: Number(readSettingValue("settingSessionTimeout")) || 12, autoBackup: readSettingValue("settingAutoBackup"), auditLog: readSettingValue("settingAuditLog"),
+        sessionTimeout: Number(readSettingValue("settingSessionTimeout")) || 12, auditLog: readSettingValue("settingAuditLog"),
         uiDensity: readSettingValue("settingUiDensity") || "comfortable", accentLabel: readSettingValue("settingAccentLabel") || "", largeBilling: readSettingValue("settingLargeBilling"),
-        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide"
+        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm()
     };
 
     appSettings = { ...appSettings, ...next };
-    localStorage.setItem("cafeAppSettings", JSON.stringify(appSettings));
+    localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
     localStorage.setItem("cafeThermalPaperWidth", appSettings.paperWidth);
 
     try {
@@ -5445,15 +6033,15 @@ function resetSettings() {
         showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
         showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
         paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
-        defaultPayment: "Cash", orderPrefix: "ORD-", invoicePrefix: "INV-",
+        defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: normalizePaymentModes(STARTER_PAYMENT_MODES), orderPrefix: "ORD-", invoicePrefix: "INV-",
         allowZeroAmount: false, roundTotals: false, logoUrl: "", upiId: "", receiptFont: "Arial",
         printKitchenOnOrder: false, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
         defaultOrderType: "Dine-in", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
-        backupRetention: 30, sessionTimeout: 12, autoBackup: false, auditLog: false,
+        sessionTimeout: 12, auditLog: false,
         uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide"
     };
-    localStorage.setItem("cafeAppSettings", JSON.stringify(appSettings));
+    localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
     applyPermissionsToUI();
     loadSettings();
 }
@@ -5555,6 +6143,12 @@ async function loadCustomers() {
 
     }
 
+}
+
+function cacheBillingCustomer(customer) {
+    if (!customer?.id) return;
+    const current = Array.isArray(currentCustomers) ? currentCustomers : [];
+    currentCustomers = [customer, ...current.filter(entry => Number(entry.id) !== Number(customer.id))];
 }
 
 
@@ -7137,10 +7731,10 @@ async function loadExpenses(){
     setText('expenseTotal',money(sum?.total?.total ?? sum?.total ?? 0));setText('expenseCount',sum?.count||0);window._expenseCategories=cats;const body=document.getElementById('expensesBody');if(!body)return;body.innerHTML=rows.length?rows.map(e=>`<tr><td>${esc(e.expense_date)}</td><td>${esc(e.category_name||'Uncategorised')}</td><td>${money(e.amount)}</td><td>${esc(e.payment_method)}</td><td>${esc(e.note||'')}</td><td>${esc(e.created_by_name||'-')}</td><td><button class="table-action-btn" onclick="deleteExpense(${e.id})">Delete</button></td></tr>`).join(''):'<tr><td colspan="7">No expenses found.</td></tr>';
   }catch(e){console.error(e);const b=document.getElementById('expensesBody');if(b)b.innerHTML=`<tr><td colspan="7">${esc(e.message)}</td></tr>`;}
 }
-function openExpenseModal(){const m=document.getElementById('expenseModal');if(m)m.style.display='flex';const d=document.getElementById('expenseDate');if(d&&!d.value)d.value=new Date().toISOString().slice(0,10);loadExpenseCategories();}
+function openExpenseModal(){renderPaymentModeOptions();const m=document.getElementById('expenseModal');if(m)m.style.display='flex';const d=document.getElementById('expenseDate');if(d&&!d.value)d.value=new Date().toISOString().slice(0,10);loadExpenseCategories();}
 function closeExpenseModal(){document.getElementById('expenseModal')?.style.setProperty('display','none');}
 async function loadExpenseCategories(){try{const cats=await api('/expenses/categories');const s=document.getElementById('expenseCategory');if(s)s.innerHTML=cats.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');}catch(e){}}
-async function saveExpense(){try{const amount=Number(document.getElementById('expenseAmount')?.value||0);if(amount<=0)return alert('Enter a valid expense amount.');await api('/expenses',{method:'POST',body:JSON.stringify({categoryId:Number(document.getElementById('expenseCategory')?.value||0)||null,amount,paymentMethod:document.getElementById('expensePayment')?.value||'Cash',expenseDate:document.getElementById('expenseDate')?.value||null,note:document.getElementById('expenseNote')?.value||''})});closeExpenseModal();document.getElementById('expenseAmount').value='';document.getElementById('expenseNote').value='';await loadExpenses();alert('Expense saved.');}catch(e){alert(e.message);}}
+async function saveExpense(){try{const amount=Number(document.getElementById('expenseAmount')?.value||0);if(amount<=0)return alert('Enter a valid expense amount.');await api('/expenses',{method:'POST',body:JSON.stringify({categoryId:Number(document.getElementById('expenseCategory')?.value||0)||null,amount,paymentMethod:document.getElementById('expensePayment')?.value||preferredPaymentMethod(),expenseDate:document.getElementById('expenseDate')?.value||null,note:document.getElementById('expenseNote')?.value||''})});closeExpenseModal();document.getElementById('expenseAmount').value='';document.getElementById('expenseNote').value='';await loadExpenses();alert('Expense saved.');}catch(e){alert(e.message);}}
 async function deleteExpense(id){if(!confirm('Delete this expense?'))return;try{await api('/expenses/'+id,{method:'DELETE'});await loadExpenses();}catch(e){alert(e.message);}}
 
 async function loadLoyaltySettings(){try{const s=await api('/loyalty/settings');setSettingValue('loyaltyPointsPerCurrency',s.points_per_currency);setSettingValue('loyaltyCurrencyPerPoint',s.currency_per_point);setSettingValue('loyaltyMinRedeem',s.min_redeem_points);setSettingValue('loyaltyWelcome',s.welcome_points);setSettingValue('loyaltyEnabled',s.enabled);await loadLoyaltyCustomers();}catch(e){console.error(e);}}
@@ -7153,9 +7747,23 @@ async function downloadDatabaseBackup(){try{const response=await fetch(API+'/bac
 function restoreBackupFile(){document.getElementById('restoreBackupInput')?.click();}
 async function handleRestoreBackup(input){const file=input.files?.[0];if(!file)return;if(!confirm('Restore this SQL backup? This may modify existing data.')){input.value='';return;}try{const sql=await file.text();await api('/backup/restore',{method:'POST',body:JSON.stringify({sql})});alert('Restore completed. Reload the application.');location.reload();}catch(e){alert(e.message);}finally{input.value='';}}
 
-function saveInvoiceDesigner(){appSettings.accentLabel=document.getElementById('designerAccent')?.value||'';appSettings.logoUrl=document.getElementById('designerLogo')?.value||'';appSettings.receiptFont=document.getElementById('designerFontSize')?.value||'13';appSettings.designerShowNotes=document.getElementById('designerShowNotes')?.checked!==false;appSettings.designerShowInvoiceMeta=document.getElementById('designerShowInvoiceMeta')?.checked!==false;appSettings.designerCompact=document.getElementById('designerCompact')?.checked===true;localStorage.setItem('cafeAppSettings',JSON.stringify(appSettings));renderInvoiceDesignerPreview();api('/settings',{method:'PUT',body:JSON.stringify(appSettings)}).then(()=>alert('Invoice design saved.')).catch(()=>alert('Saved locally; server settings unavailable.'));}
+function saveInvoiceDesigner(){appSettings.accentLabel=document.getElementById('designerAccent')?.value||'';appSettings.logoUrl=document.getElementById('designerLogo')?.value||'';appSettings.receiptFont=document.getElementById('designerFontSize')?.value||'13';appSettings.designerShowNotes=document.getElementById('designerShowNotes')?.checked!==false;appSettings.designerShowInvoiceMeta=document.getElementById('designerShowInvoiceMeta')?.checked!==false;appSettings.designerCompact=document.getElementById('designerCompact')?.checked===true;localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));renderInvoiceDesignerPreview();api('/settings',{method:'PUT',body:JSON.stringify(appSettings)}).then(()=>alert('Invoice design saved.')).catch(()=>alert('Saved locally; server settings unavailable.'));}
 function renderInvoiceDesignerPreview(){const p=document.getElementById('invoiceDesignerPreview');if(!p)return;const font=document.getElementById('designerFontSize')?.value||'13';const logo=document.getElementById('designerLogo')?.value||appSettings.logoUrl;const name=appSettings.restaurantName||'CAFE POS';p.innerHTML=`${logo?`<img src="${esc(logo)}" alt="logo" class="invoice-preview-logo">`:''}<div class="invoice-preview-name">${esc(name)}</div><div>${esc(document.getElementById('designerAccent')?.value||'Cafe Receipt')}</div><hr><div class="preview-row"><span>Invoice</span><b>INV-000123</b></div><div class="preview-row"><span>Order</span><b>ORD-00123</b></div><hr><div class="preview-line"><span>☕ Cappuccino ×2</span><b>₹240.00</b></div><div class="preview-line"><span>🥪 Sandwich ×1</span><b>₹180.00</b></div><hr><div class="preview-row"><span>Subtotal</span><span>₹420.00</span></div><div class="preview-row"><span>GST</span><span>₹21.00</span></div><div class="preview-row preview-total"><span>Total</span><b>₹441.00</b></div><p style="margin-top:12px">${esc(appSettings.customerMessage||'Thank you for visiting!')}</p>`;p.style.fontSize=font+'px';}
 
+function printerFormValue(id){return document.getElementById(id)?.value||""}
+function showPrinterMessage(text,error=false){const el=document.getElementById("printerMessage");if(!el)return;el.textContent=text;el.classList.toggle("error",error)}
+function togglePrinterFields(){const type=printerFormValue("printerType");document.getElementById("localPrinterFields").style.display=type==="local"?"block":"none";document.getElementById("networkPrinterFields").style.display=type==="network"?"grid":"none";document.getElementById("bluetoothPrinterFields").style.display=type==="bluetooth"?"block":"none"}
+function resetPrinterForm(){document.getElementById("printerForm")?.reset();document.getElementById("printerId").value="";document.getElementById("printerType").value="local";document.getElementById("printerPort").value="9100";document.getElementById("printerServiceUuid").value="000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value="00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerFormTitle").textContent="Add Printer";togglePrinterFields()}
+function renderPrinters(){const body=document.getElementById("printersBody");if(!body)return;const rows=window.cafePrinters||[];body.innerHTML=rows.map(function(p){const type=p.connection_type||"local";const address=type==="network"?esc(p.host)+":"+esc(p.port):type==="bluetooth"?esc(p.bluetooth_name||p.name):"Use computer print dialog";const label=type==="network"?"Network / IP":type==="bluetooth"?"Bluetooth":"Local computer";return '<tr><td>'+esc(p.name)+'</td><td>'+label+'</td><td>'+address+'</td><td>'+esc(p.paper_width)+'mm</td><td>'+(p.is_default?'<span class="access-status active">Default</span>':'—')+'</td><td><div class="action-row"><button type="button" onclick="testPrinter('+Number(p.id)+')">Test</button><button type="button" class="cancel-btn" onclick="editPrinter('+Number(p.id)+')">Edit</button><button type="button" class="danger-btn" onclick="deletePrinter('+Number(p.id)+')">Delete</button></div></td></tr>'}).join("")||'<tr><td colspan="6">No printers saved for this business.</td></tr>'}
+async function loadPrinters(){try{window.cafePrinters=await api("/printers");renderPrinters();showPrinterMessage("")}catch(e){window.cafePrinters=[];renderPrinters();showPrinterMessage(e.message,true)}}
+function editPrinter(id){const p=(window.cafePrinters||[]).find(function(x){return Number(x.id)===Number(id)});if(!p)return;document.getElementById("printerId").value=p.id;document.getElementById("printerName").value=p.name||"";document.getElementById("printerType").value=p.connection_type||"local";document.getElementById("printerHost").value=p.host||"";document.getElementById("printerPort").value=p.port||9100;document.getElementById("printerBluetoothName").value=p.bluetooth_name||"";document.getElementById("printerServiceUuid").value=p.service_uuid||"000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value=p.characteristic_uuid||"00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerPaperWidth").value=p.paper_width||"80";document.getElementById("printerIsDefault").checked=Boolean(p.is_default);document.getElementById("printerFormTitle").textContent="Edit Printer";togglePrinterFields();document.getElementById("printer").scrollIntoView({behavior:"smooth",block:"start"})}
+async function savePrinter(){try{const id=printerFormValue("printerId");const type=printerFormValue("printerType");const body={name:printerFormValue("printerName").trim(),connectionType:type,host:printerFormValue("printerHost").trim(),port:Number(printerFormValue("printerPort")||9100),bluetoothName:printerFormValue("printerBluetoothName").trim(),serviceUuid:printerFormValue("printerServiceUuid").trim(),characteristicUuid:printerFormValue("printerCharacteristicUuid").trim(),paperWidth:printerFormValue("printerPaperWidth")||"80",isDefault:document.getElementById("printerIsDefault").checked};const saved=await api(id?"/printers/"+id:"/printers",{method:id?"PUT":"POST",body:JSON.stringify(body)});showPrinterMessage("Printer saved.");resetPrinterForm();await loadPrinters();if(saved.printer)showPrinterMessage("Saved "+saved.printer.name+".")}catch(e){showPrinterMessage(e.message,true)}}
+async function deletePrinter(id){if(!confirm("Delete this saved printer?"))return;try{await api("/printers/"+id,{method:"DELETE"});await loadPrinters();showPrinterMessage("Printer deleted.")}catch(e){showPrinterMessage(e.message,true)}}
+function printerReceiptText(data){const currency=appSettings.currency||"₹";const moneyValue=value=>currency+Number(value||0).toFixed(2);const lines=[appSettings.restaurantName||"CAFE POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------", "Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber:"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"","--------------------------------","ITEM / QTY / AMOUNT"];(Array.isArray(data.items)?data.items:[]).forEach(function(item){lines.push((appSettings.uppercaseItems?String(item.name||"-").toUpperCase():(item.name||"-"))+" x"+Number(item.quantity||0)+"  "+moneyValue(Number(item.price||0)*Number(item.quantity||0)))});lines.push("--------------------------------","Subtotal: "+moneyValue(data.subtotal||0),"GST: "+moneyValue(data.gst||0),"TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"),"--------------------------------",appSettings.footer||"Thank you!");return lines.filter(Boolean).join("\n")+"\n\n\n"}
+async function sendBluetoothPrinterText(printer,text){if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable in this browser. Use Chrome or Edge on HTTPS or localhost.");const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";const name=printer.bluetooth_name||printer.bluetoothName||printer.name;const selection=navigator.bluetooth.requestDevice({filters:[{namePrefix:name}],optionalServices:[serviceUuid]});const device=await selection;const server=await device.gatt.connect();try{const service=await server.getPrimaryService(serviceUuid);const characteristic=await service.getCharacteristic(characteristicUuid);const bytes=new TextEncoder().encode(text);const payload=new Uint8Array(bytes.length+11);payload.set([0x1b,0x40,0x1b,0x61,0x01],0);payload.set(bytes,5);payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);for(let i=0;i<payload.length;i+=20)await writeChunk(payload.slice(i,i+20));}finally{if(device.gatt.connected)device.gatt.disconnect()}}
+async function pairBluetoothFromForm(){try{if(!navigator.bluetooth)throw new Error("Bluetooth setup needs Chrome or Edge on HTTPS or localhost.");const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});const name=device.name||"Bluetooth Printer";document.getElementById("printerBluetoothName").value=name;if(!printerFormValue("printerName"))document.getElementById("printerName").value=name;showPrinterMessage("Selected "+name+". Save the printer to finish setup.")}catch(e){showPrinterMessage(e.message,true)}}
+function printLocalPrinterTest(name){const w=window.open("","_blank","width=420,height=600");if(!w)return showPrinterMessage("Allow pop-ups to open the computer print dialog.",true);w.document.write("<!doctype html><html><head><title>Printer Test</title><style>@page{size:80mm auto;margin:0}body{font:14px Arial;padding:12px;text-align:center}</style></head><body><h2>"+esc(name)+"</h2><p>Printer test successful.</p><p>"+new Date().toLocaleString()+"</p></body></html>");w.document.close();w.onload=function(){w.focus();w.print();setTimeout(function(){w.close()},800)}}
+async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(e.message,true)}}
 async function loadAdvancedReports(){
     try{
         const range=document.getElementById('advancedReportRange')?.value||'month';
@@ -7185,7 +7793,7 @@ function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_US
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ baseShowPage(pageName); if(!currentUser)return; switch(pageName){case 'expenses':loadExpenses();break;case 'loyalty':loadLoyaltySettings();break;case 'backup':runBackupHealth();break;case 'invoice-designer':renderInvoiceDesignerPreview();break;case 'advanced-reports':loadAdvancedReports();break;case 'deployment':loadDeploymentChecks();break;} };
+showPage = function(pageName){ baseShowPage(pageName); if(!currentUser)return; switch(pageName){case 'expenses':loadExpenses();break;case 'loyalty':loadLoyaltySettings();break;case 'invoice-designer':renderInvoiceDesignerPreview();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();break;case 'new-order':loadMarketingDeals();break;} };
 
 // ==========================================
 // START APPLICATION
@@ -7196,6 +7804,7 @@ window.addEventListener(
     async function() {
 
         console.log("🚀 Cafe POS started");
+        await loadLoginBusinessWelcome();
 
         await loadSettings();
 

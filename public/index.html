@@ -113,6 +113,10 @@
         <div class="login-logo">☕</div>
         <h1>Cafe POS</h1>
         <p>Sign in to continue</p>
+        <div id="loginBusinessWelcome" class="login-business-welcome" hidden>
+            <span id="loginBusinessWelcomeCopy">Welcome back to</span>
+            <strong id="loginBusinessName"></strong>
+        </div>
         <form onsubmit="loginUser(event)">
             <label for="loginUsername">Username</label>
             <input id="loginUsername" type="text" autocomplete="username" placeholder="Username" required>
@@ -228,12 +232,26 @@
 
     <aside class="sidebar">
 
-        <h2>☕ Cafe POS</h2>
+        <div class="billing-brand-row">
+            <button type="button" class="billing-menu-toggle" aria-label="Open app menu" onclick="document.body.classList.toggle('billing-nav-open')">☰</button>
+            <h2><span class="brand-default">☕ Cafe POS</span><span class="billing-brand-label">Cafe Pilot</span></h2>
+        </div>
+        <nav class="billing-flow-nav" aria-label="Point of sale">
+            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">MY ORDERS</button>
+            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('new-order')">TAKE NEW ORDER</button>
+            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('table-view')">TABLE VIEW</button>
+        </nav>
+        <nav class="app-module-nav" aria-label="App modules">
+            <div class="module-drawer-header">
+                <strong>Cafe Pilot</strong>
+                <button type="button" class="module-drawer-close" aria-label="Close app menu" onclick="document.body.classList.remove('billing-nav-open')">&times;</button>
+            </div>
+            <div class="module-drawer-caption">CAFE PILOT SUPPORT</div>
 
 
         <button
             class="nav-btn active"
-            onclick="showPage('dashboard')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('dashboard')">
 
             📊 Dashboard
 
@@ -242,7 +260,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('orders')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">
 
             🧾 Orders
 
@@ -251,7 +269,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('reservations')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('reservations')">
 
             📅 Reservations
 
@@ -260,7 +278,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('tables')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('tables')">
 
             🪑 Tables
 
@@ -269,7 +287,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('kitchen')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('kitchen')">
 
             👨‍🍳 Kitchen
 
@@ -277,7 +295,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('kot-groups')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('kot-groups')">
 
             🧩 KOT Groups
 
@@ -286,7 +304,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('menu')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('menu')">
 
             🍔 Menu
 
@@ -295,7 +313,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('customers')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('customers')">
 
             👥 Customers
 
@@ -304,7 +322,7 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('payments')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('payments')">
 
             💳 Payments
 
@@ -313,24 +331,27 @@
 
         <button
             class="nav-btn"
-            onclick="showPage('reports')">
+            onclick="document.body.classList.remove('billing-nav-open');showPage('reports')">
 
             📊 Reports
 
         </button>
 
 
-        <button class="nav-btn" onclick="showPage('settings')">
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('settings')">
             ⚙️ Settings
         </button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('printer')">🖨️ Printer</button>
 
-        <button class="nav-btn" onclick="showPage('access')">🔐 Access</button>
-        <button class="nav-btn" onclick="showPage('expenses')">💸 Expenses</button>
-        <button class="nav-btn" onclick="showPage('loyalty')">⭐ Loyalty</button>
-        <button class="nav-btn" onclick="showPage('backup')">🗄️ Backup</button>
-        <button class="nav-btn" onclick="showPage('invoice-designer')">🎨 Invoice Designer</button>
-        <button class="nav-btn" onclick="showPage('advanced-reports')">📈 Advanced Reports</button>
-        <button class="nav-btn" onclick="showPage('deployment')">🚀 Deployment</button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('access')">🔐 Access</button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')">💸 Expenses</button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('loyalty')">⭐ Loyalty</button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')">📣 Marketing</button>
+
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('invoice-designer')">🎨 Invoice Designer</button>
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('advanced-reports')">📈 Advanced Reports</button>
+
+        </nav>
 
     </aside>
 
@@ -515,6 +536,7 @@
 
         <section id="new-order" class="page billing-page">
             <div class="billing-shell">
+                <input id="tableNumber" type="hidden" value="">
                 <div class="billing-header">
                     <div>
                         <span class="eyebrow">POINT OF SALE</span>
@@ -524,6 +546,7 @@
                     <div class="billing-top-actions">
                         <button type="button" id="dineBtn" class="type-btn selected" onclick="setOrderType('Dine-in')">🍽️ Dine-in</button>
                         <button type="button" id="takeBtn" class="type-btn" onclick="setOrderType('Takeaway')">🛍️ Takeaway</button>
+                        <label class="pos-sale-channel"><span>Sale channel</span><select id="billingSaleChannel" onchange="selectBillingSaleChannel(this.value)" aria-label="Sale channel"></select></label>
                         <div class="billing-search-wrap">
                             <span>🔎</span><input id="billingMenuSearch" type="search" placeholder="Search menu items…" oninput="filterBillingMenu(this.value)">
                         </div>
@@ -539,13 +562,10 @@
                     <section class="billing-menu-panel">
                         <div class="billing-section-heading">
                             <div><span class="eyebrow">ORDER MODE</span><h3 id="billingMenuTitle">Dine-in menu</h3></div>
-                            <input id="tableNumber" type="hidden" value="">
+                            
                         </div>
 
-                        <div id="tableArea" class="billing-tables-area">
-                            <div class="billing-tables-heading"><strong>Select a table</strong><span id="billingTableHint">Green = available · Yellow = occupied</span></div>
-                            <div id="billingTablesGrid" class="billing-tables-grid"></div>
-                        </div>
+                        
 
                         <div id="takeawayMenuHint" class="billing-inline-hint" style="display:none;">Takeaway billing is ready — choose items below.</div>
 
@@ -553,19 +573,44 @@
                     </section>
 
                     <aside class="billing-cart-panel">
+                        <div class="billing-customer-step-header">
+                            <button type="button" class="billing-customer-back" onclick="closeBillingCustomerPanel()" aria-label="Back to order">&#8592;</button>
+                            <strong>Customer Information</strong>
+                        </div>
+                        <div class="billing-customer-step-intro">Look up an existing customer or enter details for this order.</div>
                         <div class="billing-cart-header">
                             <div><span class="eyebrow">CURRENT BILL</span><h3 id="orderType">Dine-in</h3></div>
-                            <button type="button" class="clear-bill-btn" onclick="clearBillingCart()">Clear</button>
+                            <div class="billing-cart-header-actions">
+                                <button type="button" class="billing-customer-open-btn" onclick="openBillingCustomerPanel()" aria-label="Customer information" aria-controls="billingCustomerPanel" title="Customer information" aria-expanded="false">
+                                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5Z"/></svg>
+                                </button>
+                                <button type="button" class="billing-bill-view-btn" onclick="previewCurrentBill()">Bill View</button>
+                                <button type="button" class="clear-bill-btn" onclick="clearBillingCart()">Clear</button>
+                            </div>
                         </div>
 
                         <div id="cartItems" class="billing-cart-items"><p class="empty">Select a table and add items.</p></div>
 
-                        <div class="billing-customer-panel">
+                        <div id="billingCustomerPanel" class="billing-customer-panel" role="region" aria-label="Customer information">
                             <div class="billing-panel-title"><span>👤 Customer</span><span class="billing-muted">Optional</span></div>
-                            <div class="billing-inline-grid">
-                                <input id="billingCustomerNameQuick" type="text" placeholder="Customer name">
-                                <input id="billingCustomerPhoneQuick" type="tel" placeholder="Phone">
+                            <div class="billing-customer-modes" role="group" aria-label="Customer lookup type">
+                                <button type="button" class="billing-customer-mode active" data-lookup-mode="phone" onclick="setBillingCustomerLookupMode('phone', this)">Mobile Number</button>
+                                <button type="button" class="billing-customer-mode" data-lookup-mode="id" onclick="setBillingCustomerLookupMode('id', this)">Customer ID</button>
                             </div>
+                            <div class="billing-customer-fields">
+                                <label class="billing-customer-phone-label" for="billingCustomerPhoneQuick">Mobile Number</label>
+                                <div class="billing-customer-phone">
+                                    <span class="billing-country-code">+91</span>
+                                    <input id="billingCustomerPhoneQuick" type="tel" placeholder="Search customer mobile number" autocomplete="off" oninput="searchBillingCustomers(this.value)">
+                                    <span class="billing-customer-search-icon" aria-hidden="true">&#8981;</span>
+                                </div>
+                                <div id="billingCustomerLookupResults" class="billing-customer-search-results" role="listbox" aria-label="Customer matches" hidden></div>
+                                <div class="billing-inline-grid">
+                                    <label class="billing-customer-detail-field">Customer name<input id="billingCustomerNameQuick" type="text" placeholder="Enter customer name" autocomplete="name"></label>
+                                    <label class="billing-customer-detail-field">Email address <span class="billing-muted">Optional</span><input id="billingCustomerEmailQuick" type="email" placeholder="Enter email address" autocomplete="email"></label>
+                                </div>
+                            </div>
+                            <button type="button" class="billing-customer-next" onclick="closeBillingCustomerPanel()">Next: Add Items <span aria-hidden="true">&rarr;</span></button>
                         </div>
 
                         <div class="form-group billing-notes">
@@ -602,6 +647,24 @@
             </div>
         </section>
 
+        <section id="table-view" class="page billing-table-view-page">
+            <div class="billing-table-view-heading">
+                <div>
+                    <span class="eyebrow">POINT OF SALE</span>
+                    <h2>Table View</h2>
+                    <p>Choose a table to start or continue a dine-in order.</p>
+                </div>
+                <div class="billing-table-legend" aria-label="Table status">
+                    <span><i class="available"></i>Available</span>
+                    <span><i class="occupied"></i>Occupied</span>
+                    <span><i class="reserved"></i>Reserved</span>
+                </div>
+            </div>
+            <div id="tableArea" class="billing-tables-area">
+                            <div class="billing-tables-heading"><strong>Select a table</strong><span id="billingTableHint">Green = available · Yellow = occupied</span></div>
+                            <div id="billingTablesGrid" class="billing-tables-grid"></div>
+                        </div>
+        </section>
         <section
             id="orders"
             class="page">
@@ -1313,27 +1376,69 @@
   </div>
 </div>
 
-<div id="expenseModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Add Expense</h2><button class="close-btn" onclick="closeExpenseModal()">✕</button></div><div class="form-group"><label>Category</label><select id="expenseCategory"></select></div><div class="form-group"><label>Amount</label><input id="expenseAmount" type="number" min="0" step="0.01"></div><div class="form-group"><label>Payment Method</label><select id="expensePayment"><option>Cash</option><option>UPI</option><option>Card</option><option>Bank</option></select></div><div class="form-group"><label>Date</label><input id="expenseDate" type="date"></div><div class="form-group"><label>Note</label><textarea id="expenseNote" rows="3"></textarea></div><div class="modal-actions"><button class="big-btn" onclick="saveExpense()">Save Expense</button><button class="cancel-btn" onclick="closeExpenseModal()">Cancel</button></div></div></div>
+<div id="expenseModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Add Expense</h2><button class="close-btn" onclick="closeExpenseModal()">✕</button></div><div class="form-group"><label>Category</label><select id="expenseCategory"></select></div><div class="form-group"><label>Amount</label><input id="expenseAmount" type="number" min="0" step="0.01"></div><div class="form-group"><label>Payment Method</label><select id="expensePayment"></select></div><div class="form-group"><label>Date</label><input id="expenseDate" type="date"></div><div class="form-group"><label>Note</label><textarea id="expenseNote" rows="3"></textarea></div><div class="modal-actions"><button class="big-btn" onclick="saveExpense()">Save Expense</button><button class="cancel-btn" onclick="closeExpenseModal()">Cancel</button></div></div></div>
 
 <!-- =================================================
      LOYALTY
      ================================================= -->
+<section id="marketing" class="page marketing-page">
+    <div class="page-header marketing-page-header">
+        <div><span class="eyebrow">GROW YOUR BUSINESS</span><h2>📣 Marketing</h2><p>Create and manage offers for your current business.</p></div>
+        <button type="button" class="big-btn" onclick="openMarketingDealForm()">＋ Create Deal</button>
+    </div>
+    <div class="marketing-overview-grid">
+        <article class="marketing-overview-card"><span>Active deals</span><strong id="marketingActiveCount">0</strong></article>
+        <article class="marketing-overview-card"><span>Deal types</span><strong>8</strong></article>
+        <article class="marketing-overview-card"><span>Channels</span><strong id="marketingChannelCount">4</strong></article>
+    </div>
+    <div class="marketing-deal-toolbar">
+        <div><h3>Deals</h3><p>Discounts, Buy X Get X, Buy X Get Y, vouchers, and more.</p></div>
+        <div class="marketing-deal-filters">
+            <input id="marketingDealSearch" type="search" placeholder="Search deals…" oninput="renderMarketingDeals()">
+            <select id="marketingDealTypeFilter" onchange="renderMarketingDeals()">
+                <option value="">All deal types</option>
+                <option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option>
+                <option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option>
+            </select>
+        </div>
+    </div>
+    <div id="marketingDealsGrid" class="marketing-deals-grid"><div class="marketing-empty-state">Loading deals…</div></div>
+</section>
+
+<div id="marketingDealModal" class="modal">
+    <div class="modal-content marketing-deal-modal">
+        <div class="modal-header"><div><span class="eyebrow">MARKETING</span><h2 id="marketingDealModalTitle">Create Deal</h2></div><button type="button" onclick="closeMarketingDealForm()" aria-label="Close">✕</button></div>
+        <div class="marketing-deal-form-grid">
+            <div class="form-group marketing-deal-wide"><label for="marketingDealName">Deal name</label><input id="marketingDealName" maxlength="120" placeholder="e.g. Buy 2 coffees, get 1 free"></div>
+            <div class="form-group"><label for="marketingDealType">Deal type</label><select id="marketingDealType" onchange="updateMarketingDealFields()"><option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option><option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option></select></div>
+            <div class="form-group"><label for="marketingDealCategory">Category</label><select id="marketingDealCategory" onchange="populateMarketingDealOptions({category:this.value})"><option value="">All categories</option></select></div>
+            <div class="form-group"><label for="marketingDealItem">Eligible item</label><select id="marketingDealItem"><option value="">All items</option></select></div>
+            <div id="marketingBuyQuantityField" class="form-group"><label for="marketingBuyQuantity">Buy quantity</label><input id="marketingBuyQuantity" type="number" min="1" value="1"></div>
+            <div id="marketingGetQuantityField" class="form-group"><label for="marketingGetQuantity">Get quantity</label><input id="marketingGetQuantity" type="number" min="1" value="1"></div>
+            <div id="marketingRewardItemField" class="form-group marketing-deal-wide"><label for="marketingRewardItem">Reward item</label><select id="marketingRewardItem"><option value="">Same item</option></select></div>
+            <div class="form-group"><label for="marketingValueType">Value</label><select id="marketingValueType"><option value="amount">Amount</option><option value="percentage">Percentage</option><option value="price">Price</option></select></div>
+            <div class="form-group"><label for="marketingDealValue">Deal value</label><input id="marketingDealValue" type="number" min="0" step="0.01" placeholder="0"></div>
+            <div class="form-group"><label for="marketingDealStart">Start date</label><input id="marketingDealStart" type="date"></div>
+            <div class="form-group"><label for="marketingDealEnd">End date</label><input id="marketingDealEnd" type="date"></div>
+            <div class="form-group"><label for="marketingMaxOccurrences">Max uses per branch / day</label><input id="marketingMaxOccurrences" type="number" min="0" placeholder="No limit"></div>
+            <div class="form-group"><label for="marketingMinGroupSize">Minimum group size</label><input id="marketingMinGroupSize" type="number" min="1" placeholder="Any size"></div>
+            <div class="form-group"><label for="marketingRecurringPeriod">Recurring period</label><select id="marketingRecurringPeriod"><option value="None">None</option><option>Daily</option><option>Weekly</option><option>Monthly</option></select></div>
+            <fieldset class="marketing-channel-fieldset marketing-deal-wide"><legend>Channels</legend><div id="marketingDealChannels" class="marketing-channel-options"></div></fieldset>
+            <div class="marketing-deal-checks marketing-deal-wide">
+                <label><input id="marketingForNewCustomers" type="checkbox"> For new customers</label>
+                <label><input id="marketingUseMembership" type="checkbox"> Use membership loyalty</label>
+                <label><input id="marketingRequireAuthentication" type="checkbox"> Customer authentication required</label>
+                <label><input id="marketingEnforceAtCheckout" type="checkbox"> Enforce deal at checkout</label>
+            </div>
+        </div>
+        <div class="modal-actions"><button type="button" class="big-btn" onclick="saveMarketingDeal()">Save Deal</button><button type="button" class="cancel-btn" onclick="closeMarketingDealForm()">Cancel</button></div>
+    </div>
+</div>
 <section id="loyalty" class="page">
   <div class="page-header"><div><h2>⭐ Customer Loyalty</h2><p>Reward repeat guests and manage points from the cafe counter.</p></div><button class="big-btn" onclick="loadLoyaltySettings()">Refresh</button></div>
   <div class="dashboard-box"><h3>Loyalty Rules</h3><div class="billing-inline-grid"><input id="loyaltyPointsPerCurrency" type="number" min="0" step="0.01" placeholder="Points per ₹"><input id="loyaltyCurrencyPerPoint" type="number" min="0" step="0.01" placeholder="₹ value per point"></div><div class="billing-inline-grid"><input id="loyaltyMinRedeem" type="number" min="0" placeholder="Minimum redeem points"><input id="loyaltyWelcome" type="number" min="0" placeholder="Welcome points"></div><label><input id="loyaltyEnabled" type="checkbox"> Loyalty enabled</label><br><button class="big-btn" onclick="saveLoyaltySettings()">Save Loyalty Settings</button></div>
   <div class="dashboard-box"><h3>Customer Points</h3><div class="billing-inline-grid"><select id="loyaltyCustomerSelect"></select><button class="big-btn" onclick="loadSelectedLoyaltyCustomer()">View</button></div><div class="cards"><div class="card"><span>Current Points</span><strong id="loyaltyBalance">0</strong></div></div><div class="table-container"><table><thead><tr><th>Date</th><th>Type</th><th>Points</th><th>Note</th></tr></thead><tbody id="loyaltyHistoryBody"></tbody></table></div></div>
 </section>
-
-<!-- =================================================
-     BACKUP & RESTORE
-     ================================================= -->
-<section id="backup" class="page">
-  <div class="page-header"><div><h2>🗄️ Backup & Restore</h2><p>Database backup tools for cafe administrators.</p></div><button class="big-btn" onclick="runBackupHealth()">Check</button></div>
-  <div id="backupHealth" class="dashboard-box">Checking backup capability…</div>
-  <div class="dashboard-box backup-actions"><button class="big-btn" onclick="downloadDatabaseBackup()">⬇️ Download SQL Backup</button><button class="cancel-btn" onclick="restoreBackupFile()">⬆️ Restore SQL Backup</button><input id="restoreBackupInput" type="file" accept=".sql,text/sql" style="display:none" onchange="handleRestoreBackup(this)"></div>
-  <div class="dashboard-box"><h3>Important</h3><p>Always keep an external copy of your backup. Restoring replaces database objects/data covered by the SQL dump.</p></div>
-</section>
-
 <!-- =================================================
      INVOICE DESIGNER
      ================================================= -->
@@ -1352,16 +1457,6 @@
   <div class="advanced-report-grid"><div class="dashboard-box"><h3>Hourly Sales</h3><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div><div class="dashboard-box"><h3>Top Customers</h3><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div></div>
   <div class="dashboard-box"><h3>Cancelled Orders</h3><div class="table-container"><table><thead><tr><th>Date</th><th>Orders</th><th>Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
 </section>
-
-<!-- =================================================
-     DEPLOYMENT
-     ================================================= -->
-<section id="deployment" class="page">
-  <div class="page-header"><div><h2>🚀 Deployment</h2><p>Deployment-readiness checks and setup utilities for your cafe POS.</p></div><button class="big-btn" onclick="loadDeploymentChecks()">Run Checks</button></div>
-  <div id="deploymentChecks" class="dashboard-box">Run deployment checks.</div>
-  <div class="dashboard-box"><h3>Production checklist</h3><div class="deployment-checklist"><label>☐ Configure production .env</label><label>☐ Set NODE_ENV=production</label><label>☐ Use managed PostgreSQL or secured local PostgreSQL</label><label>☐ Configure reverse proxy / HTTPS</label><label>☐ Schedule database backups</label><label>☐ Replace default cafe users/passwords</label></div><button class="big-btn" onclick="downloadEnvTemplate()">Download .env Template</button></div>
-</section>
-
 <!-- =================================================
      ACCESS USER MODAL
      ================================================= -->
@@ -1454,6 +1549,22 @@
             <button class="big-btn" type="button" onclick="saveSettings()">💾 Save Settings</button>
         </div>
 
+        <div class="settings-card payment-mode-master-card" style="margin:0 0 20px;">
+            <div class="settings-master-header">
+                <div>
+                    <span class="eyebrow">PAYMENT MASTER</span>
+                    <h3>Payment Modes</h3>
+                    <p class="access-muted">Create the payment methods used by this business. Cash handling enables change calculation at checkout. Click Save Settings to keep your changes.</p>
+                </div>
+            </div>
+            <div class="payment-mode-create">
+                <div class="form-group"><label for="newPaymentModeName">Payment mode name</label><input id="newPaymentModeName" type="text" maxlength="40" placeholder="e.g. Bank Transfer" onkeydown="if(event.key==='Enter'){event.preventDefault();addPaymentMode();}"></div>
+                <label class="payment-mode-cash-option"><input id="newPaymentModeCash" type="checkbox"> Treat as cash</label>
+                <button class="big-btn" type="button" onclick="addPaymentMode()">＋ Add Payment Mode</button>
+            </div>
+            <div id="paymentModesList" class="payment-mode-list"></div>
+        </div>
+
         <div class="settings-grid">
             <div class="settings-card">
                 <h3>🏪 Restaurant Profile</h3>
@@ -1499,10 +1610,23 @@
             </div>
         </div>
 
-        <div class="settings-grid advanced-settings-grid">
+                <div class="settings-card pos-preferences-card">
+            <div class="settings-master-header">
+                <div>
+                    <span class="eyebrow">POINT OF SALE</span>
+                    <h3>POS Preferences</h3>
+                    <p class="access-muted">Choose the sales channels available in each POS module and its default channel.</p>
+                </div>
+            </div>
+            <div class="pos-preferences-table">
+                <div class="pos-preferences-table-head"><span>Module</span><span>Channels to show</span><span>Default channel</span></div>
+                <div id="posPreferencesRows"></div>
+            </div>
+        </div>
+<div class="settings-grid advanced-settings-grid">
             <div class="settings-card">
                 <h3>🧮 Billing Rules</h3>
-                <div class="form-group"><label>Default Payment</label><select id="settingDefaultPayment"><option>Cash</option><option>UPI</option><option>Card</option></select></div>
+                <div class="form-group"><label>Default Payment</label><select id="settingDefaultPayment"></select></div>
                 <div class="form-group"><label>Order Prefix</label><input id="settingOrderPrefix" value="ORD-"></div>
                 <div class="form-group"><label>Invoice Prefix</label><input id="settingInvoicePrefix" value="INV-"></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingAllowZeroAmount"> Allow zero-value bills</label><label><input type="checkbox" id="settingRoundTotals"> Round final total to nearest rupee</label></div>
@@ -1538,9 +1662,8 @@
             </div>
             <div class="settings-card">
                 <h3>🛡️ Data & Admin</h3>
-                <div class="form-group"><label>Backup Retention (days)</label><input id="settingBackupRetention" type="number" min="1" value="30"></div>
                 <div class="form-group"><label>Session Timeout (hours)</label><input id="settingSessionTimeout" type="number" min="1" max="48" value="12"></div>
-                <div class="settings-options"><label><input type="checkbox" id="settingAutoBackup"> Enable scheduled backup flag</label><label><input type="checkbox" id="settingAuditLog"> Enable audit logging flag</label></div>
+                <div class="settings-options"><label><input type="checkbox" id="settingAuditLog"> Enable audit logging flag</label></div>
             </div>
             <div class="settings-card">
                 <h3>🎨 Appearance</h3>
@@ -1550,7 +1673,6 @@
             </div>
         </div>
 
-        
         <div class="settings-card billing-adjustment-master-card" style="margin-top:20px;">
             <div class="settings-master-header">
                 <div>
@@ -1581,6 +1703,45 @@
             <button class="big-btn" type="button" onclick="saveSettings()">💾 Save Settings</button>
             <button class="cancel-btn" type="button" onclick="resetSettings()">↩ Reset Defaults</button>
         </div>
+    </div>
+</section>
+
+<section id="printer" class="page">
+    <div class="page-header">
+        <div><h2>🖨️ Printer</h2><p>Save local, Bluetooth or LAN printers for this business and choose a default receipt printer.</p></div>
+        <button class="big-btn" type="button" onclick="loadPrinters()">Refresh Printers</button>
+    </div>
+    <div class="dashboard-box">
+        <h3 id="printerFormTitle">Add Printer</h3>
+        <form id="printerForm" onsubmit="event.preventDefault();savePrinter()">
+            <input id="printerId" type="hidden">
+            <div class="printer-form-grid">
+                <div class="form-group"><label for="printerName">Printer Name</label><input id="printerName" required placeholder="e.g. Counter Receipt Printer"></div>
+                <div class="form-group"><label for="printerType">Connection Type</label><select id="printerType" onchange="togglePrinterFields()"><option value="local">Local computer printer</option><option value="bluetooth">Bluetooth printer</option><option value="network">Network / IP printer</option></select></div>
+                <div class="form-group"><label for="printerPaperWidth">Paper Width</label><select id="printerPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
+            </div>
+            <div id="localPrinterFields" class="printer-note"><strong>Local printer</strong><br>Uses the computer’s print dialog. Add the printer in Windows first, then select it when you print.</div>
+            <div id="networkPrinterFields" class="printer-form-grid" style="display:none">
+                <div class="form-group"><label for="printerHost">Printer IPv4 Address</label><input id="printerHost" inputmode="decimal" placeholder="192.168.1.50"></div>
+                <div class="form-group"><label for="printerPort">Port</label><input id="printerPort" type="number" min="1" max="65535" value="9100"></div>
+            </div>
+            <div id="bluetoothPrinterFields" style="display:none">
+                <div class="printer-form-grid">
+                    <div class="form-group"><label for="printerBluetoothName">Bluetooth Device Name</label><input id="printerBluetoothName" placeholder="Name shown in Bluetooth"></div>
+                    <div class="form-group"><label for="printerServiceUuid">Bluetooth Service UUID</label><input id="printerServiceUuid" value="000018f0-0000-1000-8000-00805f9b34fb"></div>
+                    <div class="form-group"><label for="printerCharacteristicUuid">Write Characteristic UUID</label><input id="printerCharacteristicUuid" value="00002af1-0000-1000-8000-00805f9b34fb"></div>
+                </div>
+                <p class="printer-note">Bluetooth printing needs Chrome or Edge on HTTPS or localhost. Some Bluetooth printers use Classic Bluetooth and cannot be accessed directly by a browser.</p>
+                <button class="cancel-btn" type="button" onclick="pairBluetoothFromForm()">Find Bluetooth Printer</button>
+            </div>
+            <div class="settings-options"><label><input id="printerIsDefault" type="checkbox"> Use as the default bill printer</label></div>
+            <div class="action-row" style="margin-top:16px"><button class="big-btn" type="submit">Save Printer</button><button class="cancel-btn" type="button" onclick="resetPrinterForm()">Cancel</button></div>
+        </form>
+        <div id="printerMessage" class="printer-message" role="status"></div>
+    </div>
+    <div class="dashboard-box">
+        <h3>Saved Printers</h3>
+        <div class="table-container"><table><thead><tr><th>Name</th><th>Connection</th><th>Address / Device</th><th>Paper</th><th>Default</th><th>Actions</th></tr></thead><tbody id="printersBody"><tr><td colspan="6">Loading printers…</td></tr></tbody></table></div>
     </div>
 </section>
 
@@ -2123,123 +2284,43 @@
          PAYMENT MODAL
          ===================================================== -->
 
-    <div
-        id="paymentModal"
-        class="modal">
-
-
-        <div class="modal-content">
-
-
-            <h2>
-                Payment
-            </h2>
-
-
-            <h1 id="paymentAmount">
-                ₹0
-            </h1>
-
-
-            <p>
-                Select Payment Method
-            </p>
-
-
-            <div class="payment-methods">
-
-
-                <button
-                    onclick="completeOrder('Cash')">
-
-                    💵 Cash
-
-                </button>
-
-
-                <button
-                    onclick="choosePayment('UPI')">
-
-                    📱 UPI
-
-                </button>
-
-
-                <button
-                    onclick="choosePayment('Card')">
-
-                    💳 Card
-
-                </button>
-
-
-            </div>
-
-
-
-            <!-- CASH PAYMENT -->
-
-            <div
-                id="cashSection"
-                style="display:none;text-align:left;">
-
-
-                <label for="cashReceived">
-                    Cash Received
-                </label>
-
-
-                <input
-                    id="cashReceived"
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    oninput="updateCashChange()"
-                    placeholder="Enter cash received">
-
-
-                <p style="margin-top:10px;">
-
-                    <strong>
-                        Change:
-                    </strong>
-
-                    <span id="changeAmount">
-                        ₹0.00
-                    </span>
-
-                </p>
-
-
-                <button
-                    class="big-btn"
-                    onclick="completeOrder('Cash')">
-
-                    Confirm Cash Payment
-
-                </button>
-
-
-            </div>
-
-
-
-            <button
-                class="cancel-btn"
-                onclick="closePayment()">
-
-                Cancel
-
-            </button>
-
-
+    <div id="paymentModal" class="modal">
+        <div class="pos-payment-dialog">
+            <section class="pos-payment-workspace">
+                <div class="pos-payment-header"><div><span class="eyebrow">CHECKOUT</span><h2>Payment</h2></div><button type="button" class="pos-payment-close" onclick="closePayment()" aria-label="Close payment">✕</button></div>
+                <div class="pos-payment-categories" role="radiogroup" aria-label="Payment category">
+                    <label><input type="radio" name="paymentCategory" value="full" checked onchange="setPaymentCategory('full')"><span>Full Payment</span></label>
+                    <label><input type="radio" name="paymentCategory" value="non-chargeable" onchange="setPaymentCategory('non-chargeable')"><span>Non-chargeable</span></label>
+                    <label><input type="radio" name="paymentCategory" value="partial" onchange="setPaymentCategory('partial')"><span>Partial Payment</span></label>
+                    <label><input type="radio" name="paymentCategory" value="split" onchange="setPaymentCategory('split')"><span>Split Payment</span></label>
+                </div>
+                <div id="nonChargeableNotice" class="non-chargeable-notice" hidden>This bill will be marked non-chargeable. No payment will be collected.</div>
+                <div id="singlePaymentEntry" class="pos-payment-entry">
+                    <div class="form-group"><label id="paymentReceivedLabel" for="cashReceived">Received amount</label><div class="payment-amount-input"><span id="paymentCurrencySymbol">₹</span><input id="cashReceived" type="number" min="0" step="0.01" oninput="updatePaymentSummary()" placeholder="Enter amount"></div></div>
+                    <div id="changeLine" class="payment-change-line">Change <strong id="changeAmount">₹0.00</strong></div>
+                </div>
+                <div class="pos-payment-method-section"><div class="pos-payment-section-heading"><strong>Payment Methods</strong><span id="paymentMethodHint">Choose one method</span></div><div id="paymentMethods" class="pos-payment-method-grid"></div></div>
+                <div id="splitPaymentEntry" class="split-payment-entry" hidden>
+                    <div class="form-group"><label for="splitPaymentAmount">Split amount</label><input id="splitPaymentAmount" type="number" min="0.01" step="0.01" placeholder="Amount for selected method"></div>
+                    <button type="button" class="cancel-btn" onclick="addSplitPayment()">＋ Add payment</button>
+                    <div id="splitPaymentList" class="split-payment-list"></div>
+                </div>
+                <div class="pos-payment-footer"><button type="button" class="cancel-btn" onclick="closePayment()">Cancel</button><button type="button" class="big-btn pos-confirm-payment" onclick="confirmPOSPayment()">Confirm Payment</button></div>
+            </section>
+            <aside class="pos-payment-summary">
+                <div class="pos-payment-summary-header"><div><small id="paymentOrderDate"></small><span id="paymentOrderType">Dine-in</span></div><strong id="paymentBillTotalHeader">₹0.00</strong></div>
+                <div class="pos-payment-summary-lines">
+                    <div><span>Sub Total</span><strong id="paymentSubtotal">₹0.00</strong></div>
+                    <div><span>Charges</span><strong id="paymentCharges">₹0.00</strong></div>
+                    <div><span>Tax</span><strong id="paymentTax">₹0.00</strong></div>
+                    <div><span>Discount</span><strong id="paymentDiscount">₹0.00</strong></div>
+                    <div class="payment-summary-total"><span>Bill Total</span><strong id="paymentBillTotal">₹0.00</strong></div>
+                </div>
+                <div id="paymentAllocations" class="payment-allocation-list"></div>
+                <div class="payment-collected-due"><div><span>Amount Collected</span><strong id="paymentAmountCollected">₹0.00</strong></div><div><span>Amount Due</span><strong id="paymentAmountDue">₹0.00</strong></div></div>
+            </aside>
         </div>
-
-
     </div>
-
-
-
     <!-- =====================================================
          EDIT TABLE MODAL
          ===================================================== -->
@@ -2796,6 +2877,16 @@
                 <strong id="billSubtotal">₹0.00</strong>
             </div>
 
+            <div id="billDiscountRow" style="display:none">
+                <span id="billDiscountLabel">Discount</span>
+                <strong id="billDiscountAmount">−₹0.00</strong>
+            </div>
+
+            <div id="billChargeRow" style="display:none">
+                <span id="billChargeLabel">Charges</span>
+                <strong id="billChargeAmount">₹0.00</strong>
+            </div>
+
             <div>
                 <span>GST</span>
                 <strong id="billGST">₹0.00</strong>
@@ -2870,6 +2961,26 @@
     </div>
 </div>
 
+<div id="businessAboutModal" class="modal">
+    <div class="business-about-dialog">
+        <div class="business-about-brand"><span class="business-about-mark">☕</span><div><strong>Cafe Pilot</strong><span>Business information</span></div><button type="button" onclick="closeBusinessAbout()" aria-label="Close About">✕</button></div>
+        <h2 id="aboutBusinessName">Current Business</h2>
+        <p id="aboutBusinessMeta" class="business-about-meta"></p>
+        <div class="business-about-grid">
+            <div><span>Branch</span><strong id="aboutBranch">—</strong></div>
+            <div><span>Business type</span><strong id="aboutBusinessType">—</strong></div>
+            <div><span>Owner</span><strong id="aboutOwner">—</strong></div>
+            <div><span>Device</span><strong id="aboutDevice">—</strong></div>
+            <div><span>Phone</span><strong id="aboutPhone">—</strong></div>
+            <div><span>Email</span><strong id="aboutEmail">—</strong></div>
+            <div class="business-about-wide"><span>Address</span><strong id="aboutAddress">—</strong></div>
+            <div><span>GSTIN</span><strong id="aboutGstin">—</strong></div>
+            <div><span>Currency</span><strong id="aboutCurrency">—</strong></div>
+        </div>
+        <div class="business-about-footer"><span>POS version</span><strong>Cafe Pilot · Phase 2</strong></div>
+        <button type="button" class="big-btn" onclick="closeBusinessAbout()">Close</button>
+    </div>
+</div>
 </body>
 
 </html>
