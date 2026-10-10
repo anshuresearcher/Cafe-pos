@@ -8,7 +8,7 @@
     <meta name="viewport"
         content="width=device-width, initial-scale=1.0">
 
-    <title>Cafe Management System</title>
+    <title>Cafe Pilot POS</title>
 
     <link rel="stylesheet"
         href="style.css">
@@ -544,8 +544,8 @@
                         <span class="billing-order-badge" id="billingOrderState">New order</span>
                     </div>
                     <div class="billing-top-actions">
-                        <button type="button" id="dineBtn" class="type-btn selected" onclick="setOrderType('Dine-in')">🍽️ Dine-in</button>
-                        <button type="button" id="takeBtn" class="type-btn" onclick="setOrderType('Takeaway')">🛍️ Takeaway</button>
+                        <button type="button" id="dineBtn" class="type-btn" onclick="setOrderType('Dine-in')">🍽️ Dine-in</button>
+                        <button type="button" id="takeBtn" class="type-btn selected" onclick="setOrderType('Takeaway')">🛍️ Takeaway</button>
                         <label class="pos-sale-channel"><span>Sale channel</span><select id="billingSaleChannel" onchange="selectBillingSaleChannel(this.value)" aria-label="Sale channel"></select></label>
                         <div class="billing-search-wrap">
                             <span>🔎</span><input id="billingMenuSearch" type="search" placeholder="Search menu items…" oninput="filterBillingMenu(this.value)">
@@ -561,13 +561,13 @@
 
                     <section class="billing-menu-panel">
                         <div class="billing-section-heading">
-                            <div><span class="eyebrow">ORDER MODE</span><h3 id="billingMenuTitle">Dine-in menu</h3></div>
+                            <div><span class="eyebrow">ORDER MODE</span><h3 id="billingMenuTitle">Takeaway menu</h3></div>
                             
                         </div>
 
                         
 
-                        <div id="takeawayMenuHint" class="billing-inline-hint" style="display:none;">Takeaway billing is ready — choose items below.</div>
+                        <div id="takeawayMenuHint" class="billing-inline-hint">Takeaway billing is ready — choose items below.</div>
 
                         <div id="billingMenuGrid" class="menu-grid"></div>
                     </section>
@@ -579,7 +579,7 @@
                         </div>
                         <div class="billing-customer-step-intro">Look up an existing customer or enter details for this order.</div>
                         <div class="billing-cart-header">
-                            <div><span class="eyebrow">CURRENT BILL</span><h3 id="orderType">Dine-in</h3></div>
+                            <div><span class="eyebrow">CURRENT BILL</span><h3 id="orderType">Takeaway</h3></div>
                             <div class="billing-cart-header-actions">
                                 <button type="button" class="billing-customer-open-btn" onclick="openBillingCustomerPanel()" aria-label="Customer information" aria-controls="billingCustomerPanel" title="Customer information" aria-expanded="false">
                                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5Z"/></svg>
@@ -675,7 +675,10 @@
                     <h2>Orders</h2>
                     <p class="orders-subtitle">Manage saved, active and completed orders.</p>
                 </div>
-                <button class="big-btn" onclick="showPage('new-order')">+ New Order</button>
+                <div class="orders-header-actions">
+                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order ID, table, type…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
+                    <button class="big-btn" onclick="showPage('new-order')">+ New Order</button>
+                </div>
             </div>
 
             <div class="orders-tabs">
@@ -1006,7 +1009,7 @@
              MENU MANAGEMENT
              ================================================= -->
         <section id="menu" class="page">
-          <div class="menu-management-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2>Menu Management</h2><p>Modern catalog with channel pricing, taxes, units, item nature and variants.</p></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="table-action-btn" type="button" onclick="openMenuCategoryModal()">🗂️ Manage Categories</button><button class="big-btn" onclick="openAddMenuModal()">＋ Add Menu Item</button></div></div>
+          <div class="menu-management-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2>Menu Management</h2><p>Modern catalog with channel pricing, taxes, units, item nature and variants.</p></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="table-action-btn" type="button" onclick="openMenuCategoryModal()">🗂️ Manage Categories</button><button class="cancel-btn" type="button" onclick="openMenuImportModal()">⇧ Import Excel</button><button class="big-btn" onclick="openAddMenuModal()">＋ Add Menu Item</button></div></div>
           <div class="dashboard-box menu-category-master-box"><div class="settings-master-header"><div><span class="eyebrow">CATEGORY MASTER</span><h3>Menu Categories</h3><p class="access-muted">Create categories once, then select them while creating menu items.</p></div><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div>
           <div class="menu-list"></div>
         </section>
@@ -1642,7 +1645,7 @@
                 <h3>🏪 Operations</h3>
                 <div class="form-group"><label>Opening Time</label><input id="settingOpeningTime" type="time" value="09:00"></div>
                 <div class="form-group"><label>Closing Time</label><input id="settingClosingTime" type="time" value="23:00"></div>
-                <div class="form-group"><label>Default Order Type</label><select id="settingDefaultOrderType"><option>Dine-in</option><option>Takeaway</option></select></div>
+                <div class="form-group"><label>Default Order Type</label><select id="settingDefaultOrderType"><option>Dine-in</option><option selected>Takeaway</option></select></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingAllowOrderNotes"> Allow order notes</label><label><input type="checkbox" id="settingShowItemNotes"> Show item notes on bill</label></div>
             </div>
             <div class="settings-card">
@@ -1708,7 +1711,7 @@
 
 <section id="printer" class="page">
     <div class="page-header">
-        <div><h2>🖨️ Printer</h2><p>Save local, Bluetooth or LAN printers for this business and choose a default receipt printer.</p></div>
+        <div><h2>🖨️ Printer</h2><p>Manage Windows, USB, Bluetooth and LAN printers. Select a default bill printer for direct printing without the browser print popup.</p></div>
         <button class="big-btn" type="button" onclick="loadPrinters()">Refresh Printers</button>
     </div>
     <div class="dashboard-box">
@@ -1720,7 +1723,16 @@
                 <div class="form-group"><label for="printerType">Connection Type</label><select id="printerType" onchange="togglePrinterFields()"><option value="local">Local computer printer</option><option value="bluetooth">Bluetooth printer</option><option value="network">Network / IP printer</option></select></div>
                 <div class="form-group"><label for="printerPaperWidth">Paper Width</label><select id="printerPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
             </div>
-            <div id="localPrinterFields" class="printer-note"><strong>Local printer</strong><br>Uses the computer’s print dialog. Add the printer in Windows first, then select it when you print.</div>
+            <div id="localPrinterFields" class="printer-note">
+                <strong>Windows printer</strong>
+                <p style="margin:6px 0 10px">Select an installed 58/80mm thermal receipt printer with ESC/POS support. Bills go straight to Windows; virtual printers such as Microsoft Print to PDF are not suitable for direct receipt printing.</p>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                    <select id="windowsPrinterSelect" style="min-width:280px;flex:1"><option value="">Detecting Windows printers…</option></select>
+                    <button class="cancel-btn" type="button" onclick="discoverWindowsPrinters()">🔄 Refresh</button>
+                    <button class="cancel-btn" type="button" onclick="useSelectedWindowsPrinter()">Use Selected</button>
+                </div>
+                <small id="windowsPrinterStatus" style="display:block;margin-top:8px;opacity:.75">Connecting to local printer service…</small>
+            </div>
             <div id="networkPrinterFields" class="printer-form-grid" style="display:none">
                 <div class="form-group"><label for="printerHost">Printer IPv4 Address</label><input id="printerHost" inputmode="decimal" placeholder="192.168.1.50"></div>
                 <div class="form-group"><label for="printerPort">Port</label><input id="printerPort" type="number" min="1" max="65535" value="9100"></div>
@@ -2279,6 +2291,16 @@
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
       <div class="modal-actions"><button class="big-btn" onclick="addMenuItem()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
     <div id="variantPickerModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Select Variant</h2><button class="close-btn" onclick="closeVariantPicker()">✕</button></div><div id="variantPickerBody"></div></div></div>
+    <div id="menuImportModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="menuImportTitle">
+        <div class="modal-content menu-import-modal">
+            <div class="modal-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2 id="menuImportTitle">Import menu from Excel</h2></div><button class="close-btn" type="button" onclick="closeMenuImportModal()" aria-label="Close">✕</button></div>
+            <p class="access-muted">Upload an .xlsx workbook or CSV file. Use the template to match the expected column names.</p>
+            <div class="menu-import-actions"><button type="button" class="table-action-btn" onclick="downloadMenuImportTemplate()">↓ Download template</button><label class="menu-import-file-btn">Choose file<input id="menuImportFile" type="file" accept=".xlsx,.csv,.tsv,text/csv" onchange="readMenuImportFile(this.files?.[0])"></label><span id="menuImportFileName" class="access-muted">No file selected</span></div>
+            <div id="menuImportStatus" class="menu-import-status" role="status">Required columns: Item Name, Category, Price. Optional columns support channel prices, tax, unit, availability and KOT group.</div>
+            <div id="menuImportPreview" class="menu-import-preview"></div>
+            <div class="modal-actions"><button id="menuImportSubmit" type="button" class="big-btn" onclick="submitMenuSpreadsheet()" disabled>Import items</button><button type="button" class="cancel-btn" onclick="closeMenuImportModal()">Cancel</button></div>
+        </div>
+    </div>
 
     <!-- =====================================================
          PAYMENT MODAL
@@ -2608,6 +2630,13 @@
 
     </div>
 
+    <div id="orderActivityModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="orderActivityTitle">
+        <div class="modal-content order-activity-dialog">
+            <div class="modal-header"><div><span class="menu-eyebrow">ORDER HISTORY</span><h2 id="orderActivityTitle">Activity Log</h2></div><button class="close-btn" type="button" onclick="closeOrderActivity()" aria-label="Close activity log">✕</button></div>
+            <div id="orderActivityList" class="order-activity-list" aria-live="polite"><p class="access-muted">Loading activity…</p></div>
+        </div>
+    </div>
+
 
 
     <!-- =====================================================
@@ -2635,6 +2664,7 @@
        POST /api/public/device/register
        ========================================================= */
     (function () {
+        const apiRoot = "/api";
         const defaultDeviceName = (() => {
             try {
                 const platform = String(navigator.platform || "").trim();
@@ -2722,7 +2752,7 @@
             setDeviceRegistrationMessage("", "error");
 
             try {
-                const response = await fetch("/api/public/device/register", {
+                const response = await fetch(apiRoot + "/public/device/register", {
                     method: "POST",
                     credentials: "same-origin",
                     headers: {

@@ -21,6 +21,7 @@ const PORT = Number(process.env.PORT || 3000);
 
 const corsAllowedOrigins = new Set([
     "https://cafe-pos-six-gamma.vercel.app",
+    "cafe-pos://app",
     "https://localhost",
     "http://localhost",
     "capacitor://localhost",
@@ -470,6 +471,36 @@ async function getEffectiveLicense(businessId) {
     return license;
 }
 
+const SUPPORT_LICENSE_TYPES = ['Trial', 'Sales', 'Marketing'];
+
+function normalizeSupportLicenseTerm(licenseTypeInput, durationInput, fallbackPlan = 'Sales', fallbackDuration = null) {
+    const rawType = licenseTypeInput === undefined ? fallbackPlan : licenseTypeInput;
+    const normalized = String(rawType || 'Sales').trim().toLowerCase();
+    const licenseType = SUPPORT_LICENSE_TYPES.find(type => type.toLowerCase() === normalized);
+    if (!licenseType) throw Object.assign(new Error('License type must be Trial, Sales, or Marketing'), { status: 400 });
+
+    const allowedDurations = licenseType === 'Trial' ? [1] : [3, 6, 12];
+    const durationMonths = Number(durationInput === undefined || durationInput === null || durationInput === ''
+        ? (fallbackDuration || (licenseType === 'Trial' ? 1 : 12))
+        : durationInput);
+    if (!allowedDurations.includes(durationMonths)) {
+        throw Object.assign(new Error(licenseType === 'Trial'
+            ? 'Trial licenses are valid for 1 month'
+            : `${licenseType} licenses must be valid for 3, 6, or 12 months`), { status: 400 });
+    }
+    return { licenseType, durationMonths };
+}
+
+function addUtcMonthsClamped(date, months) {
+    const result = new Date(date.getTime());
+    const day = result.getUTCDate();
+    result.setUTCDate(1);
+    result.setUTCMonth(result.getUTCMonth() + months);
+    const lastDay = new Date(Date.UTC(result.getUTCFullYear(), result.getUTCMonth() + 1, 0)).getUTCDate();
+    result.setUTCDate(Math.min(day, lastDay));
+    return result;
+}
+
 async function assertActiveDeviceAndLicense(deviceId, expectedBusinessId = null) {
     const device = await getRegisteredDevice(deviceId);
     if (!device) throw Object.assign(new Error("Device is not registered"), { code: "DEVICE_NOT_REGISTERED" });
@@ -711,6 +742,18 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS order_activity (
+        id SERIAL PRIMARY KEY,
+        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        event_type VARCHAR(100) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        actor VARCHAR(160) NOT NULL DEFAULT 'System',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_activity_order_time ON order_activity(order_id, created_at DESC)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_id VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_name VARCHAR(120)`);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS expense_categories (
@@ -1321,6 +1364,85 @@ app.post(
     }
 );
 
+app.post("/api/menu/import", async (req, res) => {
+    const rows = req.body?.items;
+    if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: "Choose at least one valid menu item to import." });
+    if (rows.length > 500) return res.status(400).json({ error: "Import up to 500 menu items at a time." });
+
+    const businessId = Number(req.user?.business_id);
+    if (!Number.isInteger(businessId) || businessId <= 0) return res.status(403).json({ error: "A valid business account is required to import menu items." });
+    const client = await pool.connect();
+    const skipped = [];
+    const warnings = [];
+    let imported = 0;
+    let categoriesCreated = 0;
+    try {
+        await client.query("BEGIN");
+        await client.query(`SELECT set_config('app.business_id',$1,TRUE),set_config('app.system_mode','off',TRUE)`, [String(businessId)]);
+        for (let index = 0; index < rows.length; index += 1) {
+            const source = rows[index] && typeof rows[index] === "object" ? rows[index] : {};
+            const name = String(source.name || "").trim();
+            const category = String(source.category || "").trim();
+            const price = Number(source.price);
+            if (!name || !category || !Number.isFinite(price) || price < 0) {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "Item name, category and a non-negative price are required." });
+                continue;
+            }
+
+            const existing = await client.query(
+                `SELECT id FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
+                [businessId, name]
+            );
+            if (existing.rows.length) {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "An item with this name already exists for this business." });
+                continue;
+            }
+
+            const categoryResult = await client.query(
+                `SELECT id FROM menu_categories WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
+                [businessId, category]
+            );
+            if (!categoryResult.rows.length) {
+                await client.query(
+                    `INSERT INTO menu_categories(name,sort_order,active,business_id) VALUES($1,0,TRUE,$2)`,
+                    [category, businessId]
+                );
+                categoriesCreated += 1;
+            }
+
+            let kotGroupId = null;
+            const rawKOTGroup = String(source.kotGroup || source.kot_group || "").trim();
+            if (rawKOTGroup) {
+                const byId = /^\d+$/.test(rawKOTGroup)
+                    ? await client.query(`SELECT id FROM kot_groups WHERE id=$1 AND business_id=$2`, [Number(rawKOTGroup), businessId])
+                    : await client.query(`SELECT id FROM kot_groups WHERE LOWER(name)=LOWER($1) AND business_id=$2`, [rawKOTGroup, businessId]);
+                kotGroupId = byId.rows[0]?.id || null;
+                if (!kotGroupId) warnings.push({ row: Number(source.rowNumber) || index + 2, name, reason: `KOT group "${rawKOTGroup}" was not found for this business; item imported without a station.` });
+            }
+
+            const nature = ["Goods", "Service"].includes(source.nature) ? source.nature : "Goods";
+            const unit = String(source.unit || "ea").trim().slice(0, 20) || "ea";
+            const available = source.available !== false;
+            const tax = normaliseTaxPayload(source);
+            const taxMode = ["inclusive", "exclusive"].includes(source.taxMode) ? source.taxMode : "exclusive";
+            const channelPrices = cleanChannelPrices(source.channelPrices);
+            await client.query(`
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
+            imported += 1;
+        }
+        await client.query("COMMIT");
+        res.status(201).json({ success: true, imported, categoriesCreated, skipped, warnings });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Menu import error:", error);
+        res.status(500).json({ error: "Menu import failed: " + error.message });
+    } finally {
+        client.release();
+    }
+});
+
 app.put(
     "/api/menu/:id",
     async (req, res) => {
@@ -1606,6 +1728,18 @@ app.delete(
 // ORDERS
 // =====================================================
 
+async function recordOrderActivity(db, orderId, eventType, description, req) {
+    const businessId = Number(req?.user?.business_id || 0);
+    if (!businessId || !Number(orderId)) return;
+    const actor = String(req?.user?.display_name || req?.user?.username || "Staff").trim().slice(0, 160) || "Staff";
+    await db.query(`
+        INSERT INTO order_activity(order_id,event_type,description,actor,business_id)
+        SELECT o.id,$2,$3,$4,$5
+        FROM orders o
+        WHERE o.id=$1 AND o.business_id=$5
+    `, [Number(orderId), String(eventType).slice(0, 100), String(description || ""), actor, businessId]);
+}
+
 app.post(
     "/api/orders",
     async (req, res) => {
@@ -1698,10 +1832,10 @@ app.post(
                         `
                         SELECT *
                         FROM restaurant_tables
-                        WHERE table_number = $1
+                        WHERE table_number = $1 AND business_id = $2
                         FOR UPDATE
                         `,
-                        [tableNumber]
+                        [tableNumber, Number(req.user.business_id)]
                     );
 
                 const table =
@@ -1747,11 +1881,13 @@ app.post(
                         customer_id,
                         discount,
                         service_charge,
-                        notes
+                        notes,
+                        marketing_deal_id,
+                        marketing_deal_name
                     )
                     VALUES
                     (
-                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11
+                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14
                     )
                     RETURNING *
                     `,
@@ -1767,7 +1903,9 @@ app.post(
                         Number(b.discount || 0),
                         Number(b.serviceCharge || 0),
                         b.notes ? String(b.notes).slice(0, 1000) : null,
-                        orderStatus
+                        orderStatus,
+                        b.marketingDealId ? String(b.marketingDealId).slice(0, 120) : null,
+                        b.marketingDealName ? String(b.marketingDealName).slice(0, 120) : null
                     ]
                 );
 
@@ -1897,13 +2035,17 @@ app.post(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Occupied'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [tableNumber]
+                    [tableNumber, Number(req.user.business_id)]
                 );
 
             }
 
+            await recordOrderActivity(client, order.id, "Order created", `Order created with status ${orderStatus}.`, req);
+            if (b.marketingDealId && b.marketingDealName && Number(b.discount || 0) > 0) {
+                await recordOrderActivity(client, order.id, "Marketing deal applied", `${String(b.marketingDealName).slice(0, 120)} · Discount ${Number(b.discount || 0).toFixed(2)}.`, req);
+            }
 
             await client.query("COMMIT");
 
@@ -1937,7 +2079,7 @@ app.post(
 
 app.get(
     "/api/orders",
-    async (_, res) => {
+    async (req, res) => {
 
         try {
 
@@ -1946,8 +2088,10 @@ app.get(
                     `
                     SELECT *
                     FROM orders
+                    WHERE business_id = $1
                     ORDER BY created_at DESC
                     `
+                    , [Number(req.user.business_id)]
                 );
 
             res.json(result.rows);
@@ -1963,6 +2107,21 @@ app.get(
 
     }
 );
+
+app.get("/api/orders/:id/activity", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT id,event_type,description,actor,created_at
+            FROM order_activity
+            WHERE order_id=$1 AND business_id=$2
+            ORDER BY created_at DESC,id DESC
+        `, [Number(req.params.id), Number(req.user.business_id)]);
+        res.json({ activities: result.rows });
+    } catch (error) {
+        console.error("Order activity load error:", error);
+        res.status(500).json({ error: "Failed to load order activity" });
+    }
+});
 
 
 app.get("/api/orders/:id/payment-summary", async (req,res)=>{
@@ -2001,9 +2160,9 @@ app.get(
                         c.email AS customer_email
                     FROM orders o
                     LEFT JOIN customers c ON c.id = o.customer_id
-                    WHERE o.id = $1
+                    WHERE o.id = $1 AND o.business_id = $2
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
                 app.put(
@@ -2030,6 +2189,8 @@ app.get(
                 customerId,
                 discount,
                 serviceCharge,
+                marketingDealId,
+                marketingDealName,
                 notes,
                 items
             } = req.body;
@@ -2052,10 +2213,10 @@ app.get(
                 `
                 SELECT *
                 FROM orders
-                WHERE id = $1
+                WHERE id = $1 AND business_id = $2
                 FOR UPDATE
                 `,
-                [orderId]
+                [orderId, Number(req.user.business_id)]
             );
 
             const existingOrder = existingResult.rows[0];
@@ -2084,9 +2245,9 @@ app.get(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Available'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [existingOrder.table_number]
+                    [existingOrder.table_number, Number(req.user.business_id)]
                 );
             }
 
@@ -2098,10 +2259,10 @@ app.get(
                     `
                     SELECT *
                     FROM restaurant_tables
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     FOR UPDATE
                     `,
-                    [tableNumber]
+                    [tableNumber, Number(req.user.business_id)]
                 );
 
                 const table = tableResult.rows[0];
@@ -2131,8 +2292,10 @@ app.get(
                     customer_id = $7,
                     discount = $8,
                     service_charge = $9,
-                    notes = $10
-                WHERE id = $11
+                    notes = $10,
+                    marketing_deal_id = $11,
+                    marketing_deal_name = $12
+                WHERE id = $13 AND business_id = $14
                 RETURNING *
                 `,
                 [
@@ -2146,7 +2309,10 @@ app.get(
                     Number(discount || 0),
                     Number(serviceCharge || 0),
                     notes ? String(notes).slice(0, 1000) : null,
-                    orderId
+                    marketingDealId ? String(marketingDealId).slice(0, 120) : null,
+                    marketingDealName ? String(marketingDealName).slice(0, 120) : null,
+                    orderId,
+                    Number(req.user.business_id)
                 ]
             );
 
@@ -2158,9 +2324,9 @@ app.get(
             await client.query(
                 `
                 DELETE FROM order_items
-                WHERE order_id = $1
+                WHERE order_id = $1 AND business_id = $2
                 `,
-                [orderId]
+                [orderId, Number(req.user.business_id)]
             );
 
             for (const item of items) {
@@ -2246,10 +2412,15 @@ app.get(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Occupied'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [tableNumber]
+                    [tableNumber, Number(req.user.business_id)]
                 );
+            }
+
+            await recordOrderActivity(client, updatedOrder.id, "Order updated", `Order details saved. New total: ${Number(total).toFixed(2)}.`, req);
+            if (marketingDealId && marketingDealName && Number(discount || 0) > 0) {
+                await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${Number(discount || 0).toFixed(2)}.`, req);
             }
 
             await client.query("COMMIT");
@@ -2297,10 +2468,10 @@ app.get(
                         `
                         SELECT *
                         FROM order_items
-                        WHERE order_id = $1
+                        WHERE order_id = $1 AND business_id = $2
                         ORDER BY id
                         `,
-                        [req.params.id]
+                        [req.params.id, Number(req.user.business_id)]
                     )
                 ).rows;
 
@@ -2340,10 +2511,10 @@ app.put(
                     `
                     SELECT *
                     FROM orders
-                    WHERE id = $1
+                    WHERE id = $1 AND business_id = $2
                     FOR UPDATE
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
 
@@ -2384,10 +2555,10 @@ app.put(
                     `
                     UPDATE orders
                     SET status = 'Cancelled'
-                    WHERE id = $1
+                    WHERE id = $1 AND business_id = $2
                     RETURNING *
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
 
@@ -2396,9 +2567,10 @@ app.put(
                 UPDATE kot
                 SET status = 'Completed'
                 WHERE order_id = $1
+                AND business_id = $2
                 AND status <> 'Completed'
                 `,
-                [req.params.id]
+                [req.params.id, Number(req.user.business_id)]
             );
 
 
@@ -2412,13 +2584,14 @@ app.put(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Available'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [order.table_number]
+                    [order.table_number, Number(req.user.business_id)]
                 );
 
             }
 
+            await recordOrderActivity(client, order.id, "Order cancelled", "Order cancelled by staff.", req);
 
             await client.query("COMMIT");
 
@@ -2459,9 +2632,9 @@ app.put(
                     `
                     SELECT *
                     FROM orders
-                    WHERE id = $1
+                    WHERE id = $1 AND business_id = $2
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
             const order =
@@ -2483,11 +2656,13 @@ app.put(
                     `
                     UPDATE orders
                     SET status = 'Completed'
-                    WHERE id = $1
+                    WHERE id = $1 AND business_id = $2
                     RETURNING *
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
+
+            await recordOrderActivity(pool, result.rows[0].id, "Order completed", "Order marked completed.", req);
 
 
             if (
@@ -2500,9 +2675,9 @@ app.put(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Available'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [order.table_number]
+                    [order.table_number, Number(req.user.business_id)]
                 );
 
             }
@@ -3037,7 +3212,7 @@ app.post(
 
 app.get(
     "/api/reservations",
-    async (_, res) => {
+    async (req, res) => {
 
         try {
 
@@ -3046,10 +3221,12 @@ app.get(
                     `
                     SELECT *
                     FROM reservations
+                    WHERE business_id=$1
                     ORDER BY
                         reservation_date ASC,
                         reservation_time ASC
-                    `
+                    `,
+                    [Number(req.user.business_id)]
                 );
 
             res.json(result.rows);
@@ -3128,10 +3305,10 @@ app.post(
                         `
                         SELECT *
                         FROM restaurant_tables
-                        WHERE table_number = $1
+                        WHERE table_number = $1 AND business_id = $2
                         FOR UPDATE
                         `,
-                        [table]
+                        [table, Number(req.user.business_id)]
                     );
 
 
@@ -3170,12 +3347,14 @@ app.post(
                         AND reservation_time = $3
                         AND status IN
                             ('Reserved','Confirmed')
+                        AND business_id = $4
                         LIMIT 1
                         `,
                         [
                             table,
                             date,
-                            time
+                            time,
+                            Number(req.user.business_id)
                         ]
                     );
 
@@ -3203,10 +3382,11 @@ app.post(
                         guests,
                         table_number,
                         status,
-                        notes
+                        notes,
+                        business_id
                     )
                     VALUES
-                    ($1,$2,$3,$4,$5,$6,$7,$8)
+                    ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                     RETURNING *
                     `,
                     [
@@ -3219,7 +3399,8 @@ app.post(
                         b.status ||
                         "Reserved",
                         b.notes ||
-                        null
+                        null,
+                        Number(req.user.business_id)
                     ]
                 );
 
@@ -3230,9 +3411,9 @@ app.post(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Reserved'
-                    WHERE table_number = $1
+                    WHERE table_number = $1 AND business_id = $2
                     `,
-                    [table]
+                    [table, Number(req.user.business_id)]
                 );
 
             }
@@ -3284,10 +3465,10 @@ app.put(
                     `
                     SELECT *
                     FROM reservations
-                    WHERE id = $1
+                    WHERE id = $1 AND business_id = $2
                     FOR UPDATE
                     `,
-                    [req.params.id]
+                    [req.params.id, Number(req.user.business_id)]
                 );
 
 
@@ -3336,12 +3517,13 @@ app.put(
                         `
                         UPDATE reservations
                         SET status = $1
-                        WHERE id = $2
+                        WHERE id = $2 AND business_id = $3
                         RETURNING *
                         `,
                         [
                             status,
-                            req.params.id
+                            req.params.id,
+                            Number(req.user.business_id)
                         ]
                     )
                 ).rows[0];
@@ -3357,10 +3539,11 @@ app.put(
                         `
                         UPDATE restaurant_tables
                         SET status = 'Occupied'
-                        WHERE table_number = $1
+                        WHERE table_number = $1 AND business_id = $2
                         `,
                         [
-                            reservation.table_number
+                            reservation.table_number,
+                            Number(req.user.business_id)
                         ]
                     );
 
@@ -3375,10 +3558,11 @@ app.put(
                         `
                         UPDATE restaurant_tables
                         SET status = 'Available'
-                        WHERE table_number = $1
+                        WHERE table_number = $1 AND business_id = $2
                         `,
                         [
-                            reservation.table_number
+                            reservation.table_number,
+                            Number(req.user.business_id)
                         ]
                     );
 
@@ -3460,10 +3644,11 @@ app.get(
                 SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,o.order_number,o.order_type,o.table_number
                 FROM kot k JOIN orders o ON k.order_id=o.id
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id
-                WHERE k.created_at >= ${dateRange.start}
+                WHERE o.business_id=$1
+                  AND k.created_at >= ${dateRange.start}
                   AND k.created_at < ${dateRange.end}
                 ORDER BY k.created_at DESC
-            `);
+            `,[Number(req.user.business_id)]);
             res.json(result.rows);
         } catch(e){console.error("KOT load error:",e);res.status(500).json({error:"Failed to load KOT"});}
     }
@@ -3483,10 +3668,12 @@ app.put(
             if(!allowed.includes(status)) return res.status(400).json({error:"Invalid KOT status"});
 
             const result=await pool.query(
-                `UPDATE kot SET status=$1 WHERE id=$2 RETURNING *`,
-                [status,id]
+                `UPDATE kot SET status=$1 WHERE id=$2 AND business_id=$3 RETURNING *`,
+                [status,id,Number(req.user.business_id)]
             );
             if(!result.rows.length) return res.status(404).json({error:"KOT not found"});
+
+            await recordOrderActivity(pool,result.rows[0].order_id,"Kitchen status changed",`Kitchen ticket marked ${status}.`,req);
 
             res.json({success:true,kot:result.rows[0]});
         } catch(e){
@@ -3503,7 +3690,7 @@ app.put(
 
 app.get(
     "/api/payments",
-    async (_, res) => {
+    async (req, res) => {
 
         try {
 
@@ -3512,8 +3699,10 @@ app.get(
                     `
                     SELECT *
                     FROM payments
+                    WHERE business_id = $1
                     ORDER BY created_at DESC
-                    `
+                    `,
+                    [Number(req.user.business_id)]
                 );
 
             res.json(result.rows);
@@ -3543,7 +3732,7 @@ app.post(
                 b.orderId ||
                 b.order_id;
 
-            const orderNumber =
+            let orderNumber =
                 b.orderNumber ||
                 b.order_number;
 
@@ -3557,7 +3746,6 @@ app.post(
 
             if (
                 !orderId ||
-                !orderNumber ||
                 !Number.isFinite(amount) ||
                 !paymentMethod
             ) {
@@ -3568,6 +3756,14 @@ app.post(
                 });
 
             }
+
+            const businessId = Number(req.user.business_id);
+            const order = (await pool.query(
+                `SELECT id,order_number FROM orders WHERE id=$1 AND business_id=$2`,
+                [Number(orderId), businessId]
+            )).rows[0];
+            if (!order) return res.status(404).json({ error: "Order not found" });
+            orderNumber = order.order_number;
 
 
             const result =
@@ -3580,10 +3776,11 @@ app.post(
                         amount,
                         payment_method,
                         payment_status,
-                        transaction_id
+                        transaction_id,
+                        business_id
                     )
                     VALUES
-                    ($1,$2,$3,$4,$5,$6)
+                    ($1,$2,$3,$4,$5,$6,$7)
                     RETURNING *
                     `,
                     [
@@ -3594,10 +3791,18 @@ app.post(
                         b.paymentStatus ||
                         "Success",
                         b.transactionId ||
-                        null
+                        null,
+                        businessId
                     ]
                 );
 
+            await recordOrderActivity(
+                pool,
+                Number(orderId),
+                "Payment recorded",
+                `${paymentMethod}: ${Number(amount).toFixed(2)} (${b.paymentStatus || "Success"}).`,
+                req
+            );
 
             if ((b.paymentStatus || "Success") === "Success") {
                 await awardLoyaltyForPayment(result.rows[0].id, Number(orderId), amount);
@@ -3628,7 +3833,7 @@ app.post(
 
 app.get(
     "/api/customers",
-    async (_, res) => {
+    async (req, res) => {
 
         try {
 
@@ -3637,8 +3842,10 @@ app.get(
                     `
                     SELECT *
                     FROM customers
+                    WHERE business_id=$1
                     ORDER BY id DESC
-                    `
+                    `,
+                    [Number(req.user.business_id)]
                 );
 
             res.json(result.rows);
@@ -3686,16 +3893,18 @@ app.post(
                     (
                         name,
                         phone,
-                        email
+                        email,
+                        business_id
                     )
                     VALUES
-                    ($1,$2,$3)
+                    ($1,$2,$3,$4)
                     RETURNING *
                     `,
                     [
                         name,
                         phone,
-                        email || null
+                        email || null,
+                        Number(req.user.business_id)
                     ]
                 );
 
@@ -3754,10 +3963,10 @@ app.post(
                 `
                 SELECT *
                 FROM customers
-                WHERE phone = $1
+                WHERE phone = $1 AND business_id = $2
                 LIMIT 1
                 `,
-                [phone]
+                [phone, Number(req.user.business_id)]
             );
 
             if (existing.rows.length) {
@@ -3767,10 +3976,10 @@ app.post(
                     UPDATE customers
                     SET name = $1,
                         email = $2
-                    WHERE id = $3
+                    WHERE id = $3 AND business_id = $4
                     RETURNING *
                     `,
-                    [name, email, existing.rows[0].id]
+                    [name, email, existing.rows[0].id, Number(req.user.business_id)]
                 );
 
                 return res.json({
@@ -3783,11 +3992,11 @@ app.post(
             const created = await pool.query(
                 `
                 INSERT INTO customers
-                (name, phone, email)
-                VALUES ($1,$2,$3)
+                (name, phone, email, business_id)
+                VALUES ($1,$2,$3,$4)
                 RETURNING *
                 `,
-                [name, phone, email]
+                [name, phone, email, Number(req.user.business_id)]
             );
 
             return res.status(201).json({
@@ -3842,14 +4051,15 @@ app.put(
                         name = $1,
                         phone = $2,
                         email = $3
-                    WHERE id = $4
+                    WHERE id = $4 AND business_id = $5
                     RETURNING *
                     `,
                     [
                         name,
                         phone,
                         email || null,
-                        req.params.id
+                        req.params.id,
+                        Number(req.user.business_id)
                     ]
                 );
 
@@ -5974,7 +6184,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 // =====================================================
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
-    'reservations','kot_groups','kot','payments','customers','invoices',
+    'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
     'loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings'
 ];
 
@@ -5997,6 +6207,12 @@ async function tableExists(tableName) {
 
 async function makeNameUniquePerBusiness(tableName, columnName) {
     if (!(await tableExists(tableName))) return;
+    const safeTable=String(tableName).replace(/"/g,'""');
+    const safeColumn=String(columnName).replace(/"/g,'""');
+    const indexName=`uq_${tableName}_business_${columnName}`.replace(/[^a-zA-Z0-9_]/g,'_');
+
+    // Remove a legacy global UNIQUE(name) constraint even when existing
+    // same-business duplicates prevent creation of the replacement index.
     const constraints = await pool.query(`
         SELECT tc.constraint_name
         FROM information_schema.table_constraints tc
@@ -6011,14 +6227,33 @@ async function makeNameUniquePerBusiness(tableName, columnName) {
                         AND c1.constraint_name=tc.constraint_name
                         AND c1.column_name=$2)
     `, [tableName, columnName]);
-    const safeTable=String(tableName).replace(/"/g,'""');
     for (const row of constraints.rows) {
         const safeConstraint=String(row.constraint_name).replace(/"/g,'""');
         await pool.query(`ALTER TABLE "${safeTable}" DROP CONSTRAINT IF EXISTS "${safeConstraint}"`);
     }
-    const safeColumn=String(columnName).replace(/"/g,'""');
-    const indexName=`uq_${tableName}_business_${columnName}`.replace(/[^a-zA-Z0-9_]/g,'_');
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id,"${safeColumn}")`);
+
+    const duplicateGroups = await pool.query(`
+        SELECT COUNT(*)::INTEGER AS count
+        FROM (
+            SELECT business_id, "${safeColumn}"
+            FROM "${safeTable}"
+            WHERE "${safeColumn}" IS NOT NULL
+            GROUP BY business_id, "${safeColumn}"
+            HAVING COUNT(*) > 1
+        ) duplicates
+    `);
+    const duplicateCount=Number(duplicateGroups.rows[0]?.count||0);
+    if (duplicateCount) {
+        console.warn(`⚠️ Skipping unique index ${indexName}: ${duplicateCount} duplicate ${columnName} value group(s) already exist in ${tableName}; existing rows were left unchanged.`);
+        return;
+    }
+
+    try {
+        await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS "${indexName}" ON "${safeTable}"(business_id,"${safeColumn}")`);
+    } catch (error) {
+        if (error.code !== '23505') throw error;
+        console.warn(`⚠️ Skipping unique index ${indexName}: duplicate ${columnName} values appeared while the index was being created.`);
+    }
 }
 
 async function ensureTenantIsolationPhase2A() {
@@ -6051,7 +6286,18 @@ async function ensureTenantIsolationPhase2A() {
             WITH CHECK (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)`);
     }
 
+    await pool.query(`
+        INSERT INTO order_activity(order_id,business_id,event_type,description,actor,created_at)
+        SELECT o.id,o.business_id,'Order activity started','Order created before activity tracking was enabled.','System',COALESCE(o.created_at,CURRENT_TIMESTAMP)
+        FROM orders o
+        WHERE NOT EXISTS (SELECT 1 FROM order_activity a WHERE a.order_id=o.id)
+    `);
+
     await makeNameUniquePerBusiness('kot_groups','name');
+    await makeNameUniquePerBusiness('menu','name');
+    await makeNameUniquePerBusiness('menu_categories','name');
+    await makeNameUniquePerBusiness('restaurant_tables','table_number');
+    await makeNameUniquePerBusiness('customers','phone');
     await makeNameUniquePerBusiness('expense_categories','name');
     await makeNameUniquePerBusiness('billing_adjustments','name');
     console.log('✅ Phase 2A tenant isolation ready');
@@ -6151,6 +6397,35 @@ async function ensureLicenseTables() {
             updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             revoked_at TIMESTAMPTZ
         )
+    `);
+
+    await pool.query(`ALTER TABLE business_licenses ADD COLUMN IF NOT EXISTS license_type VARCHAR(20)`);
+    await pool.query(`ALTER TABLE business_licenses ADD COLUMN IF NOT EXISTS duration_months INTEGER`);
+    await pool.query(`
+        UPDATE business_licenses
+        SET license_type = CASE
+                WHEN LOWER(BTRIM(COALESCE(plan, ''))) = 'trial' THEN 'Trial'
+                WHEN LOWER(BTRIM(COALESCE(plan, ''))) = 'marketing' THEN 'Marketing'
+                ELSE 'Sales'
+            END,
+            duration_months = CASE
+                WHEN LOWER(BTRIM(COALESCE(plan, ''))) = 'trial' THEN 1
+                ELSE 12
+            END
+        WHERE license_type IS NULL OR duration_months IS NULL
+    `);
+    await pool.query(`ALTER TABLE business_licenses ALTER COLUMN license_type SET DEFAULT 'Trial'`);
+    await pool.query(`ALTER TABLE business_licenses ALTER COLUMN duration_months SET DEFAULT 1`);
+    await pool.query(`ALTER TABLE business_licenses ALTER COLUMN license_type SET NOT NULL`);
+    await pool.query(`ALTER TABLE business_licenses ALTER COLUMN duration_months SET NOT NULL`);
+    await pool.query(`
+        DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='business_licenses_valid_term') THEN
+                ALTER TABLE business_licenses ADD CONSTRAINT business_licenses_valid_term
+                CHECK ((license_type = 'Trial' AND duration_months = 1)
+                    OR (license_type IN ('Sales','Marketing') AND duration_months IN (3,6,12)));
+            END IF;
+        END $$
     `);
 
     await pool.query(`
@@ -6255,15 +6530,14 @@ async function ensureLicenseTables() {
 
 async function ensureTrialLicensesForBusinesses() {
     const businesses = await runSystemContext(() => pool.query(`SELECT id FROM businesses WHERE active=TRUE ORDER BY id`));
-    const trialDays = Math.max(1, Number(process.env.AUTO_TRIAL_DAYS || 30));
     const maxDevices = Math.max(1, Number(process.env.AUTO_TRIAL_MAX_DEVICES || 1));
     for (const row of businesses.rows) {
         const existing = await runSystemContext(() => pool.query(`SELECT id FROM business_licenses WHERE business_id=$1 ORDER BY id DESC LIMIT 1`, [row.id]));
         if (!existing.rows.length) {
             await runSystemContext(() => pool.query(`
-                INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes)
-                VALUES($1,'Trial','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + ($2 || ' days')::interval,$3,'Automatically created trial license')
-            `, [Number(row.id), trialDays, maxDevices]));
+                INSERT INTO business_licenses(business_id,plan,license_type,duration_months,status,starts_at,expires_at,max_devices,notes)
+                VALUES($1,'Trial','Trial',1,'active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + INTERVAL '1 month',$2,'Automatically created trial license')
+            `, [Number(row.id), maxDevices]));
         }
     }
 }
@@ -6434,13 +6708,12 @@ async function ensureTrialLicense(businessId) {
     const existing = await runSystemContext(() => pool.query(`SELECT * FROM business_licenses WHERE business_id=$1 ORDER BY id DESC LIMIT 1`, [id]));
     if (existing.rows[0]) return existing.rows[0];
 
-    const trialDays = Math.max(1, Number(process.env.AUTO_TRIAL_DAYS || 30));
     const maxDevices = Math.max(1, Number(process.env.AUTO_TRIAL_MAX_DEVICES || 1));
     const r = await runSystemContext(() => pool.query(`
-        INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes)
-        VALUES($1,'Trial','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + ($2 || ' days')::interval,$3,'Automatically created trial license')
+        INSERT INTO business_licenses(business_id,plan,license_type,duration_months,status,starts_at,expires_at,max_devices,notes)
+        VALUES($1,'Trial','Trial',1,'active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP + INTERVAL '1 month',$2,'Automatically created trial license')
         RETURNING *
-    `, [id, trialDays, maxDevices]));
+    `, [id, maxDevices]));
     return r.rows[0];
 }
 
@@ -6634,7 +6907,7 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
                    CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS business_status,
                    CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS branch_status,
                    b.business_type,b.owner_name,b.phone,b.email,b.address,b.city,b.state,b.active,b.created_at,
-                   l.id AS license_id,l.plan,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
+                   l.id AS license_id,l.plan,l.license_type,l.duration_months,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
                    (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
                    (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users
             FROM businesses b
@@ -6789,18 +7062,26 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
 app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
     try {
         const businessId=Number(req.params.id);
-        const plan=String(req.body.plan||'Professional').trim()||'Professional';
-        const status=['active','suspended','revoked','expired'].includes(String(req.body.status||'active')) ? String(req.body.status||'active') : 'active';
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        const legacyType=String(req.body.plan||'Sales').trim();
+        const safeLegacyType=['trial','sales','marketing'].includes(legacyType.toLowerCase())
+            ? SUPPORT_LICENSE_TYPES.find(type=>type.toLowerCase()===legacyType.toLowerCase())
+            : 'Sales';
+        const {licenseType,durationMonths}=normalizeSupportLicenseTerm(req.body.licenseType,req.body.durationMonths,safeLegacyType);
+        const status=String(req.body.status||'active');
+        if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
         const startsAt=req.body.startsAt?new Date(req.body.startsAt):new Date();
-        const expiresAt=req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+365*24*60*60*1000);
-        const maxDevices=Math.max(1,Number(req.body.maxDevices||1));
+        const legacyExpiry=req.body.licenseType===undefined&&req.body.durationMonths===undefined&&req.body.expiresAt!==undefined;
+        const expiresAt=legacyExpiry?new Date(req.body.expiresAt):addUtcMonthsClamped(startsAt,durationMonths);
+        const maxDevices=Number(req.body.maxDevices||1);
+        if(!Number.isInteger(maxDevices)||maxDevices<1)return res.status(400).json({error:'Max devices must be a positive whole number'});
         if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(expiresAt.getTime()) || expiresAt<=startsAt) return res.status(400).json({error:'Invalid license dates'});
         const result=await runSystemContext(async()=>{
             await pool.query(`UPDATE business_licenses SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE business_id=$1 AND status='active'`,[businessId]);
-            return pool.query(`INSERT INTO business_licenses(business_id,plan,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[businessId,plan,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
+            return pool.query(`INSERT INTO business_licenses(business_id,plan,license_type,duration_months,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[businessId,licenseType,durationMonths,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
         });
         res.status(201).json({success:true,license:result.rows[0]});
-    }catch(e){res.status(500).json({error:e.message||'Failed to issue license'});}
+    }catch(e){res.status(e.status||500).json({error:e.message||'Failed to issue license'});}
 });
 
 app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
@@ -6809,15 +7090,27 @@ app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
         const current=(await runSystemContext(()=>pool.query(`SELECT * FROM business_licenses WHERE id=$1`,[id]))).rows[0];
         if(!current)return res.status(404).json({error:'License not found'});
         const status=req.body.status===undefined?current.status:String(req.body.status);
-        const plan=req.body.plan===undefined?current.plan:String(req.body.plan).trim();
-        const maxDevices=req.body.maxDevices===undefined?current.max_devices:Math.max(1,Number(req.body.maxDevices));
+        const legacyType=String(req.body.plan===undefined?(current.license_type||current.plan):req.body.plan).trim();
+        const safeLegacyType=['trial','sales','marketing'].includes(legacyType.toLowerCase())
+            ? SUPPORT_LICENSE_TYPES.find(type=>type.toLowerCase()===legacyType.toLowerCase())
+            : (current.license_type||'Sales');
+        const {licenseType,durationMonths}=normalizeSupportLicenseTerm(
+            req.body.licenseType,
+            req.body.durationMonths,
+            safeLegacyType,
+            current.duration_months
+        );
+        const maxDevices=req.body.maxDevices===undefined?current.max_devices:Number(req.body.maxDevices);
         const startsAt=req.body.startsAt===undefined?current.starts_at:new Date(req.body.startsAt);
-        const expiresAt=req.body.expiresAt===undefined?current.expires_at:new Date(req.body.expiresAt);
+        const legacyExpiry=req.body.licenseType===undefined&&req.body.durationMonths===undefined&&req.body.expiresAt!==undefined;
+        const termChanged=req.body.licenseType!==undefined||req.body.durationMonths!==undefined||req.body.plan!==undefined||req.body.startsAt!==undefined;
+        const expiresAt=legacyExpiry?new Date(req.body.expiresAt):(termChanged?addUtcMonthsClamped(new Date(startsAt),durationMonths):current.expires_at);
         if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
-        if(new Date(expiresAt)<=new Date(startsAt))return res.status(400).json({error:'Expiry must be after start date'});
-        const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,status=$2,starts_at=$3,expires_at=$4,max_devices=$5,notes=$6,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $2='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$7 RETURNING *`,[plan,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
+        if(!Number.isInteger(maxDevices)||maxDevices<1)return res.status(400).json({error:'Max devices must be a positive whole number'});
+        if(!Number.isFinite(new Date(startsAt).getTime())||!Number.isFinite(new Date(expiresAt).getTime())||new Date(expiresAt)<=new Date(startsAt))return res.status(400).json({error:'Expiry must be after start date'});
+        const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,license_type=$1,duration_months=$2,status=$3,starts_at=$4,expires_at=$5,max_devices=$6,notes=$7,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $3='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$8 RETURNING *`,[licenseType,durationMonths,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
         res.json({success:true,license:r.rows[0]});
-    }catch(e){res.status(500).json({error:e.message||'Failed to update license'});}
+    }catch(e){res.status(e.status||500).json({error:e.message||'Failed to update license'});}
 });
 
 app.get('/api/support/businesses/:id/devices', supportAuth, async(req,res)=>{

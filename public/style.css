@@ -2061,6 +2061,10 @@ body:has(#new-order.active-page) #paymentModal {
     z-index: 20;
 }
 
+body:not(:has(#new-order.active-page)) #paymentModal {
+    display: none !important;
+}
+
 body:has(#new-order.active-page) #paymentModal .pos-payment-dialog {
     width: 30vw;
     max-width: 410px;
@@ -2108,3 +2112,47 @@ body:has(#new-order.active-page) .billing-category-panel {
 
 #paymentModal .pos-payment-footer .pos-confirm-payment{background:#0f766e;color:#fff;font-family:"Segoe UI",Arial,sans-serif;font-size:15px;font-weight:700;letter-spacing:.2px}
 #paymentModal .pos-payment-footer .pos-confirm-payment:hover{background:#115e59}
+
+/* Orders, activity history and bulk menu import */
+.orders-header-actions{display:flex;align-items:center;gap:10px}
+.orders-search{display:flex;align-items:center;gap:9px;width:min(360px,34vw);min-height:42px;padding:0 10px 0 13px;border:1px solid #dfe3e8;border-radius:11px;background:#fff;box-shadow:0 3px 12px rgba(15,23,42,.04);color:#7a818c}
+.orders-search>span{font-size:22px;line-height:1}
+.orders-search input{width:100%;min-width:0;border:0;outline:0;background:transparent;color:#171717;font:inherit}
+.orders-search input::placeholder{color:#969da8}
+.orders-search button{width:26px;height:26px;flex:0 0 auto;border:0;border-radius:7px;background:#f2f4f7;color:#667080;font-size:18px;line-height:1;cursor:pointer}
+.orders-search:focus-within{border-color:#0f766e;box-shadow:0 0 0 3px rgba(15,118,110,.12)}
+.order-row-actions{display:flex;flex-wrap:wrap;gap:5px;min-width:220px}
+.order-row-actions button{padding:6px 8px;border:1px solid #e1e5e9;border-radius:7px;background:#fff;color:#29313a;font-size:12px;cursor:pointer}
+.order-row-actions button:hover{border-color:#a9c9c3;background:#f1f8f6}
+.orders-empty-state{padding:28px;text-align:center;color:#7c8490}
+.menu-import-modal{width:min(850px,95vw);max-height:90vh;overflow:auto}
+.menu-import-actions{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:16px 0 12px}
+.menu-import-file-btn{display:inline-flex;align-items:center;min-height:38px;padding:0 13px;border-radius:9px;background:#111827;color:#fff;font-size:13px;font-weight:700;cursor:pointer}
+.menu-import-file-btn input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.menu-import-status{margin:10px 0;padding:11px 13px;border:1px solid #e2e8f0;border-radius:9px;background:#f8fafc;color:#596273;font-size:13px;line-height:1.5}
+.menu-import-preview{max-height:310px;overflow:auto}
+.menu-import-preview small{display:block;margin-top:7px;color:#7a818c}
+.menu-import-error{color:#b42318}
+.order-activity-dialog{width:min(620px,94vw);max-height:85vh;overflow:auto}
+.order-activity-list{display:grid;gap:0;padding:8px 2px 4px}
+.order-activity-entry{position:relative;display:grid;grid-template-columns:18px 1fr;gap:12px;padding:14px 0;border-bottom:1px solid #edf0f3}
+.order-activity-marker{position:relative;width:10px;height:10px;margin:5px 0 0 3px;border:2px solid #0f766e;border-radius:50%;background:#fff}
+.order-activity-entry:not(:last-child) .order-activity-marker:after{position:absolute;top:8px;left:2px;width:2px;height:calc(100% + 25px);background:#d9ebe6;content:""}
+.order-activity-copy strong{color:#1c252c;font-size:14px}
+.order-activity-copy p{margin:5px 0;color:#525d69;font-size:13px}
+.order-activity-copy small{color:#84909b;font-size:11px}
+body:has(#new-order.active-page) #paymentModal .pos-payment-dialog{background:#fff;border-left:1px solid #e7ebef;box-shadow:-12px 0 34px rgba(15,23,42,.14)}
+body:has(#new-order.active-page) #paymentModal .pos-payment-workspace{padding:20px 19px}
+body:has(#new-order.active-page) #paymentModal .pos-payment-header{margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid #edf0f3}
+body:has(#new-order.active-page) #paymentModal .pos-payment-header h2{font-size:21px;letter-spacing:-.02em}
+body:has(#new-order.active-page) #paymentModal .pos-payment-categories span{padding:10px 8px;border-color:#e0e5ea;background:#fff;font-size:12px}
+body:has(#new-order.active-page) #paymentModal .pos-payment-categories input:checked+span{border-color:#153c37;background:#153c37;color:#fff}
+body:has(#new-order.active-page) #paymentModal .pos-payment-method-grid button{min-height:63px;border-color:#e2e6e9;transition:border-color .15s,background .15s,transform .15s}
+body:has(#new-order.active-page) #paymentModal .pos-payment-method-grid button:hover{transform:translateY(-1px);border-color:#a8c7c1;background:#f5faf8}
+body:has(#new-order.active-page) #paymentModal .pos-payment-method-grid button.selected{border-color:#0f766e;background:#eef8f5;box-shadow:inset 0 0 0 1px #0f766e;color:#0c5c54}
+body:has(#new-order.active-page) #paymentModal .pos-payment-entry .form-group{margin:0}
+body:has(#new-order.active-page) #paymentModal .payment-amount-input{min-height:46px;border-color:#d9dfe4;background:#fff}
+body:has(#new-order.active-page) #paymentModal .payment-amount-input:focus-within{border-color:#0f766e;box-shadow:0 0 0 3px rgba(15,118,110,.1)}
+body:has(#new-order.active-page) #paymentModal .pos-payment-footer{position:sticky;bottom:-18px;margin:20px -19px -20px;padding:12px 19px 16px;border-top:1px solid #edf0f3;background:#fff}
+body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-height:40px;border-radius:9px}
+@media(max-width:700px){.orders-header-actions{width:100%;align-items:stretch;flex-direction:column}.orders-search{width:auto}.orders-header-actions>.big-btn{width:100%}.order-row-actions{min-width:0}body:has(#new-order.active-page) #paymentModal .pos-payment-dialog{width:100%;min-width:0;max-width:100%;border-radius:0}body:has(#new-order.active-page) #paymentModal .pos-payment-workspace{padding:16px}body:has(#new-order.active-page) #paymentModal .pos-payment-footer{bottom:-16px;margin:18px -16px -16px;padding:11px 16px 14px}.menu-import-actions{align-items:flex-start;flex-direction:column}}
