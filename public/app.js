@@ -87,6 +87,8 @@ let currentPayments = [];
 let accessUsers = [];
 let accessProfiles = [];
 let editingMenuItemId = null;
+let menuOptionSets = [];
+let currentMenuImageData = null;
 let editingAccessUserId = null;
 let editingAccessProfileId = null;
 
@@ -104,7 +106,7 @@ let appSettings = {
     showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
     paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
     defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: STARTER_PAYMENT_MODES.map(mode => ({ ...mode })), orderPrefix: "ORD-", invoicePrefix: "INV-",
-    allowZeroAmount: false, roundTotals: false, logoUrl: "", upiId: "", receiptFont: "Arial",
+    allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
     printKitchenOnOrder: false, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
@@ -119,6 +121,7 @@ let currentOrderForDetails = null;
 let currentOpenOrderId = null;
 let currentOpenOrderData = null;
 window.currentOrdersTab = "open";
+window.selectedOrderId = null;
 
 
 // ==========================================
@@ -132,6 +135,17 @@ function esc(value) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+}
+
+function formatItemOptionNames(options) {
+    if (!Array.isArray(options)) return "";
+    return options.flatMap(set => {
+        const setName = String(set?.setName || "").trim();
+        return (Array.isArray(set?.options) ? set.options : []).map(option => {
+            const optionName = String(option?.name || "").trim();
+            return optionName ? (setName ? `${setName}: ${optionName}` : optionName) : "";
+        });
+    }).filter(Boolean).join(", ");
 }
 
 function normalizePaymentModes(modes) {
@@ -345,7 +359,7 @@ function getNumberValue(value, possibleKeys = []) {
 // ==========================================
 function hasPermission(moduleKey, action="view") {
     if (!currentUser) return false;
-    if (currentUser.profile_name === "Admin") return true;
+    if (currentUser.profile_name === "Admin" && currentUser.permissions_override === null) return true;
     return currentUser.permissions?.[`${moduleKey}.${action}`] === true;
 }
 function showRegisterBusiness() {
@@ -678,7 +692,7 @@ function showBusinessProfileDialog() {
     alert(lines.join("\\n"));
 }
 
-async function startAuthenticatedApp(){document.getElementById("loginScreen")?.style.setProperty("display","none");applyPermissionsToUI();await loadSettings();await Promise.all([loadBillingAdjustments(),loadMarketingDeals()]);stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();await Promise.all([hasPermission("dashboard")?updateDashboard():Promise.resolve(),hasPermission("new_order")?loadMenu():Promise.resolve(),hasPermission("menu")?loadMenuManagement():Promise.resolve(),hasPermission("tables")?loadTables():Promise.resolve(),hasPermission("access")?loadAccess():Promise.resolve(),hasPermission("printer")?loadPrinters():Promise.resolve(),(appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())]);updateCart();setOrderType("Takeaway");startKOTAlertPolling();}
+async function startAuthenticatedApp(){document.getElementById("loginScreen")?.style.setProperty("display","none");applyPermissionsToUI();await loadSettings();await Promise.all([loadBillingAdjustments(),loadMarketingDeals()]);stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();await Promise.all([hasPermission("dashboard")?updateDashboard():Promise.resolve(),hasPermission("new_order")?loadMenu():Promise.resolve(),hasPermission("menu")?loadMenuManagement():Promise.resolve(),hasPermission("customers")?loadCustomers():Promise.resolve(),hasPermission("tables")?loadTables():Promise.resolve(),hasPermission("access")?loadAccess():Promise.resolve(),hasPermission("printer")?loadPrinters():Promise.resolve(),(appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())]);updateCart();setOrderType("Takeaway");startKOTAlertPolling();}
 
 // ==========================================
 // NAVIGATION
@@ -741,6 +755,11 @@ function showPage(pageName) {
         );
 
     }
+
+    if (pageName === "menu") showMenuModuleView("overview");
+    if (pageName === "settings") showSettingsFeature("");
+    if (pageName === "kot-groups") showKOTGroupsView("overview");
+    if (pageName === "advanced-reports") showAdvancedReportsView("overview");
 
     // The header's "+ New Order" button is redundant once you're already
     // on the billing screen, so hide it there and show it everywhere else.
@@ -855,6 +874,7 @@ function showPage(pageName) {
     if (pageName === "reports") {
 
         loadReports();
+        loadSalesAuditReport();
 
     }
 
@@ -873,6 +893,109 @@ function showPage(pageName) {
 
 }
 
+// Module cards keep large feature areas focused while reusing the existing forms and data.
+const SETTINGS_FEATURES = [
+    { key: "payment-modes", title: "Payment Modes", icon: "💳", description: "Create and manage the ways customers can pay." },
+    { key: "restaurant-profile", title: "Restaurant Profile", icon: "🏪", description: "Set your business name, address, phone and GSTIN." },
+    { key: "bill-template", title: "Bill Template", icon: "🧾", description: "Choose the information and message printed on bills." },
+    { key: "thermal-printer", title: "Thermal Printer", icon: "🖨️", description: "Configure paper width and automatic printing." },
+    { key: "general-currency", title: "General / Currency", icon: "💱", description: "Set currency and the default GST rate." },
+    { key: "pos-preferences", title: "POS Preferences", icon: "🧭", description: "Choose sales channels and defaults for each POS module." },
+    { key: "billing-rules", title: "Billing Rules", icon: "🧮", description: "Set payment, invoice numbering and bill rounding rules." },
+    { key: "printer-receipt", title: "Printer & Receipt", icon: "🖨️", description: "Set receipt branding, UPI details and print behavior." },
+    { key: "operations", title: "Operations", icon: "🕒", description: "Set opening hours, order type and order note behavior." },
+    { key: "alerts-customer-experience", title: "Alert & Customer Experience", icon: "🔔", description: "Set customer messages, stock alerts and KOT alerts." },
+    { key: "kitchen-kot", title: "Kitchen / KOT", icon: "👨‍🍳", description: "Control the kitchen ticket workflow." },
+    { key: "data-admin", title: "Data & Admin", icon: "🛡️", description: "Configure session timeout and audit logging." },
+    { key: "appearance", title: "Appearance", icon: "🎨", description: "Adjust interface density, theme label and billing buttons." },
+    { key: "discount-charges", title: "Discount & Charges", icon: "％", description: "Create reusable discounts and service charge rules." }
+];
+
+function initializeSettingsModuleCards() {
+    const overview = document.getElementById("settingsModuleOverview");
+    if (!overview || overview.dataset.ready === "true") return;
+    overview.innerHTML = SETTINGS_FEATURES.map(feature => `
+        <button type="button" class="module-navigation-card" onclick="showSettingsFeature('${feature.key}')">
+            <span class="module-card-icon">${feature.icon}</span>
+            <span class="module-card-copy"><strong>${esc(feature.title)}</strong><span>${esc(feature.description)}</span></span>
+            <span class="module-card-arrow" aria-hidden="true">›</span>
+        </button>`).join("");
+    overview.dataset.ready = "true";
+}
+
+function showSettingsFeature(featureKey = "") {
+    initializeSettingsModuleCards();
+    const overview = document.getElementById("settingsModuleOverview");
+    const detailHeader = document.getElementById("settingsFeatureHeader");
+    const title = document.getElementById("settingsFeatureTitle");
+    const description = document.getElementById("settingsFeatureDescription");
+    const feature = SETTINGS_FEATURES.find(item => item.key === featureKey);
+    const cards = [...document.querySelectorAll("#settings [data-settings-feature]")];
+    const activeCard = feature ? cards.find(card => card.dataset.settingsFeature === feature.key) : null;
+    if (feature && !activeCard) return;
+    if (overview) overview.hidden = Boolean(feature);
+    if (detailHeader) detailHeader.hidden = !feature;
+    if (title) title.textContent = feature?.title || "Settings";
+    if (description) description.textContent = feature?.description || "Manage restaurant, billing and POS preferences.";
+    cards.forEach(card => { card.hidden = card !== activeCard; card.classList.toggle("settings-feature-active", card === activeCard); });
+    document.querySelectorAll("#settings .settings-grid").forEach(grid => {
+        const hasActiveCard = Boolean(activeCard && grid.contains(activeCard));
+        grid.style.display = hasActiveCard ? "grid" : "none";
+    });
+    const footerActions = document.getElementById("settingsFooterActions");
+    if (footerActions) footerActions.hidden = !feature;
+}
+
+function showMenuModuleView(view = "overview") {
+    const overview = document.getElementById("menuModuleOverview");
+    const header = document.getElementById("menuDetailHeader");
+    const items = document.getElementById("menuItemsPanel");
+    const categories = document.getElementById("menuCategoriesPanel");
+    const options = document.getElementById("menuOptionsPanel");
+    const title = document.getElementById("menuDetailTitle");
+    const description = document.getElementById("menuDetailDescription");
+    const isOverview = view === "overview";
+    if (overview) overview.hidden = !isOverview;
+    if (header) header.hidden = isOverview;
+    if (items) items.hidden = view !== "items";
+    if (categories) categories.hidden = view !== "categories";
+    if (options) options.hidden = view !== "options";
+    if (title) title.textContent = view === "categories" ? "Categories" : view === "options" ? "Item option" : "Menu Items";
+    if (description) description.textContent = view === "categories"
+        ? "Create and organize the categories used throughout your menu."
+        : view === "options"
+            ? "Set up the choices customers can select for each menu item."
+            : "Manage your catalog, pricing, availability, variants and KOT routing.";
+    if (view === "options") renderMenuOptionSetsOverview();
+}
+
+function showKOTGroupsView(view = "overview") {
+    const overview = document.getElementById("kotGroupsOverview");
+    const detail = document.getElementById("kotGroupsDetail");
+    const editor = document.getElementById("kotGroupEditorPanel");
+    if (overview) overview.hidden = view !== "overview";
+    if (detail) detail.hidden = view !== "groups";
+    if (editor) editor.hidden = view !== "editor";
+}
+
+function showAdvancedReportsView(reportKey = "overview") {
+    const overview = document.getElementById("advancedReportsOverview");
+    const details = document.getElementById("advancedReportDetails");
+    const title = document.getElementById("advancedReportDetailTitle");
+    const description = document.getElementById("advancedReportDetailDescription");
+    const reports = {
+        "hourly-sales": { title: "Hourly Sales", description: "Compare orders and sales across each hour." },
+        "top-customers": { title: "Top Customers", description: "See your highest value customers for this period." },
+        "cancelled-orders": { title: "Cancelled Orders", description: "Review cancellations by date and order value." }
+    };
+    const selected = reports[reportKey];
+    if (overview) overview.hidden = Boolean(selected);
+    if (details) details.hidden = !selected;
+    if (title) title.textContent = selected?.title || "Advanced Reports";
+    if (description) description.textContent = selected?.description || "Choose a report to view its details.";
+    document.querySelectorAll("[data-advanced-report-panel]").forEach(panel => { panel.hidden = panel.dataset.advancedReportPanel !== reportKey; });
+}
+
 
 // ==========================================
 // ORDER TYPE
@@ -888,6 +1011,9 @@ function setOrderType(type, preserveSaleChannel = false) {
     if (menuTitle) menuTitle.textContent = type === "Dine-in" ? "Dine-in menu" : "Takeaway menu";
     const takeawayHint = document.getElementById("takeawayMenuHint");
     if (takeawayHint) takeawayHint.style.display = type === "Takeaway" ? "" : "none";
+    const paxField = document.getElementById("billingPaxField");
+    if (paxField) paxField.hidden = type !== "Dine-in";
+    if (type !== "Dine-in") setBillingPaxForTable(null, 1);
     if (!preserveSaleChannel) {
         const preferences = getPOSChannelPreferences();
         const modulePrefs = type === "Dine-in" ? preferences.tableView : preferences.newOrder;
@@ -909,9 +1035,24 @@ function setOrderType(type, preserveSaleChannel = false) {
     updateBillingTableSelection();
     renderBillingAdjustmentSelectors();
 }
-function addToCart(id,name,price,menuItem=null,variant=null){
-    const cartKey=variant?`${id}:${variant.id}`:String(id); const existing=cart.find(x=>String(x.cartKey)===cartKey);
-    if(existing) existing.quantity++; else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),quantity:1,unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive'});
+
+function setBillingPaxForTable(tableNumber, value = null) {
+    const input = document.getElementById("billingPax");
+    if (!input) return;
+    const table = tableNumber && Array.isArray(restaurantTables)
+        ? restaurantTables.find(entry => String(entry.table_number) === String(tableNumber))
+        : null;
+    const capacity = Number(table?.capacity) || 0;
+    if (capacity > 0) input.max = String(capacity);
+    else input.removeAttribute("max");
+    const current = Number(value ?? input.value) || 1;
+    input.value = String(Math.max(1, Math.min(current, capacity || current)));
+}
+
+function addToCart(id,name,price,menuItem=null,variant=null,options=[],basePrice=price){
+    const optionKey=(options||[]).flatMap(set=>set.options||[]).map(option=>String(option.id)).sort().join(',');
+    const cartKey=`${variant?`${id}:${variant.id}`:String(id)}:${optionKey}`; const existing=cart.find(x=>String(x.cartKey)===cartKey);
+    if(existing) existing.quantity++; else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),basePrice:Number(basePrice),options:options||[],quantity:1,unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive'});
     updateCart();
 }
 
@@ -972,7 +1113,8 @@ function marketingDealUnavailableReason(deal) {
     if (!deal || deal.active === false) return "Inactive";
     const type = String(deal.type || "").trim().toLowerCase();
     if (["voucher", "payment deals"].includes(type)) return `${deal.type} needs a voucher or payment rule before it can be used at checkout`;
-    if (!["discount", "buy x", "buy x get x", "buy x get y", "meal deals", "slab-based discount"].includes(type)) return `${deal.type || "Deal"} is not supported at checkout`;
+    if (type === "slab-based discount") return "Add slab thresholds before using this deal at checkout";
+    if (!["discount", "buy x", "buy x get x", "buy x get y", "meal deals"].includes(type)) return `${deal.type || "Deal"} is not supported at checkout`;
     if (deal.forNewCustomers) return "Select and verify an eligible new customer first";
     if (deal.useMembership) return "Membership eligibility is not linked to this POS customer yet";
     if (deal.requireAuthentication) return "Customer verification is not configured for this checkout";
@@ -989,6 +1131,8 @@ function marketingDealUnavailableReason(deal) {
 
 function marketingDealAppliesToLine(deal, line) {
     const menuItem = currentMenu.find(item => String(item.id) === String(line.item.id));
+    const selectedIds=Array.isArray(deal.itemIds)?deal.itemIds.map(String):[];
+    if(selectedIds.length)return selectedIds.includes(String(line.item.id));
     if (deal.itemId && String(deal.itemId) !== String(line.item.id)) return false;
     if (deal.category) {
         const category = menuItem?.category || line.item.category || "";
@@ -1012,12 +1156,18 @@ function marketingDiscountPlan(rule, lines) {
     if (isMarketingDeal && eligibleQuantity < minimumQuantity) return { discount: 0, discountBase, discounts };
 
     if (isMarketingDeal && ["buy x get x", "buy x get y", "meal deals"].includes(type)) {
-        const rewardId = type === "buy x get x" ? rule.itemId : (rule.rewardItemId || (type === "meal deals" ? rule.itemId : null));
+        const rewardId = type === "buy x get x" ? (Array.isArray(rule.itemIds)&&rule.itemIds.length?null:rule.itemId) : (rule.rewardItemId || (type === "meal deals" ? rule.itemId : null));
         const rewardIndexes = lines.map((line, index) => {
             const itemId = line.item?.id ?? line.item?.menuId ?? line.item?.menu_id;
             return rewardId ? (String(itemId) === String(rewardId) ? index : -1) : (marketingDealAppliesToLine(rule, line) ? index : -1);
         }).filter(index => index >= 0);
-        let freeUnits = Math.floor(eligibleQuantity / buyQuantity) * Math.max(1, Number(rule.getQuantity || 1));
+        const getQuantity = Math.max(1, Math.floor(Number(rule.getQuantity || 1)));
+        const rewardQuantity = rewardIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
+        const rewardIsAlsoEligible = rewardIndexes.some(index => eligibleIndexes.includes(index));
+        let freeUnits = rewardIsAlsoEligible
+            ? Math.floor(eligibleQuantity / (buyQuantity + getQuantity)) * getQuantity
+            : Math.floor(eligibleQuantity / buyQuantity) * getQuantity;
+        freeUnits = Math.min(freeUnits, rewardQuantity);
         const cheapestFirst = rewardIndexes.sort((a, b) => (lines[a].net / Math.max(Number(lines[a].item.quantity || 1), 1)) - (lines[b].net / Math.max(Number(lines[b].item.quantity || 1), 1)));
         for (const index of cheapestFirst) {
             if (freeUnits <= 0) break;
@@ -1092,12 +1242,19 @@ function getBillingBreakdown() {
             : Math.max(0, Number(chargeRule.value || 0));
     }
 
-    let total = Math.max(0, totalBeforeCharge + serviceCharge);
-    if (appSettings.roundTotals) total = Math.round(total);
+    const unroundedTotal = Math.max(0, totalBeforeCharge + serviceCharge);
+    const roundingMode = ["none", "nearest", "up", "down"].includes(appSettings.totalRoundingMode)
+        ? appSettings.totalRoundingMode
+        : appSettings.roundTotals ? "nearest" : "none";
+    let total = unroundedTotal;
+    if (roundingMode === "nearest") total = Math.round(unroundedTotal);
+    else if (roundingMode === "up") total = Math.ceil(unroundedTotal);
+    else if (roundingMode === "down") total = Math.floor(unroundedTotal);
+    total = Math.max(0, total);
 
     return {
         subtotal, discount, serviceCharge, gst, inclusiveTax, exclusiveTax,
-        total, taxable, gstRate: null, taxesByRate,
+        total, unroundedTotal, roundingAdjustment: total - unroundedTotal, roundingMode, taxable, gstRate: null, taxesByRate,
         discountId: discountRule?.source === "marketing" ? null : discountRule?.id || null,
         chargeId: chargeRule?.id || null,
         discountName: discountRule?.name || "",
@@ -1136,6 +1293,9 @@ function updateBill() {
 
     setText("discountAmount", money(b.discount));
     setText("serviceChargeAmount", money(b.serviceCharge));
+    const roundingRow = document.getElementById("billingRoundingRow");
+    if (roundingRow) roundingRow.style.display = Math.abs(Number(b.roundingAdjustment || 0)) < 0.005 ? "none" : "flex";
+    setText("billingRoundingAmount", money(b.roundingAdjustment || 0));
     const discountLabel = document.getElementById("billingDiscountLabel");
     if (discountLabel) discountLabel.textContent = b.discountName ? `Discount · ${b.discountName}` : "Discount";
     const chargeLabel = document.getElementById("billingChargeLabel");
@@ -1150,6 +1310,8 @@ function updateBill() {
 
     }
 
+    updateBillingAdjustmentSummary();
+
 }
 
 
@@ -1162,6 +1324,7 @@ function previewCurrentBill() {
         invoiceNumber: currentOpenOrderData?.invoice?.invoice_number || null,
         orderType,
         tableNumber: document.getElementById("tableNumber")?.value || null,
+        pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null,
         subtotal: breakdown.subtotal,
         discount: breakdown.discount,
         discountName: breakdown.discountName,
@@ -1169,14 +1332,24 @@ function previewCurrentBill() {
         chargeName: breakdown.chargeName,
         gst: breakdown.gst,
         total: breakdown.total,
+        roundingAdjustment: breakdown.roundingAdjustment,
         paymentMethod: order.payment_method || "Pending",
+        paymentAllocations: currentOpenOrderData?.paymentSummary?.allocations || [],
+        amountCollected: Number(currentOpenOrderData?.paymentSummary?.amountCollected || 0),
+        amountDue: Math.max(0, breakdown.total - Number(currentOpenOrderData?.paymentSummary?.amountCollected || 0)),
         customerName: document.getElementById("billingCustomerNameQuick")?.value.trim() || "",
         customerPhone: document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "",
         customerEmail: document.getElementById("billingCustomerEmailQuick")?.value.trim() || "",
+        customerGstin: document.getElementById("billingCustomerGstinQuick")?.value.trim() || "",
+        customerBirthDate: document.getElementById("billingCustomerBirthDateQuick")?.value || "",
+        customerAddress: document.getElementById("billingCustomerAddressQuick")?.value.trim() || "",
+        customerCity: document.getElementById("billingCustomerCityQuick")?.value.trim() || "",
+        customerState: document.getElementById("billingCustomerStateQuick")?.value.trim() || "",
         items: cart.map(item => ({
             name: item.name,
             price: Number(item.price),
-            quantity: Number(item.quantity)
+            quantity: Number(item.quantity),
+            options: item.options || []
         }))
     });
 }
@@ -1225,6 +1398,7 @@ function updateCart() {
                 <div class="cart-item-name">
                     ${esc(item.name)}
                 </div>
+                ${item.options?.length?`<small class="cart-item-options">${esc(formatItemOptionNames(item.options))}</small>`:''}
 
                 <small>
                     ${money(item.price)} each
@@ -1342,6 +1516,8 @@ function clearNewOrderDraft() {
     cart = [];
     currentOpenOrderId = null;
     currentOpenOrderData = null;
+    const saveButton=document.getElementById("saveOrderBtn");if(saveButton)saveButton.textContent="💾 Save Order";
+    const orderBadge=document.getElementById("billingOrderState");if(orderBadge)orderBadge.textContent="";
 
     const clearFields = [
         "tableNumber",
@@ -1349,6 +1525,12 @@ function clearNewOrderDraft() {
         "billingCustomerNameQuick",
         "billingCustomerPhoneQuick",
         "billingCustomerEmailQuick",
+        "billingCustomerGstinQuick",
+        "billingCustomerBirthDateQuick",
+        "billingCustomerAddressQuick",
+        "billingCustomerCityQuick",
+        "billingCustomerStateQuick",
+        "billingPax",
         "billingDiscountSelect",
         "billingChargeSelect"
     ];
@@ -1356,6 +1538,7 @@ function clearNewOrderDraft() {
         const field = document.getElementById(id);
         if (field) field.value = "";
     });
+    setBillingPaxForTable(null, 1);
 
     const lookupResults = document.getElementById("billingCustomerLookupResults");
     if (lookupResults) {
@@ -1379,7 +1562,9 @@ async function selectBillingSaleChannel(channelKey) {
     cart = cart.map(entry => {
         const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
-        return item ? { ...entry, price: resolveMenuPrice(item, variant || null) } : entry;
+        const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
+        const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
+        return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
     });
     updateCart();
 }
@@ -1406,7 +1591,9 @@ function repriceCartForCurrentChannel() {
     cart = cart.map(entry => {
         const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
-        return item ? { ...entry, price: resolveMenuPrice(item, variant || null) } : entry;
+        const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
+        const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
+        return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
     });
     updateCart();
 }
@@ -1421,7 +1608,7 @@ function selectBillingMenuItem(item) {
         openVariantPicker(item);
         return;
     }
-    addToCart(item.id, item.name, resolveMenuPrice(item), item);
+    openItemOptionPicker(item);
 }
 function openVariantPicker(item){
     const variants=getAvailableMenuVariants(item);
@@ -1435,7 +1622,23 @@ function openVariantPicker(item){
     modal.style.display='flex';
 }
 function closeVariantPicker(){document.getElementById('variantPickerModal')?.style.setProperty('display','none');}
-function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;addToCart(item.id,`${item.name} — ${v.name}`,resolveMenuPrice(item,v),item,v);closeVariantPicker();}
+function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;closeVariantPicker();openItemOptionPicker(item,v);}
+function itemOptionSets(item){const attached=new Set((Array.isArray(item?.option_set_ids)?item.option_set_ids:[]).map(String));return menuOptionSets.filter(set=>attached.has(String(set.id)));}
+function openItemOptionPicker(item,variant=null){
+    const sets=itemOptionSets(item),basePrice=resolveMenuPrice(item,variant||null),modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
+    if(!sets.length){addToCart(item.id,variant?`${item.name} — ${variant.name}`:item.name,basePrice,item,variant,[],basePrice);return;}
+    if(!modal||!body)return;
+    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(variant?.id||'');
+    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}${variant?` — ${esc(variant.name)}`:''}</strong><span>${money(basePrice)}</span></div>${sets.map(set=>`<fieldset class="item-option-set"><legend>${esc(set.name)} <small>${Number(set.minSelections||0)?`Choose at least ${Number(set.minSelections)}`:'Optional'}</small></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><input type="${Number(set.maxSelections||1)===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}"><span>${esc(option.name)}</span><strong>${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</strong></label>`).join('')}</div></fieldset>`).join('')}`;
+    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;modal.style.display='flex';
+}
+function closeItemOptions(){document.getElementById('itemOptionsModal')?.style.setProperty('display','none');}
+function confirmItemOptions(){
+    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked')],sets=itemOptionSets(item),selections=[];
+    for(const set of sets){const chosen=selected.filter(input=>String(input.dataset.setId)===String(set.id)),min=Number(set.minSelections||0),max=Number(set.maxSelections||1);if(chosen.length<min||chosen.length>max)return alert(`Choose ${min===max?min:`${min} to ${max}`} option${max===1?'':'s'} for ${set.name}.`);if(chosen.length)selections.push({setId:String(set.id),setName:set.name,options:chosen.map(input=>{const option=(set.options||[]).find(value=>String(value.id)===input.dataset.optionId);return {id:String(option.id),name:option.name,price:Number(option.price||0)};})});}
+    const basePrice=Number(modal.dataset.basePrice||0),extra=selections.flatMap(set=>set.options).reduce((sum,option)=>sum+Number(option.price||0),0);
+    addToCart(menuId,modal.dataset.itemName,basePrice+extra,item,variant,selections,basePrice);closeItemOptions();
+}
 
 async function openBillingCustomerPanel() {
     document.querySelector("#new-order .billing-shell")?.classList.add("customer-step");
@@ -1501,9 +1704,38 @@ function searchBillingCustomers(query) {
             if (phone) phone.value = customer.phone || "";
             if (name) name.value = customer.name || "";
             if (email) email.value = customer.email || "";
+            fillBillingCustomerFields(customer);
             results.hidden = true;
             results.innerHTML = "";
         });
+    });
+}
+
+function getBillingCustomerDetails() {
+    const value = id => document.getElementById(id)?.value.trim() || "";
+    return {
+        name: value("billingCustomerNameQuick"),
+        phone: value("billingCustomerPhoneQuick"),
+        email: value("billingCustomerEmailQuick"),
+        gstin: value("billingCustomerGstinQuick"),
+        birthDate: value("billingCustomerBirthDateQuick"),
+        address: value("billingCustomerAddressQuick"),
+        city: value("billingCustomerCityQuick"),
+        state: value("billingCustomerStateQuick")
+    };
+}
+
+function fillBillingCustomerFields(customer = {}) {
+    const fields = {
+        billingCustomerGstinQuick: customer.gstin || customer.customer_gstin,
+        billingCustomerBirthDateQuick: (customer.birth_date || customer.customer_birth_date) ? String(customer.birth_date || customer.customer_birth_date).slice(0, 10) : "",
+        billingCustomerAddressQuick: customer.address || customer.customer_address,
+        billingCustomerCityQuick: customer.city || customer.customer_city,
+        billingCustomerStateQuick: customer.state || customer.customer_state
+    };
+    Object.entries(fields).forEach(([id, value]) => {
+        const field = document.getElementById(id);
+        if (field) field.value = value || "";
     });
 }
 
@@ -1513,6 +1745,7 @@ async function loadMenuCategories(){
         menuCategories=await api('/menu/categories');
         renderMenuCategoryMaster();
         populateMenuCategorySelect();
+        setText('menuCategoryCount',menuCategories.length);
         return menuCategories;
     }catch(e){
         console.error('Load menu categories failed:',e);
@@ -1638,51 +1871,7 @@ async function loadMenu() {
     }
 }
 
-function menuIcon(category) {
-
-    const c =
-        String(category || "")
-            .toLowerCase();
-
-
-    if (c.includes("coffee")) {
-
-        return "☕";
-
-    }
-
-
-    if (c.includes("burger")) {
-
-        return "🍔";
-
-    }
-
-
-    if (c.includes("pizza")) {
-
-        return "🍕";
-
-    }
-
-
-    if (c.includes("drink")) {
-
-        return "🥤";
-
-    }
-
-
-    if (c.includes("dessert")) {
-
-        return "🍰";
-
-    }
-
-
-    return "🍝";
-
-}
+function menuIcon() { return ""; }
 
 
 function filterCategory(category, button) {
@@ -1725,6 +1914,7 @@ let selectedPaymentMethod = "";
 let paymentCollectedSoFar = 0;
 let paymentDueNow = 0;
 let splitPayments = [];
+let previousPaymentAllocations = [];
 
 async function openPayment() {
     const newOrderPage = document.getElementById("new-order");
@@ -1733,10 +1923,13 @@ async function openPayment() {
     if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) return alert("Please select a table for Dine-in.");
 
     paymentCollectedSoFar = 0;
+    previousPaymentAllocations = [];
     if (currentOpenOrderId) {
         try {
-            const summary = await api(`/orders/${currentOpenOrderId}/payment-summary`);
+            const summary = currentOpenOrderData?.paymentSummary || await api(`/orders/${currentOpenOrderId}/payment-summary`);
             paymentCollectedSoFar = Math.max(0, Number(summary.amountCollected || 0));
+            previousPaymentAllocations = Array.isArray(summary.allocations) ? summary.allocations : [];
+            if (currentOpenOrderData) currentOpenOrderData.paymentSummary = summary;
         } catch (error) {
             return alert("Unable to load previous payments: " + error.message);
         }
@@ -1839,21 +2032,31 @@ function updatePaymentSummary() {
     setMoney("paymentCharges", b.serviceCharge);
     setMoney("paymentTax", b.gst);
     setMoney("paymentDiscount", b.discount);
+    const roundingRow = document.getElementById("paymentRoundingRow");
+    if (roundingRow) roundingRow.hidden = Math.abs(Number(b.roundingAdjustment || 0)) < 0.005;
+    setMoney("paymentRounding", b.roundingAdjustment || 0);
     setMoney("paymentBillTotal", b.total);
     setMoney("paymentBillTotalHeader", b.total);
     const due = Math.max(0, Number(b.total || 0) - paymentCollectedSoFar);
     let currentCollection = 0;
-    if (paymentCategory === "partial") currentCollection = Math.max(0, Number(document.getElementById("cashReceived")?.value || 0));
-    if (paymentCategory === "split") currentCollection = splitPayments.reduce((sum, payment) => sum + payment.amount, 0);
+    if (paymentCategory === "partial") currentCollection = Math.min(due, Math.max(0, Number(document.getElementById("cashReceived")?.value || 0)));
+    if (paymentCategory === "split") currentCollection = Math.min(due, splitPayments.reduce((sum, payment) => sum + payment.amount, 0));
     if (paymentCategory === "full") currentCollection = due;
     if (paymentCategory === "non-chargeable") currentCollection = 0;
-    setMoney("paymentAmountCollected", paymentCollectedSoFar + currentCollection);
-    setMoney("paymentAmountDue", paymentCategory === "non-chargeable" ? 0 : Math.max(0, due - currentCollection));
+    const amountCollected = paymentCollectedSoFar + currentCollection;
+    const amountDue = paymentCategory === "non-chargeable" ? 0 : Math.max(0, due - currentCollection);
+    setMoney("paymentAmountCollected", amountCollected);
+    setMoney("paymentAmountDue", amountDue);
+    setMoney("checkoutAmountCollected", amountCollected);
+    setMoney("checkoutAmountDue", amountDue);
     const entered = Number(document.getElementById("cashReceived")?.value || 0);
     const applied = paymentCategory === "partial" ? entered : due;
     setMoney("changeAmount", isCashPaymentMethod(selectedPaymentMethod) && paymentCategory !== "split" ? Math.max(0, entered - applied) : 0);
     const allocations = document.getElementById("paymentAllocations");
-    if (allocations) allocations.innerHTML = splitPayments.map(payment => `<div><span>${esc(payment.method)}</span><strong>${money(payment.amount)}</strong></div>`).join("");
+    if (allocations) allocations.innerHTML = [
+        ...previousPaymentAllocations.map(payment => `<div><span>Paid · ${esc(payment.method)}</span><strong>${money(payment.amount)}</strong></div>`),
+        ...splitPayments.map(payment => `<div><span>This payment · ${esc(payment.method)}</span><strong>${money(payment.amount)}</strong></div>`)
+    ].join("");
 }
 function updateCashChange() { updatePaymentSummary(); }
 function choosePayment(method) { selectPaymentMethod(method); }
@@ -1891,6 +2094,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
     const b = getBillingBreakdown();
     const gst = b.gst;
     const total = b.total;
+    const priorOrder = currentOpenOrderData?.order || {};
     const paymentsToRecord = Array.isArray(paymentOptions.payments) ? paymentOptions.payments : [{ method: paymentMethod, amount: total }];
 
     try {
@@ -1898,67 +2102,60 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const customerName = document.getElementById("billingCustomerNameQuick")?.value.trim() || "";
         const customerPhone = document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "";
         const customerEmail = document.getElementById("billingCustomerEmailQuick")?.value.trim() || "";
-        if (customerName || customerPhone || customerEmail) {
+        const customerDetails = getBillingCustomerDetails();
+        if (Object.values(customerDetails).some(Boolean)) {
             if (!customerName || !customerPhone) throw new Error("Please enter both customer name and phone number, or leave customer details blank.");
         }
         let billingCustomer = null;
         if (customerName && customerPhone) {
-            const customerResult = await api("/customers/save-for-billing", { method: "POST", body: JSON.stringify({ name: customerName, phone: customerPhone, email: customerEmail || null }) });
+            const customerResult = await api("/customers/save-for-billing", { method: "POST", body: JSON.stringify(customerDetails) });
             billingCustomer = customerResult.customer || null;
             cacheBillingCustomer(billingCustomer);
         }
         const orderPayload = {
-            orderType, tableNumber, subtotal, gst, total, paymentMethod,
+            orderType, tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null,
             discount: b.discount, serviceCharge: b.serviceCharge,
             discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
+            discountAdjustmentName: b.discountId ? b.discountName : null,
+            chargeAdjustmentName: b.chargeId ? b.chargeName : null,
             marketingDealId: b.marketingDealId, marketingDealName: b.marketingDealName,
             notes: document.getElementById("billingOrderNotes")?.value.trim() || null,
-            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode }))
+            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, basePrice: item.basePrice ?? item.price, options: item.options || [], quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode }))
         };
         let order;
         let orderNumber;
-        let billItems;
+        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), options: item.options || [] }));
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
             const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify(orderPayload) });
             order = updated.order;
             orderNumber = order.order_number;
-            billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity) }));
         } else {
             orderNumber = (appSettings.orderPrefix || "ORD-") + Date.now().toString().slice(-8);
             const kotEnabled = appSettings.kotEnabled !== false;
             const initialStatus = paymentOptions.keepOpen ? "Open" : (kotEnabled ? "Pending" : "Completed");
             const result = await api("/orders", { method: "POST", body: JSON.stringify({ orderNumber, ...orderPayload, initialStatus, createKot: !paymentOptions.keepOpen && kotEnabled }) });
             order = result.order;
-            billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity) }));
+            currentOpenOrderId = order.id;
+            currentOpenOrderData = { order, items: [] };
         }
 
-        const paymentStatus = paymentOptions.nonChargeable ? "Non-chargeable" : "Success";
-        for (const payment of paymentsToRecord) {
-            await api("/payments", { method: "POST", body: JSON.stringify({ orderId: order.id, orderNumber: order.order_number || orderNumber, amount: paymentOptions.nonChargeable ? 0 : Number(payment.amount), paymentMethod: paymentOptions.nonChargeable ? "Non-chargeable" : payment.method, paymentStatus, transactionId: null }) });
-        }
-
-        if (paymentOptions.keepOpen) {
-            closePayment();
-            cart = [];
-            currentOpenOrderId = null;
-            currentOpenOrderData = null;
-            const tableInput = document.getElementById("tableNumber");
-            if (tableInput) tableInput.value = "";
-            updateCart();
-            await loadTables();
-            await updateDashboard();
-            await updateOrdersTable();
-            showPage("orders");
-            showProfileToast("Partial payment recorded. The order remains open with a balance due.");
-            return;
-        }
-
-        const invoiceResult = await api("/invoices", { method: "POST", body: JSON.stringify({ orderId: order.id, customerId: order.customer_id || billingCustomer?.id || null }) });
-        const completion = await api(`/orders/${order.id}/complete`, { method: "PUT" });
-        const completedOrder = completion.order || order;
+        const settlement = await api(`/orders/${order.id}/settle`, {
+            method: "POST",
+            body: JSON.stringify({
+                payments: paymentsToRecord,
+                paymentMethod,
+                keepOpen: Boolean(paymentOptions.keepOpen),
+                nonChargeable: Boolean(paymentOptions.nonChargeable),
+                createKot: appSettings.kotEnabled !== false,
+                customerId: order.customer_id || billingCustomer?.id || null
+            })
+        });
+        const completedOrder = settlement.order || order;
+        const invoice = settlement.invoice || null;
+        const paymentSummary = settlement.paymentSummary || {};
         const kotEnabled = appSettings.kotEnabled !== false;
         closePayment();
         cart = [];
@@ -1968,13 +2165,15 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         if (tableInput) tableInput.value = "";
         updateCart();
         if (kotEnabled && appSettings.printKitchenOnOrder && !paymentOptions.nonChargeable) {
-            try { await printKOT(order.id); } catch (_) {}
+            Promise.resolve().then(() => printKOT(order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
         }
         openBillPreview({
+            orderId: completedOrder.id || order.id,
             orderNumber: completedOrder.order_number || orderNumber,
-            invoiceNumber: invoiceResult.invoice?.invoice_number || null,
+            invoiceNumber: invoice?.invoice_number || null,
             orderType: completedOrder.order_type || orderType,
             tableNumber: completedOrder.table_number || tableNumber,
+            pax: completedOrder.pax || (orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null),
             subtotal: Number(completedOrder.subtotal || subtotal),
             discount: Number(completedOrder.discount ?? b.discount),
             discountName: b.discountName,
@@ -1982,17 +2181,25 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             chargeName: b.chargeName,
             gst: Number(completedOrder.gst || gst),
             total: Number(completedOrder.total || total),
+            roundingAdjustment: b.roundingAdjustment,
             paymentMethod, customerId: completedOrder.customer_id || billingCustomer?.id || null,
-            customerName: completedOrder.customer_name || billingCustomer?.name || customerName || null,
-            customerPhone: completedOrder.customer_phone || billingCustomer?.phone || customerPhone || null,
-            customerEmail: completedOrder.customer_email || billingCustomer?.email || customerEmail || null,
+            customerName: completedOrder.customer_name || billingCustomer?.name || customerName || priorOrder.customer_name || null,
+            customerPhone: completedOrder.customer_phone || billingCustomer?.phone || customerPhone || priorOrder.customer_phone || null,
+            customerEmail: completedOrder.customer_email || billingCustomer?.email || customerEmail || priorOrder.customer_email || null,
+            customerGstin: completedOrder.customer_gstin || billingCustomer?.gstin || customerDetails.gstin || null,
+            customerBirthDate: completedOrder.customer_birth_date || billingCustomer?.birth_date || customerDetails.birthDate || null,
+            customerAddress: completedOrder.customer_address || billingCustomer?.address || customerDetails.address || null,
+            customerCity: completedOrder.customer_city || billingCustomer?.city || customerDetails.city || null,
+            customerState: completedOrder.customer_state || billingCustomer?.state || customerDetails.state || null,
+            paymentAllocations: paymentSummary.allocations || [],
+            amountCollected: Number(paymentSummary.amountCollected || 0),
+            amountDue: Number(paymentSummary.amountDue || 0),
             items: billItems
         });
-        window.printThermalBill();
-        await loadTables();
-        await updateDashboard();
-        await updateOrdersTable();
-        showPage("orders");
+        showPage("new-order");
+        showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : "Sale completed");
+        Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
+        Promise.allSettled([loadTables(), updateDashboard()]);
     } catch (error) {
         console.error(error);
         alert("Failed to complete payment: " + error.message);
@@ -2023,6 +2230,8 @@ async function saveOpenOrder() {
         variantId: item.variantId || null,
         name: item.name,
         price: item.price,
+        basePrice: item.basePrice ?? item.price,
+        options: item.options || [],
         quantity: item.quantity,
         unit: item.unit,
         taxRate: item.taxRate,
@@ -2031,8 +2240,9 @@ async function saveOpenOrder() {
     const customerName = document.getElementById("billingCustomerNameQuick")?.value.trim() || "";
     const customerPhone = document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "";
     const customerEmail = document.getElementById("billingCustomerEmailQuick")?.value.trim() || "";
+    const customerDetails = getBillingCustomerDetails();
 
-    if (customerName || customerPhone || customerEmail) {
+    if (Object.values(customerDetails).some(Boolean)) {
         if (!customerName || !customerPhone) return alert("Please enter both customer name and phone number, or leave customer details blank.");
     }
 
@@ -2041,7 +2251,7 @@ async function saveOpenOrder() {
         if (customerName && customerPhone) {
             const r = await api("/customers/save-for-billing", {
                 method: "POST",
-                body: JSON.stringify({ name: customerName, phone: customerPhone, email: customerEmail || null })
+                body: JSON.stringify(customerDetails)
             });
             billingCustomer = r.customer || null;
             cacheBillingCustomer(billingCustomer);
@@ -2051,13 +2261,15 @@ async function saveOpenOrder() {
             const result = await api(`/orders/${openOrderId}`, {
                 method: "PUT",
                 body: JSON.stringify({
-                    orderType: orderTypeToSave, tableNumber, subtotal, gst: b.gst, total: b.total,
-                    paymentMethod: null,
+                    orderType: orderTypeToSave, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
+                    paymentMethod: openOrderData?.order?.payment_method || null,
                     customerId: billingCustomer?.id || openOrderData?.order?.customer_id || null,
                     discount: b.discount,
                     serviceCharge: b.serviceCharge,
                     discountAdjustmentId: b.discountId,
                     chargeAdjustmentId: b.chargeId,
+                    discountAdjustmentName: b.discountId ? b.discountName : null,
+                    chargeAdjustmentName: b.chargeId ? b.chargeName : null,
                     marketingDealId: b.marketingDealId,
                     marketingDealName: b.marketingDealName,
                     notes: orderNotes || null,
@@ -2069,7 +2281,7 @@ async function saveOpenOrder() {
             currentOpenOrderData = null;
             updateCart();
             await loadTables(); await updateDashboard(); await updateOrdersTable();
-            alert(`Open order updated successfully.\n\nOrder: ${result.order.order_number}`);
+            alert(`${String(result.order.status||'').toLowerCase()==='completed'?'Closed bill updated':'Open order updated'} successfully.\n\nOrder: ${result.order.order_number}`);
             showPage("orders");
             return;
         }
@@ -2078,11 +2290,13 @@ async function saveOpenOrder() {
         const result = await api("/orders", {
             method: "POST",
             body: JSON.stringify({
-                orderNumber, orderType: orderTypeToSave, tableNumber, subtotal,
+                orderNumber, orderType: orderTypeToSave, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
                 gst: b.gst, total: b.total, paymentMethod: null,
                 customerId: billingCustomer?.id || null,
                 discount: b.discount, serviceCharge: b.serviceCharge,
                 discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
+                discountAdjustmentName: b.discountId ? b.discountName : null,
+                chargeAdjustmentName: b.chargeId ? b.chargeName : null,
                 marketingDealId: b.marketingDealId,
                 marketingDealName: b.marketingDealName,
                 notes: orderNotes || null,
@@ -2115,6 +2329,8 @@ async function payOpenOrder(orderId) {
             cartKey: item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id),
             name: item.item_name,
             price: Number(item.price),
+            basePrice: Number(item.price)-((item.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0)),
+            options: item.options || [],
             quantity: Number(item.quantity),
             unit: item.unit || 'ea',
             taxRate: Number(item.tax_rate ?? 5),
@@ -2124,6 +2340,7 @@ async function payOpenOrder(orderId) {
         setOrderType(orderType);
         const tableSelect = document.getElementById("tableNumber");
         if (tableSelect) tableSelect.value = order.table_number || tableSelect.value;
+        setBillingPaxForTable(order.table_number, order.pax || 1);
         const discountSelect = document.getElementById("billingDiscountSelect");
         const chargeSelect = document.getElementById("billingChargeSelect");
         if (discountSelect) discountSelect.value = order.marketing_deal_id ? `marketing:${order.marketing_deal_id}` : order.discount_adjustment_id ? String(order.discount_adjustment_id) : "";
@@ -2135,6 +2352,7 @@ async function payOpenOrder(orderId) {
         if (n) n.value = order.customer_name || "";
         if (p) p.value = order.customer_phone || "";
         if (e) e.value = order.customer_email || "";
+        fillBillingCustomerFields(order);
         const note = document.getElementById("billingOrderNotes");
         if (note) note.value = order.notes || "";
         updateCart();
@@ -2241,14 +2459,18 @@ window.openBillPreview = function(data) {
     document.getElementById("billOrderNumber").textContent =
         data.orderNumber || "-";
 
+    const invoiceRow = document.getElementById("billInvoiceRow");
+    if (invoiceRow) invoiceRow.style.display = data.invoiceNumber ? "flex" : "none";
+    setText("billInvoiceNumber", data.invoiceNumber || "-");
+
     document.getElementById("billDate").textContent =
         data.date || new Date().toLocaleString();
 
     document.getElementById("billOrderType").textContent =
-        data.orderType || "-";
+        data.isOpenOrder ? `OPEN ORDER · ${data.orderType || "-"}` : data.orderType || "-";
 
     document.getElementById("billTableNumber").textContent =
-        data.tableNumber || "-";
+        data.tableNumber ? `${data.tableNumber}${Number(data.pax) > 0 ? ` · ${Number(data.pax)} PAX` : ""}` : "-";
 
     document.getElementById("billSubtotal").textContent =
         money(data.subtotal || 0);
@@ -2279,8 +2501,26 @@ window.openBillPreview = function(data) {
     document.getElementById("billTotal").textContent =
         money(data.total || 0);
 
+    const billRoundingRow = document.getElementById("billRoundingRow");
+    const roundingAdjustment = Number(data.roundingAdjustment || 0);
+    if (billRoundingRow) billRoundingRow.style.display = Math.abs(roundingAdjustment) < 0.005 ? "none" : "flex";
+    setText("billRounding", money(roundingAdjustment));
+
     document.getElementById("billPaymentMethod").textContent =
         data.paymentMethod || "-";
+    const allocations = Array.isArray(data.paymentAllocations) ? data.paymentAllocations : [];
+    const allocationList = document.getElementById("billPaymentAllocations");
+    if (allocationList) allocationList.innerHTML = allocations.length
+        ? allocations.map(payment => `<div><span>${esc(payment.method || "Payment")}</span><strong>${money(payment.amount || 0)}</strong></div>`).join("")
+        : "";
+    const collected = data.amountCollected === undefined
+        ? allocations.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
+        : Math.max(0, Number(data.amountCollected || 0));
+    const due = data.amountDue === undefined
+        ? Math.max(0, Number(data.total || 0) - collected)
+        : Math.max(0, Number(data.amountDue || 0));
+    setText("billAmountCollected", money(collected));
+    setText("billAmountDue", money(due));
 
     const tableRow = document.getElementById("billTableRow");
 
@@ -2300,6 +2540,11 @@ window.openBillPreview = function(data) {
     if (data.customerName) customerParts.push(data.customerName);
     if (data.customerPhone) customerParts.push(data.customerPhone);
     if (data.customerEmail) customerParts.push(data.customerEmail);
+    if (data.customerGstin) customerParts.push("GSTIN: " + data.customerGstin);
+    if (data.customerBirthDate) customerParts.push("DOB: " + data.customerBirthDate);
+    if (data.customerAddress) customerParts.push(data.customerAddress);
+    if (data.customerCity) customerParts.push(data.customerCity);
+    if (data.customerState) customerParts.push(data.customerState);
 
     if (billCustomerRow && billCustomerDetails) {
         billCustomerRow.style.display =
@@ -2322,8 +2567,9 @@ window.openBillPreview = function(data) {
             const price = Number(item.price || 0);
             const lineTotal = qty * price;
 
+            const optionText=formatItemOptionNames(item.options);
             row.innerHTML =
-                "<td>" + esc(item.name || "-") + "</td>" +
+                "<td>" + esc(item.name || "-") + (optionText?`<br><small>${esc(optionText)}</small>`:"") + "</td>" +
                 "<td>" + qty + "</td>" +
                 "<td>" + money(price) + "</td>" +
                 "<td>" + money(lineTotal) + "</td>";
@@ -2367,6 +2613,11 @@ window.printThermalBill = async function() {
     const data = window.currentBillData;
     if (!data) return alert("No bill is available to print.");
 
+    if (!(window.cafePrinters || []).some(printer => printer.is_default && printer.active !== false) && data.orderId) {
+        try { window.cafePrinters = await api("/printers?source=order"); }
+        catch (error) { return alert("Could not load an order printer: " + error.message); }
+    }
+
     const defaultPrinter = (window.cafePrinters || []).find(function(printer) {
         return printer.is_default && printer.active !== false;
     });
@@ -2375,12 +2626,16 @@ window.printThermalBill = async function() {
         return alert("No default bill printer is configured. Open Printer settings and select a default printer.");
     }
 
+    const markBillPrinted=async()=>{
+        if(data.orderId&&!data.isOpenOrder){
+            await api(`/orders/${Number(data.orderId)}/printed`,{method:"POST"});
+            if(Array.isArray(currentOrders)){const order=currentOrders.find(item=>Number(item.id)===Number(data.orderId));if(order)order.bill_printed_at=order.bill_printed_at||new Date().toISOString();}
+        }
+    };
+    const source=data.orderId?"?source=order":"";
     try {
         // LOCAL = Windows installed printer. Print directly through the local Cafe POS Printer Service.
         if (defaultPrinter.connection_type === "local") {
-            if (isVirtualWindowsPrinter(defaultPrinter.name)) {
-                throw new Error("The default is a virtual printer. Select a physical ESC/POS thermal receipt printer in Printer settings.");
-            }
             const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
             const receipt = printerReceiptText(data);
             const response = await fetch(serviceUrl + "/print", {
@@ -2394,21 +2649,24 @@ window.printThermalBill = async function() {
             });
             const result = await response.json().catch(function(){ return {}; });
             if (!response.ok) throw new Error(result.error || "Windows print service rejected the job.");
+            await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
             return;
         }
 
         if (defaultPrinter.connection_type === "network") {
-            await api("/printers/" + defaultPrinter.id + "/print", {
+            await api("/printers/" + defaultPrinter.id + "/print"+source, {
                 method: "POST",
                 body: JSON.stringify({ receipt: data, settings: appSettings })
             });
+            await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
             return;
         }
 
         if (defaultPrinter.connection_type === "bluetooth") {
             await sendBluetoothPrinterText(defaultPrinter, printerReceiptText(data));
+            await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
             return;
         }
@@ -2427,59 +2685,82 @@ window.printThermalBill = async function() {
 async function updateOrdersTable(refresh = true) {
     try {
         if (refresh || !Array.isArray(currentOrders)) currentOrders = await api("/orders");
-        const tbody = document.getElementById("ordersTableBody");
-        if (!tbody) return;
-
-        // Open tab keeps every non-closed order visible, including the existing
-        // KOT workflow states (Pending / Preparing / Ready) so nothing is removed.
-        const openOrders = currentOrders.filter(order => !["completed", "cancelled"].includes(String(order.status).toLowerCase()));
-        const cancelledOrders = currentOrders.filter(order => String(order.status).toLowerCase() === "cancelled");
-        const closedOrders = currentOrders.filter(order => String(order.status).toLowerCase() === "completed");
-        const activeOrders = currentOrders.filter(order => !["open", "completed", "cancelled"].includes(String(order.status).toLowerCase()));
-
-        const tabOrders = window.currentOrdersTab === "cancelled" ? cancelledOrders : window.currentOrdersTab === "closed" ? closedOrders : openOrders;
+        const list = document.getElementById("ordersTableBody");
+        if (!list) return;
+        renderOrderFilterOptions();
+        const allOrders = Array.isArray(currentOrders) ? currentOrders : [];
+        const group = order => {
+            const status = String(order.status || "").toLowerCase();
+            return status === "completed" ? "closed" : status === "cancelled" ? "cancelled" : "open";
+        };
+        const openOrders = allOrders.filter(order => group(order) === "open");
+        const closedOrders = allOrders.filter(order => group(order) === "closed");
+        const cancelledOrders = allOrders.filter(order => group(order) === "cancelled");
+        const statusFilter = document.getElementById("ordersStatusFilter")?.value || "";
+        const activeTab = window.currentOrdersTab || "open";
+        document.querySelectorAll(".orders-tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === (statusFilter || activeTab)));
+        const baseOrders = allOrders.filter(order => group(order) === (statusFilter || activeTab));
         const query = String(document.getElementById("ordersSearch")?.value || "").trim().toLocaleLowerCase();
-        const visibleOrders = tabOrders.filter(order => !query || [order.order_number, order.id, order.order_type, order.table_number, order.status, order.payment_method, order.customer_name].some(value => String(value || "").toLocaleLowerCase().includes(query)));
-        tbody.innerHTML = "";
-
-        visibleOrders.forEach(function(order) {
-            const tr = document.createElement("tr");
-            const isOpen = String(order.status).toLowerCase() === "open";
-            const cancellable = !["Completed", "Cancelled"].includes(order.status);
-            tr.innerHTML = `
-                <td>${esc(order.order_number)}</td>
-                <td>${esc(order.order_type)}</td>
-                <td>${esc(order.table_number || "-")}</td>
-                <td>${money(order.total)}</td>
-                <td>${esc(order.payment_method || (isOpen ? "Unpaid" : "-"))}</td>
-                <td>${esc(order.status)}</td>
-                <td>${new Date(order.created_at).toLocaleString()}</td>
-                <td>
-                    <div class="order-row-actions">
-                    <button type="button" onclick="viewOrder(${order.id})">👁️ View</button>
-                    <button type="button" onclick="viewOrderActivity(${order.id})">◷ Activity</button>
-                    ${isOpen ? `<button onclick="editOpenOrder(${order.id})">✏️ Edit</button><button onclick="payOpenOrder(${order.id})">💳 Pay</button>` : ""}
-                    ${cancellable ? `<button onclick="cancelOrder(${order.id})">❌ Cancel</button>` : ""}
-                    </div>
-                </td>`;
-            tbody.appendChild(tr);
+        const fromDate = document.getElementById("ordersDateFrom")?.value || "";
+        const toDate = document.getElementById("ordersDateTo")?.value || "";
+        const channel = String(document.getElementById("ordersChannelFilter")?.value || "").toLocaleLowerCase();
+        const paymentMode = document.getElementById("ordersPaymentFilter")?.value || "";
+        const localDateKey = value => {
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+        };
+        const visibleOrders = baseOrders.filter(order => {
+            const orderDate = localDateKey(order.created_at);
+            const searchMatch = !query || [order.order_number,order.id,order.order_type,order.table_number,order.pax,order.status,order.payment_method,order.customer_name,order.customer_phone].some(value => String(value || "").toLocaleLowerCase().includes(query));
+            const dateMatch = (!fromDate || orderDate >= fromDate) && (!toDate || orderDate <= toDate);
+            const channelMatch = !channel || String(order.order_type || "").toLocaleLowerCase() === channel;
+            const methods = Array.isArray(order.payment_modes) ? order.payment_modes.map(value => String(value || "").trim().toLocaleLowerCase()).filter(Boolean) : [];
+            const method = String(order.payment_method || "").trim().toLocaleLowerCase();
+            const paymentMatch = !paymentMode || (paymentMode === "__unpaid" ? !methods.length && (!method || method === "unpaid" || method === "partially paid") : methods.includes(paymentMode.toLocaleLowerCase()) || method === paymentMode.toLocaleLowerCase());
+            return searchMatch && dateMatch && channelMatch && paymentMatch;
         });
-
-        if (!visibleOrders.length) {
-            const label = query ? "orders match your search" : window.currentOrdersTab === "cancelled" ? "cancelled" : window.currentOrdersTab === "closed" ? "closed/completed" : "open";
-            tbody.innerHTML = `<tr><td colspan="8" class="orders-empty-state">No ${label} orders.</td></tr>`;
-        }
+        const title = document.getElementById("ordersListTitle");
+        if (title) title.textContent = `${statusFilter || activeTab} orders`.replace(/^./, value => value.toUpperCase());
+        const count = document.getElementById("ordersResultCount");
+        if (count) count.textContent = `${visibleOrders.length} ${visibleOrders.length === 1 ? "order" : "orders"}`;
+        list.innerHTML = visibleOrders.map(order => {
+            const selected = Number(window.selectedOrderId) === Number(order.id);
+            const status = String(order.status || "Open");
+            const statusClass = group(order);
+            const orderDate = order.created_at ? new Date(order.created_at).toLocaleString() : "";
+            const tableMeta = order.table_number ? `Table ${esc(order.table_number)}${Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}` : esc(order.order_type || "-");
+            return `<button type="button" class="order-list-card ${selected ? "selected" : ""}" role="listitem" onclick="viewOrder(${Number(order.id)})"><span class="order-list-card-top"><strong>${esc(order.order_number || `#${order.id}`)}</strong><span class="order-status-pill ${statusClass}">${esc(status)}</span></span><span class="order-list-card-meta"><span>${tableMeta}</span><span>${esc(orderDate)}</span></span><span class="order-list-card-bottom"><span>${esc(order.customer_name || order.payment_method || (statusClass === "open" ? "Unpaid" : ""))}</span><strong>${money(order.total)}</strong></span></button>`;
+        }).join("") || `<div class="orders-empty-state"><span>⌕</span><strong>No matching orders</strong><small>Try changing the search or filters.</small></div>`;
 
         const openCount = document.getElementById("openOrdersCount");
         const closedCount = document.getElementById("closedOrdersCount");
-        const activeCount = document.getElementById("activeOrdersCount");
+        const cancelledCount = document.getElementById("cancelledOrdersCount");
         if (openCount) openCount.textContent = openOrders.length;
         if (closedCount) closedCount.textContent = closedOrders.length;
-        const cancelledCount = document.getElementById("cancelledOrdersCount");
         if (cancelledCount) cancelledCount.textContent = cancelledOrders.length;
-        if (activeCount) activeCount.textContent = activeOrders.length;
+
+        const selectedVisible = visibleOrders.find(order => Number(order.id) === Number(window.selectedOrderId));
+        if (visibleOrders.length && (!selectedVisible || refresh)) await viewOrder(selectedVisible?.id || visibleOrders[0].id);
+        else if (!visibleOrders.length) closeOrderDetails();
     } catch (error) {
         console.error("Orders failed:", error);
+    }
+}
+
+function renderOrderFilterOptions() {
+    const channelSelect = document.getElementById("ordersChannelFilter");
+    if (channelSelect) {
+        const selected = channelSelect.value;
+        const channels = [...new Set(["Dine-in","Takeaway",...(currentOrders || []).map(order => String(order.order_type || "").trim()).filter(Boolean)])];
+        channelSelect.innerHTML = '<option value="">All channels</option>' + channels.map(channel => `<option value="${esc(channel)}">${esc(channel)}</option>`).join("");
+        if (channels.includes(selected)) channelSelect.value = selected;
+    }
+    const paymentSelect = document.getElementById("ordersPaymentFilter");
+    if (paymentSelect) {
+        const selected = paymentSelect.value;
+        const modes = normalizePaymentModes(appSettings.paymentModes).map(mode => mode.name);
+        paymentSelect.innerHTML = '<option value="">All payment modes</option><option value="__unpaid">Unpaid</option>' + modes.map(mode => `<option value="${esc(mode)}">${esc(mode)}</option>`).join("");
+        if (["__unpaid",...modes].includes(selected)) paymentSelect.value = selected;
     }
 }
 
@@ -2494,8 +2775,47 @@ function clearOrdersSearch() {
     input?.focus();
 }
 
+function resetOrdersFilters() {
+    ["ordersSearch","ordersDateFrom","ordersDateTo","ordersChannelFilter","ordersPaymentFilter","ordersStatusFilter"].forEach(id => {
+        const input = document.getElementById(id);
+        if (input) input.value = "";
+    });
+    switchOrdersTab("open");
+}
+
+function downloadOrdersCSV() {
+    const orders = (Array.isArray(currentOrders) ? currentOrders : []).filter(order => {
+        const statusFilter = document.getElementById("ordersStatusFilter")?.value || window.currentOrdersTab || "open";
+        const status = String(order.status || "").toLowerCase();
+        const group = status === "completed" ? "closed" : status === "cancelled" ? "cancelled" : "open";
+        if (group !== statusFilter) return false;
+        const date = new Date(order.created_at);
+        const dateKey = Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+        const from = document.getElementById("ordersDateFrom")?.value || "";
+        const to = document.getElementById("ordersDateTo")?.value || "";
+        const channel = String(document.getElementById("ordersChannelFilter")?.value || "").toLowerCase();
+        const payment = document.getElementById("ordersPaymentFilter")?.value || "";
+        const methods = Array.isArray(order.payment_modes) ? order.payment_modes.map(value => String(value || "").trim().toLowerCase()).filter(Boolean) : [];
+        const method = String(order.payment_method || "").trim().toLowerCase();
+        const query = String(document.getElementById("ordersSearch")?.value || "").trim().toLowerCase();
+        return (!from || dateKey >= from) && (!to || dateKey <= to) && (!channel || String(order.order_type || "").toLowerCase() === channel) && (!payment || (payment === "__unpaid" ? !methods.length && (!method || method === "unpaid" || method === "partially paid") : methods.includes(payment.toLowerCase()) || method === payment.toLowerCase())) && (!query || [order.order_number,order.id,order.order_type,order.table_number,order.pax,order.status,order.payment_method,methods.join(" "),order.customer_name,order.customer_phone].some(value => String(value || "").toLowerCase().includes(query)));
+    });
+    if (!orders.length) return alert("No orders match the current filters.");
+    const columns = [["Order number","order_number"],["Order ID","id"],["Date","created_at"],["Status","status"],["Sale channel","order_type"],["Table","table_number"],["PAX","pax"],["Customer","customer_name"],["Phone","customer_phone"],["Payment mode","payment_method"],["Subtotal","subtotal"],["Discount","discount"],["Charges","service_charge"],["GST","gst"],["Total","total"]];
+    const cell = value => '"' + String(value ?? "").replace(/"/g, '""') + '"';
+    const csv = "\uFEFF" + [columns.map(([label]) => label),...orders.map(order => columns.map(([,key]) => key === "created_at" && order[key] ? new Date(order[key]).toLocaleString() : key === "payment_method" && Array.isArray(order.payment_modes) && order.payment_modes.length ? order.payment_modes.join(" + ") : order[key]))].map(row => row.map(cell).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cafe-pos-orders-${new Date().toISOString().slice(0,10)}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url),1000);
+}
+
 window.switchOrdersTab = function(tab) {
     window.currentOrdersTab = ["closed","cancelled"].includes(tab) ? tab : "open";
+    const statusFilter = document.getElementById("ordersStatusFilter");
+    if (statusFilter) statusFilter.value = "";
     document.querySelectorAll(".orders-tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === window.currentOrdersTab));
     updateOrdersTable();
 };
@@ -2531,22 +2851,36 @@ async function viewOrder(orderId) {
 
     try {
 
-        const data =
-            await api(
-                `/orders/${orderId}`
-            );
+        const [data, paymentSummary] = await Promise.all([
+            api(`/orders/${orderId}`),
+            api(`/orders/${orderId}/payment-summary`).catch(() => null)
+        ]);
+
+        data.paymentSummary = paymentSummary;
 
 
         currentOrderForDetails =
             data;
 
-
         const order =
             data.order;
+
+        window.selectedOrderId = Number(order.id);
 
 
         const items =
             data.items || [];
+
+        const discountAdjustmentName = order.discount_adjustment_name || order.marketing_deal_name || "";
+        const chargeAdjustmentName = order.charge_adjustment_name || "";
+
+        const paymentAllocations = Array.isArray(paymentSummary?.allocations) ? paymentSummary.allocations : [];
+        const amountCollected = paymentSummary
+            ? Math.max(0, Number(paymentSummary.amountCollected || 0))
+            : paymentAllocations.reduce((sum, payment) => sum + Number(payment.amount || 0), 0);
+        const amountDue = paymentSummary
+            ? Math.max(0, Number(paymentSummary.amountDue || 0))
+            : Math.max(0, Number(order.total || 0) - amountCollected);
 
 
         const box =
@@ -2564,38 +2898,14 @@ async function viewOrder(orderId) {
 
         box.innerHTML = `
 
-            <h2>
-                ${esc(order.order_number)}
-            </h2>
+            <div class="order-detail-summary">
+                <div><span>Sale channel</span><strong>${esc(order.order_type || "-")}</strong></div>
+                <div><span>Table</span><strong>${esc(order.table_number || "-")}${order.table_number && Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}</strong></div>
+                <div><span>Status</span><strong>${esc(order.status || "-")}</strong></div>
+                <div><span>Payment mode</span><strong>${esc(order.payment_method || "Unpaid")}</strong></div>
+            </div>
 
-            <p>
-
-                <strong>Type:</strong>
-                ${esc(order.order_type)}
-
-                &nbsp;
-
-                <strong>Table:</strong>
-                ${esc(
-                    order.table_number || "-"
-                )}
-
-            </p>
-
-
-            <p>
-
-                <strong>Status:</strong>
-                ${esc(order.status)}
-
-                &nbsp;
-
-                <strong>Payment:</strong>
-                ${esc(
-                    order.payment_method || "-"
-                )}
-
-            </p>
+            ${order.customer_name || order.customer_phone || order.customer_gstin || order.customer_address ? `<div class="order-customer-info"><strong>Customer</strong><span>${esc(order.customer_name || "")}${order.customer_phone ? ` · ${esc(order.customer_phone)}` : ""}${order.customer_email ? ` · ${esc(order.customer_email)}` : ""}</span>${order.customer_gstin ? `<small>GSTIN: ${esc(order.customer_gstin)}</small>` : ""}${order.customer_address ? `<small>${esc(order.customer_address)}${order.customer_city ? `, ${esc(order.customer_city)}` : ""}${order.customer_state ? `, ${esc(order.customer_state)}` : ""}</small>` : ""}</div>` : ""}
 
 
             <div class="table-container">
@@ -2629,7 +2939,7 @@ async function viewOrder(orderId) {
                                             <td>
                                                 ${esc(
                                                     item.item_name
-                                                )}
+                                                )}${formatItemOptionNames(item.options)?`<br><small>${esc(formatItemOptionNames(item.options))}</small>`:""}
                                             </td>
 
                                             <td>
@@ -2663,7 +2973,7 @@ async function viewOrder(orderId) {
             </div>
 
 
-            <div class="bill">
+        <div class="bill">
 
                 <div>
 
@@ -2686,6 +2996,9 @@ async function viewOrder(orderId) {
 
                 </div>
 
+                ${Number(order.discount||0)>0?`<div><span>${discountAdjustmentName?`Discount · ${esc(discountAdjustmentName)}`:'Discount'}</span><span>−${money(order.discount)}</span></div>`:''}
+                ${Number(order.service_charge||0)>0?`<div><span>${chargeAdjustmentName?`Charge · ${esc(chargeAdjustmentName)}`:'Charges'}</span><span>${money(order.service_charge)}</span></div>`:''}
+
 
                 <div class="total">
 
@@ -2697,23 +3010,37 @@ async function viewOrder(orderId) {
 
                 </div>
 
+                <div class="order-details-payment-summary">
+                    <strong>Payment details</strong>
+                    ${paymentAllocations.length ? paymentAllocations.map(payment => `<div><span>${esc(payment.method || "Payment")}</span><strong>${money(payment.amount || 0)}</strong></div>`).join("") : `<div><span>${esc(order.payment_method || "Payment")}</span><strong>${amountCollected > 0 ? money(amountCollected) : "—"}</strong></div>`}
+                    <div><span>Amount Collected</span><strong>${money(amountCollected)}</strong></div>
+                    <div class="due"><span>Amount Due</span><strong>${money(amountDue)}</strong></div>
+                </div>
+
             </div>
 
         `;
 
 
-        const modal =
-            document.getElementById(
-                "orderDetailsModal"
-            );
-
-
-        if (modal) {
-
-            modal.style.display =
-                "flex";
-
+        const empty = document.getElementById("orderDetailsEmpty");
+        const actions = document.getElementById("orderDetailsActions");
+        const title = document.getElementById("orderDetailsPanelTitle");
+        const hint = document.getElementById("orderDetailsPanelHint");
+        if (empty) empty.hidden = true;
+        if (box) box.hidden = false;
+        if (title) title.textContent = order.order_number || `Order #${order.id}`;
+        if (hint) hint.textContent = `${order.created_at ? new Date(order.created_at).toLocaleString() : ""}${order.customer_name ? ` · ${order.customer_name}` : ""}`;
+        if (actions) {
+            const status = String(order.status || "").toLowerCase();
+            const closed = status === "completed";
+            const cancelled = status === "cancelled";
+            const canEdit = closed
+                ? (order.bill_printed_at ? hasPermission("orders", "edit_after_print") || hasPermission("orders", "edit_closed") : hasPermission("orders", "edit_closed"))
+                : !cancelled && (hasPermission("orders", "edit_open") || hasPermission("orders", "edit"));
+            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${!closed && !cancelled ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
+            actions.hidden = false;
         }
+        document.querySelectorAll(".order-list-card").forEach(card => card.classList.toggle("selected", Number(card.getAttribute("onclick")?.match(/\d+/)?.[0]) === Number(order.id)));
 
 
     } catch (error) {
@@ -2726,20 +3053,18 @@ async function viewOrder(orderId) {
 
 
 function closeOrderDetails() {
-
-    const modal =
-        document.getElementById(
-            "orderDetailsModal"
-        );
-
-
-    if (modal) {
-
-        modal.style.display =
-            "none";
-
-    }
-
+    window.selectedOrderId = null;
+    const title = document.getElementById("orderDetailsPanelTitle");
+    const hint = document.getElementById("orderDetailsPanelHint");
+    const empty = document.getElementById("orderDetailsEmpty");
+    const content = document.getElementById("orderDetailsContent");
+    const actions = document.getElementById("orderDetailsActions");
+    if (title) title.textContent = "Select an order";
+    if (hint) hint.textContent = "Choose an order from the list to see its items and bill.";
+    if (empty) empty.hidden = false;
+    if (content) { content.hidden = true; content.innerHTML = ""; }
+    if (actions) { actions.hidden = true; actions.innerHTML = ""; }
+    document.querySelectorAll(".order-list-card.selected").forEach(card => card.classList.remove("selected"));
 }
 
 
@@ -2814,22 +3139,35 @@ async function printCurrentOrder() {
     const sourceItems = currentOrderForDetails.items || [];
 
     window.currentBillData = {
+        orderId: Number(order.id) || null,
+        isOpenOrder: String(order.status || "").toLowerCase() !== "completed",
         invoiceNumber: order.invoice_number || order.invoiceNumber || order.order_number || "-",
         orderNumber: order.order_number || "-",
         orderType: order.order_type || "-",
         tableNumber: order.table_number || "",
+        pax: order.pax || null,
         date: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
         customerName: order.customer_name || "",
         customerPhone: order.customer_phone || "",
         customerEmail: order.customer_email || "",
+        customerGstin: order.customer_gstin || "",
+        customerBirthDate: order.customer_birth_date || "",
+        customerAddress: order.customer_address || "",
+        customerCity: order.customer_city || "",
+        customerState: order.customer_state || "",
         items: sourceItems.map(function(item) {
             return {
                 name: item.item_name || item.name || "-",
                 quantity: Number(item.quantity || 0),
-                price: Number(item.price || 0)
+                price: Number(item.price || 0),
+                options: item.options || []
             };
         }),
         subtotal: Number(order.subtotal || 0),
+        discount: Number(order.discount || 0),
+        discountName: order.discount_adjustment_name || order.marketing_deal_name || "",
+        serviceCharge: Number(order.service_charge || 0),
+        chargeName: order.charge_adjustment_name || "",
         gst: Number(order.gst || 0),
         total: Number(order.total || 0),
         paymentMethod: order.payment_method || "-"
@@ -3735,6 +4073,9 @@ async function updateReservationStatus(
 // ==========================================
 
 let kotGroups=[];
+let kotGroupSelectedTargets={categories:new Set(),items:new Set()};
+let kotGroupWorkingTargets=null;
+let kotGroupTargetType="categories";
 
 function getKOTGroupName(id){
     const g=(kotGroups||[]).find(x=>Number(x.id)===Number(id));
@@ -3753,15 +4094,19 @@ async function loadKOTGroups(){
     try{
         kotGroups=await api("/kot-groups");
         const c=document.getElementById("kotGroupsContainer");
-        if(!c)return;
+        setText("kotGroupCount",kotGroups.length);
         populateKOTGroupSelect();
-        if(!kotGroups.length){c.innerHTML='<div class="settings-card"><p>No KOT groups created yet.</p></div>';return;}
-        c.innerHTML=kotGroups.map(g=>`<div class="settings-card"><div class="access-profile-card-head"><div><h3>${esc(g.name)}</h3><p>${esc(g.description||"")}</p></div><span class="access-status ${g.active?'active':'inactive'}">${g.active?'Active':'Inactive'}</span></div><div class="access-summary-grid"><div class="access-summary-item"><strong>Station</strong><span>${esc(g.station||"Kitchen")}</span></div><div class="access-summary-item"><strong>Sort</strong><span>${Number(g.sort_order||0)}</span></div></div><div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;"><button onclick="editKOTGroup(${g.id})">✏️ Edit</button><button onclick="deleteKOTGroup(${g.id})">🗑️ Delete</button></div></div>`).join("");
-    }catch(e){const c=document.getElementById("kotGroupsContainer");if(c)c.innerHTML=`<div class="settings-card"><p>Failed to load KOT Groups: ${esc(e.message)}</p></div>`;}
+        if(!c)return;
+        if(!kotGroups.length){c.innerHTML='<div class="kot-groups-empty"><strong>No KOT groups yet</strong><span>Create a group to route menu categories or items to a printer.</span></div>';return;}
+        c.innerHTML=kotGroups.map(g=>{
+            const categoryCount=Array.isArray(g.category_names)?g.category_names.length:0;
+            const itemCount=Array.isArray(g.item_ids)?g.item_ids.length:0;
+            return `<article class="kot-group-admin-card"><div class="kot-group-card-heading"><span class="kot-group-card-icon">🧩</span><div><h3>${esc(g.name)}</h3><p>${esc(g.description||g.station||"Kitchen station")}</p></div><span class="access-status ${g.active?'active':'inactive'}">${g.active?'Active':'Inactive'}</span></div><div class="kot-group-card-meta"><span><small>STATION</small><strong>${esc(g.station||"Kitchen")}</strong></span><span><small>ROUTES</small><strong>${categoryCount} categories · ${itemCount} items</strong></span></div><div class="kot-group-card-actions"><button type="button" class="table-action-btn" onclick="editKOTGroup(${Number(g.id)})">Edit group</button><button type="button" class="cancel-btn" onclick="deleteKOTGroup(${Number(g.id)})">Delete</button></div></article>`;
+        }).join("");
+    }catch(e){const c=document.getElementById("kotGroupsContainer");if(c)c.innerHTML=`<div class="kot-groups-empty">Failed to load KOT groups: ${esc(e.message)}</div>`;}
 }
 
-function openKOTGroupModal(group){
-    document.getElementById("kotGroupModal").style.display="flex";
+function openKOTGroupModal(group=null){
     document.getElementById("kotGroupModalTitle").textContent=group?"Edit KOT Group":"Add KOT Group";
     document.getElementById("kotGroupId").value=group?.id||"";
     document.getElementById("kotGroupName").value=group?.name||"";
@@ -3769,18 +4114,103 @@ function openKOTGroupModal(group){
     document.getElementById("kotGroupStation").value=group?.station||"Kitchen";
     document.getElementById("kotGroupSort").value=group?.sort_order??0;
     document.getElementById("kotGroupActive").checked=group?.active!==false;
+    showKOTGroupsView("editor");
+    populateKOTGroupTargets(group||{}).catch(error=>alert("Unable to load printer and routing choices: "+error.message));
 }
-function closeKOTGroupModal(){document.getElementById("kotGroupModal").style.display="none";}
+function closeKOTGroupModal(){document.getElementById("kotGroupTargetPickerModal")?.style.setProperty("display","none");showKOTGroupsView("groups");}
 function editKOTGroup(id){const g=(kotGroups||[]).find(x=>Number(x.id)===Number(id));if(g)openKOTGroupModal(g);}
 async function saveKOTGroup(){
     const id=Number(document.getElementById("kotGroupId").value||0);
-    const body={name:document.getElementById("kotGroupName").value.trim(),description:document.getElementById("kotGroupDescription").value.trim(),station:document.getElementById("kotGroupStation").value,sortOrder:Number(document.getElementById("kotGroupSort").value||0),active:document.getElementById("kotGroupActive").checked};
+    const body={name:document.getElementById("kotGroupName").value.trim(),description:document.getElementById("kotGroupDescription").value.trim(),station:document.getElementById("kotGroupStation").value,sortOrder:Number(document.getElementById("kotGroupSort").value||0),active:document.getElementById("kotGroupActive").checked,printerId:Number(document.getElementById("kotGroupPrinter").value||0)||null,categoryNames:[...kotGroupSelectedTargets.categories],itemIds:[...kotGroupSelectedTargets.items].map(Number)};
     if(!body.name)return alert("Enter a KOT group name.");
     try{await api(id?`/kot-groups/${id}`:"/kot-groups",{method:id?"PUT":"POST",body:JSON.stringify(body)});closeKOTGroupModal();await loadKOTGroups();alert(id?"KOT group updated! ✅":"KOT group created! ✅");}catch(e){alert(e.message);}
 }
 async function deleteKOTGroup(id){
     if(!confirm("Delete this KOT group? Existing KOT history will keep working; menu items will become unassigned."))return;
     try{await api(`/kot-groups/${id}`,{method:"DELETE"});await loadKOTGroups();await loadMenuManagement();alert("KOT group deleted. ✅");}catch(e){alert(e.message);}
+}
+
+async function populateKOTGroupTargets(group={}){
+    const printerSelect=document.getElementById("kotGroupPrinter");
+    const [printers,menu]=await Promise.all([
+        api("/kot-groups/printers").catch(()=>[]),
+        currentMenu?.length?Promise.resolve(currentMenu):api("/menu").catch(()=>[])
+    ]);
+    currentMenu=menu||[];
+    if(printerSelect)printerSelect.innerHTML='<option value="">Use the regular print dialog</option>'+(printers||[]).map(p=>`<option value="${Number(p.id)}">${esc(p.name)} · ${esc(p.connection_type||"local")}</option>`).join("");
+    if(printerSelect)printerSelect.value=group.printer_id?String(group.printer_id):"";
+    try{if(!menuCategories.length)await loadMenuCategories();}catch(_){/* current menu still supplies category names */}
+    kotGroupSelectedTargets={
+        categories:new Set((Array.isArray(group.category_names)?group.category_names:[]).map(String)),
+        items:new Set((Array.isArray(group.item_ids)?group.item_ids:[]).map(String))
+    };
+    renderKOTGroupTargetSummaries();
+}
+
+function getKOTGroupTargetOptions(type){
+    if(type==="categories"){
+        return [...new Set([...(menuCategories||[]).map(category=>String(category.name||"").trim()),...(currentMenu||[]).map(item=>String(item.category||"").trim())].filter(Boolean))]
+            .sort((a,b)=>a.localeCompare(b)).map(value=>({value,label:value,detail:"Category"}));
+    }
+    return (currentMenu||[]).map(item=>({value:String(item.id),label:item.name||"Menu item",detail:item.category||"Uncategorized"}));
+}
+
+function renderKOTGroupTargetSummaries(){
+    const categories=[...kotGroupSelectedTargets.categories];
+    const items=[...kotGroupSelectedTargets.items];
+    const categorySummary=document.getElementById("kotGroupCategoriesSummary");
+    const itemSummary=document.getElementById("kotGroupItemsSummary");
+    if(categorySummary)categorySummary.textContent=categories.length?`${categories.length} categor${categories.length===1?"y":"ies"} selected`:"No categories selected";
+    if(itemSummary)itemSummary.textContent=items.length?`${items.length} item${items.length===1?"":"s"} selected`:"No items selected";
+    const categoryChips=document.getElementById("kotGroupCategoriesChips");
+    const itemChips=document.getElementById("kotGroupItemsChips");
+    if(categoryChips)categoryChips.innerHTML=categories.slice(0,4).map(value=>`<span>${esc(value)}</span>`).join("")+(categories.length>4?`<span class="kot-target-more">+${categories.length-4} more</span>`:"");
+    if(itemChips)itemChips.innerHTML=items.slice(0,4).map(id=>{const item=currentMenu.find(entry=>String(entry.id)===String(id));return `<span>${esc(item?.name||`Item ${id}`)}</span>`;}).join("")+(items.length>4?`<span class="kot-target-more">+${items.length-4} more</span>`:"");
+}
+
+function openKOTGroupTargetPicker(type){
+    kotGroupTargetType=type==="items"?"items":"categories";
+    kotGroupWorkingTargets=new Set(kotGroupSelectedTargets[kotGroupTargetType]);
+    const title=document.getElementById("kotGroupTargetPickerTitle");
+    const search=document.getElementById("kotGroupTargetSearch");
+    if(title)title.textContent=kotGroupTargetType==="categories"?"Select categories":"Select menu items";
+    if(search){search.value="";search.placeholder=kotGroupTargetType==="categories"?"Search categories…":"Search menu items…";}
+    renderKOTGroupTargetOptions();
+    document.getElementById("kotGroupTargetPickerModal").style.display="flex";
+}
+
+function renderKOTGroupTargetOptions(){
+    const box=document.getElementById("kotGroupTargetOptions");
+    if(!box)return;
+    const term=String(document.getElementById("kotGroupTargetSearch")?.value||"").trim().toLowerCase();
+    const options=getKOTGroupTargetOptions(kotGroupTargetType).filter(option=>`${option.label} ${option.detail}`.toLowerCase().includes(term));
+    box.innerHTML=options.length?options.map(option=>`<label class="kot-target-option"><input type="checkbox" data-target-value="${esc(option.value)}" ${kotGroupWorkingTargets?.has(String(option.value))?"checked":""} onchange="updateKOTGroupTargetSelection(this)"><span class="kot-target-option-copy"><strong>${esc(option.label)}</strong><small>${esc(option.detail)}</small></span></label>`).join(""):'<div class="kot-target-empty">No matching options.</div>';
+    const selectAll=document.getElementById("kotGroupTargetSelectAll");
+    const visible=[...box.querySelectorAll("input[type=checkbox]")];
+    if(selectAll){selectAll.checked=visible.length>0&&visible.every(input=>input.checked);selectAll.indeterminate=visible.some(input=>input.checked)&&!selectAll.checked;selectAll.disabled=!visible.length;}
+}
+
+function updateKOTGroupTargetSelection(input){
+    if(!kotGroupWorkingTargets||!input)return;
+    const value=String(input.dataset.targetValue||"");
+    if(input.checked)kotGroupWorkingTargets.add(value);else kotGroupWorkingTargets.delete(value);
+    renderKOTGroupTargetOptions();
+}
+
+function toggleAllKOTGroupTargets(checked){
+    if(!kotGroupWorkingTargets)return;
+    const term=String(document.getElementById("kotGroupTargetSearch")?.value||"").trim().toLowerCase();
+    const visible=getKOTGroupTargetOptions(kotGroupTargetType).filter(option=>`${option.label} ${option.detail}`.toLowerCase().includes(term));
+    visible.forEach(option=>checked?kotGroupWorkingTargets.add(String(option.value)):kotGroupWorkingTargets.delete(String(option.value)));
+    renderKOTGroupTargetOptions();
+}
+
+function closeKOTGroupTargetPicker(){document.getElementById("kotGroupTargetPickerModal")?.style.setProperty("display","none");kotGroupWorkingTargets=null;}
+
+function confirmKOTGroupTargetPicker(){
+    if(kotGroupWorkingTargets)kotGroupSelectedTargets[kotGroupTargetType]=new Set(kotGroupWorkingTargets);
+    renderKOTGroupTargetSummaries();
+    closeKOTGroupTargetPicker();
 }
 
 // ==========================================
@@ -3912,7 +4342,7 @@ function stopKOTAlertPolling(){
 function renderKOT(){
     const items=Array.isArray(kotState.items)?kotState.items:[],groups={};
     items.forEach(item=>{
-        if(!groups[item.order_id])groups[item.order_id]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,status:item.status,createdAt:item.created_at,items:[]};
+        if(!groups[item.order_id])groups[item.order_id]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,pax:item.pax,status:item.status,createdAt:item.created_at,items:[]};
         groups[item.order_id].items.push(item);
         const ss=groups[item.order_id].items.map(i=>i.status);
         groups[item.order_id].status=ss.every(s=>s==="Completed")?"Completed":ss.some(s=>s==="Ready")?"Ready":ss.some(s=>s==="Preparing")?"Preparing":"Pending";
@@ -3929,9 +4359,9 @@ function renderKOT(){
         card.className="kot-card";
         const byGroup={};
         (order.items||[]).forEach(item=>{const key=item.kot_group_id?String(item.kot_group_id):"none";if(!byGroup[key])byGroup[key]={name:item.kot_group_name||"Unassigned",station:item.kot_group_station||"Kitchen",items:[]};byGroup[key].items.push(item);});
-        const groupedHtml=Object.values(byGroup).map(g=>`<div class="kot-group-block"><div class="kot-group-heading"><strong>${esc(g.name)}</strong><span>${esc(g.station)}</span></div>${g.items.map(item=>`<div class="kot-item"><span>${esc(item.item_name)}</span><strong>× ${item.quantity}</strong></div>`).join("")}</div>`).join("");
+        const groupedHtml=Object.values(byGroup).map(g=>`<div class="kot-group-block"><div class="kot-group-heading"><strong>${esc(g.name)}</strong><span>${esc(g.station)}</span></div>${g.items.map(item=>{const options=formatItemOptionNames(item.options);return `<div class="kot-item"><span class="kot-item-copy">${esc(item.item_name)}${options?`<small class="kot-item-options">${esc(options)}</small>`:""}</span><strong>× ${item.quantity}</strong></div>`;}).join("")}</div>`).join("");
         const actions=(appSettings.kotEnabled===false)?'<span class="access-muted">KOT workflow disabled in Settings</span>':(next?`<button class="big-btn" onclick="updateKOTOrder(${order.orderId}, '${next}')">${next==="Preparing"?"👨‍🍳 Start Preparing":next==="Ready"?"✅ Mark Ready":"✅ Complete"}</button>`:`<span>✅ Completed</span>`);
-        card.innerHTML=`<div class="kot-header"><strong>${esc(order.orderNumber)}</strong><span>${esc(order.orderType)}</span></div><div class="kot-table">Table: ${esc(order.tableNumber||"-")}</div><div class="kot-items">${groupedHtml}</div><div class="kot-status">Status: <strong>${esc(order.status)}</strong></div><div class="kot-actions">${actions}${appSettings.kotEnabled!==false?`<button class="big-btn" onclick="printKOT(${order.orderId})">🖨️ Print KOT</button>`:""}</div>`;
+        card.innerHTML=`<div class="kot-header"><strong>${esc(order.orderNumber)}</strong><span>${esc(order.orderType)}</span></div><div class="kot-table">Table: ${esc(order.tableNumber||"-")}${Number(order.pax)>0?` · ${Number(order.pax)} PAX`:""}</div><div class="kot-items">${groupedHtml}</div><div class="kot-status">Status: <strong>${esc(order.status)}</strong></div><div class="kot-actions">${actions}${appSettings.kotEnabled!==false?`<button class="big-btn" onclick="printKOT(${order.orderId})">🖨️ Print KOT</button>`:""}</div>`;
         container.appendChild(card);
     });
 }
@@ -4397,22 +4827,165 @@ async function printKOT(orderId) {
 }
 
 
+async function printOpenOrder(orderId){
+    if(!hasPermission("orders","print_open"))return alert("You do not have permission to print open orders.");
+    try{
+        const [data,paymentSummary]=await Promise.all([
+            api(`/orders/${Number(orderId)}`),
+            api(`/orders/${Number(orderId)}/payment-summary`).catch(()=>null)
+        ]);
+        const order=data.order||{};
+        if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
+        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[]}))};
+        window.openBillPreview(bill);
+        await window.printThermalBill();
+    }catch(error){alert("Unable to print open order: "+error.message);}
+}
+
+async function printKOT(orderId){
+    try{
+        const all=await api("/kot?range=all");
+        const tickets=all.filter(item=>Number(item.order_id)===Number(orderId));
+        if(!tickets.length)return alert("KOT not found.");
+        const buckets=new Map();
+        tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
+        for(const [groupId,groupTickets] of buckets){
+            const first=groupTickets[0],groupName=first.kot_group_name||"Kitchen";
+            const receipt=[appSettings.restaurantName||"CAFE POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Time: ${new Date(first.created_at||Date.now()).toLocaleString()}`,"--------------------------------"];
+            groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options);receipt.push(`${item.item_name||"Item"} x${Number(item.quantity||0)}`);if(options)receipt.push(`  + ${options}`);});
+            receipt.push("--------------------------------", "KITCHEN COPY", "", "");
+            const text=receipt.join("\n");
+            const printerId=Number(first.printer_id||0);
+            if(printerId&&first.printer_connection_type==="local"){
+                const response=await fetch((window.CAFE_PRINT_SERVICE_URL||"http://127.0.0.1:18181")+"/print",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"})});
+                const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||"Windows print service rejected the KOT.");
+            }else if(printerId&&first.printer_connection_type==="network"){
+                await api(`/printers/${printerId}/print?source=kot`,{method:"POST",body:JSON.stringify({receipt:text,settings:appSettings})});
+            }else if(printerId&&first.printer_connection_type==="bluetooth"){
+                await sendBluetoothPrinterText({name:first.printer_name,bluetooth_name:first.printer_bluetooth_name,service_uuid:first.printer_service_uuid,characteristic_uuid:first.printer_characteristic_uuid},text);
+            }else{
+                const win=window.open("","_blank","width=420,height=700");
+                if(!win)return alert("Please allow pop-ups to print KOT.");
+                const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options);return `<div class="item"><span>${esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>× ${Number(item.quantity||0)}</strong></div>`;}).join("");
+                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"CAFE POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>${esc(new Date(first.created_at||Date.now()).toLocaleString())}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+                win.document.close();
+            }
+        }
+        showProfileToast("KOT sent to the assigned group printers.");
+    }catch(error){console.error("Print KOT failed:",error);alert("Unable to print KOT: "+error.message);}
+}
+
 // ==========================================
 // MENU MANAGEMENT
 // ==========================================
 
 async function loadMenuManagement(){
-    try{currentMenu=await api('/menu');try{kotGroups=await api('/kot-groups');}catch(_){kotGroups=kotGroups||[];}populateKOTGroupSelect();const list=document.querySelector('#menu .menu-list');if(!list)return;list.innerHTML=`<div class="menu-modern-head"><div><strong>${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;renderMenuManagementCards();}catch(e){console.error('Menu management failed:',e);}
+    try{
+        await loadMenuCategories();
+        currentMenu=await api('/menu');
+        setText('menuItemCount',currentMenu.length);
+        try{kotGroups=await api('/kot-groups');}catch(_){kotGroups=kotGroups||[];}
+        try{menuOptionSets=(await api('/menu-option-sets')).optionSets||[];}catch(_){menuOptionSets=[];}
+        renderMenuOptionSetsOverview();
+        populateKOTGroupSelect();
+        const list=document.querySelector('#menu .menu-list');
+        if(!list)return;
+        list.innerHTML=`<div class="menu-modern-head"><div><strong>${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;
+        renderMenuManagementCards();
+        renderMenuCategoryMaster();
+    }catch(e){console.error('Menu management failed:',e);}
 }
 function renderMenuManagementCards(){const grid=document.getElementById('menuManagementGrid');if(!grid)return;const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();const nature=String(document.getElementById('menuManagementNature')?.value||'');const items=currentMenu.filter(item=>{const hay=`${item.name} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();return(!q||hay.includes(q))&&(!nature||item.nature===nature);});grid.innerHTML=items.length?items.map(item=>{const ch=item.channel_prices||{};const vs=item.variants||[];return `<article class="menu-admin-card ${item.available?'':'disabled'}"><div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${item.available?'active':'inactive'}">${item.available?'Active':'Disabled'}</span></div><div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div><div><small>KOT</small><strong>${esc(item.kot_group_name||'Not routed')}</strong></div></div><div class="menu-channel-chips"><span>Dine-in ${money(ch.dine_in??item.price)}</span><span>Takeaway ${money(ch.takeaway??item.price)}</span><span>Delivery ${money(ch.delivery??item.price)}</span><span>Online ${money(ch.online??item.price)}</span></div>${vs.length?`<div class="menu-variant-list"><strong>Variants</strong>${vs.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}<div class="menu-admin-actions"><button class="table-action-btn" onclick="editMenuItem(${item.id})">✏️ Edit</button>${item.available?`<button class="table-action-btn" onclick="disableMenuItem(${item.id})">🗑️ Disable</button>`:`<button class="table-action-btn" onclick="enableMenuItem(${item.id})">♻️ Enable</button>`}</div></article>`;}).join(''):'<div class="menu-empty-state">No matching menu items.</div>';}
 function filterMenuManagement(){renderMenuManagementCards();}
-function openAddMenuModal(item=null){editingMenuItemId=item?.id||null;populateKOTGroupSelect();populateMenuCategorySelect(item?.category||'');document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';document.getElementById('menuName').value=item?.name||'';document.getElementById('menuPrice').value=item?.price??'';document.getElementById('menuCategory').value=item?.category||'';document.getElementById('menuNature').value=item?.nature||'Goods';document.getElementById('menuUnit').value=item?.unit||'ea';document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';const cp=item?.channel_prices||{};for(const k of ['dine_in','takeaway','delivery','online'])document.getElementById('menuPrice_'+k).value=cp[k]??item?.price??'';renderMenuVariantsEditor(item?.variants||[]);document.getElementById('addMenuModal').style.display='flex';}
-function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;}
+function openAddMenuModal(item=null){editingMenuItemId=item?.id||null;currentMenuImageData=item?.image_url||item?.imageUrl||null;populateKOTGroupSelect();populateMenuCategorySelect(item?.category||'');document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';document.getElementById('menuName').value=item?.name||'';document.getElementById('menuPrice').value=item?.price??'';document.getElementById('menuCategory').value=item?.category||'';document.getElementById('menuNature').value=item?.nature||'Goods';document.getElementById('menuUnit').value=item?.unit||'ea';document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';const cp=item?.channel_prices||{};for(const k of ['dine_in','takeaway','delivery','online'])document.getElementById('menuPrice_'+k).value=cp[k]??item?.price??'';const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();renderMenuOptionSetPicker(item?.option_set_ids||[]);renderMenuVariantsEditor(item?.variants||[]);document.getElementById('addMenuModal').style.display='flex';}
+function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;currentMenuImageData=null;}
 function menuVariantEditorRow(v={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(v.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(v.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${v.price??''}"><select class="variant-unit"><option value="ea" ${v.unit==='ea'?'selected':''}>ea</option><option value="g" ${v.unit==='g'?'selected':''}>g</option><option value="kg" ${v.unit==='kg'?'selected':''}>kg</option><option value="ml" ${v.unit==='ml'?'selected':''}>ml</option><option value="lt" ${v.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
 function renderMenuVariantsEditor(vs){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(vs||[]).map(menuVariantEditorRow).join('');}
 function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
 async function addMenuItem(){const name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');const taxMap={0:{rate:0,cgst:0,sgst:0,igst:0,label:'Tax 0%'},5:{rate:5,cgst:2.5,sgst:2.5,igst:5,label:'GST 5%'},18:{rate:18,cgst:9,sgst:9,igst:18,label:'GST 18%'},28:{rate:28,cgst:14,sgst:14,igst:28,label:'GST 28%'}};const t=taxMap[document.getElementById('menuTaxProfile').value]||taxMap[5];const channelPrices={};for(const k of ['dine_in','takeaway','delivery','online']){const raw=String(document.getElementById('menuPrice_'+k)?.value||'').trim();if(raw!==''){const n=Number(raw);if(Number.isFinite(n)&&n>=0)channelPrices[k]=n;}}const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(r=>({name:r.querySelector('.variant-name')?.value.trim(),sku:r.querySelector('.variant-sku')?.value.trim(),price:Number(r.querySelector('.variant-price')?.value),unit:r.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);const existingMenu=editingMenuItemId?currentMenu.find(x=>Number(x.id)===Number(editingMenuItemId)):null;const payload={name,price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,variants,available:existingMenu?existingMenu.available!==false:true};try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(editingMenuItemId?'Menu item updated! ✅':'Menu item added! 🍔');}catch(e){alert(e.message);}}
 async function editMenuItem(id){const item=currentMenu.find(x=>Number(x.id)===Number(id));if(item)openAddMenuModal(item);}
+function renderMenuItemImagePreview(){const box=document.getElementById('menuImagePreview');if(!box)return;box.innerHTML=currentMenuImageData?`<img src="${esc(currentMenuImageData)}" alt="Menu item preview">`:'<span>No image selected</span>';}
+async function previewMenuItemImage(file){
+    if(!file)return;
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type))return alert('Choose a JPG, PNG or WebP image.');
+    if(file.size>8*1024*1024)return alert('Choose an image smaller than 8 MB.');
+    try{
+        const bitmap=await createImageBitmap(file),scale=Math.min(1,1000/Math.max(bitmap.width,bitmap.height)),canvas=document.createElement('canvas');
+        canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+        canvas.getContext('2d').drawImage(bitmap,0,0,canvas.width,canvas.height);bitmap.close?.();
+        currentMenuImageData=canvas.toDataURL('image/jpeg',0.84);
+        if(currentMenuImageData.length>2_000_000)throw new Error('This image is too detailed. Choose a smaller file.');
+        renderMenuItemImagePreview();
+    }catch(error){alert(error.message||'Unable to read this image.');}
+}
+function clearMenuItemImage(){currentMenuImageData=null;const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();}
+function renderMenuOptionSetPicker(selected=[]){const box=document.getElementById('menuOptionSetPicker');if(!box)return;const selectedIds=new Set((selected||[]).map(String));box.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<label class="menu-option-set-choice"><input type="checkbox" value="${esc(set.id)}" ${selectedIds.has(String(set.id))?'checked':''}><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<span class="access-muted">No option sets yet. Create one to attach it to this item.</span>';}
+async function saveMenuItemV2(){
+    const wasEditing=Boolean(editingMenuItemId),name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();
+    if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');
+    const taxMap={0:{rate:0,cgst:0,sgst:0,igst:0,label:'Tax 0%'},5:{rate:5,cgst:2.5,sgst:2.5,igst:5,label:'GST 5%'},18:{rate:18,cgst:9,sgst:9,igst:18,label:'GST 18%'},28:{rate:28,cgst:14,sgst:14,igst:28,label:'GST 28%'}};
+    const t=taxMap[document.getElementById('menuTaxProfile').value]||taxMap[5],channelPrices={};
+    for(const key of ['dine_in','takeaway','delivery','online']){const raw=String(document.getElementById('menuPrice_'+key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[key]=value;}}
+    const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
+    const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
+    const payload={name,price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
+    try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(wasEditing?'Menu item updated.':'Menu item added.');}catch(error){alert(error.message);}
+}
+
+function optionSetNewId(){return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;}
+function renderMenuOptionSetsOverview(){
+    const list=document.getElementById('menuOptionSetOverviewList');
+    setText('menuOptionSetCount',menuOptionSets.length);
+    if(!list)return;
+    list.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<article class="menu-option-set-summary-card"><div class="menu-option-set-summary-top"><span class="menu-option-set-summary-icon">🧩</span><span class="menu-option-set-summary-count">${(set.options||[]).length} choices</span></div><h3>${esc(set.name)}</h3><p>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} selections allowed</p><div class="menu-option-set-summary-choices">${(set.options||[]).slice(0,5).map(option=>`<span>${esc(option.name)}</span>`).join('')}${(set.options||[]).length>5?`<small>+${set.options.length-5} more</small>`:''}</div></article>`).join(''):'<div class="menu-option-sets-empty"><span>🧩</span><strong>No item option sets yet</strong><p>Create option sets here, then attach them to menu items.</p><button type="button" class="big-btn" onclick="openOptionSetsModal()">＋ Create an option set</button></div>';
+}
+async function openOptionSetsModal(){
+    try{menuOptionSets=(await api('/menu-option-sets')).optionSets||[];}catch(error){alert('Could not load option sets: '+error.message);return;}
+    if(!currentMenu.length){try{currentMenu=await api('/menu');}catch(error){alert('Could not load menu items: '+error.message);return;}}
+    renderMenuOptionSetsOverview();renderOptionSetList();newOptionSet();document.getElementById('menuOptionSetsModal').style.display='flex';
+}
+function closeOptionSetsModal(){document.getElementById('menuOptionSetsModal').style.display='none';renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));}
+function renderOptionSetList(selectedId=''){const select=document.getElementById('optionSetSelect');if(!select)return;select.innerHTML=menuOptionSets.map(set=>`<option value="${esc(set.id)}">${esc(set.name)}</option>`).join('');if(selectedId)select.value=String(selectedId);}
+function availableOptionMenuItems(){return (currentMenu||[]).filter(item=>item&&item.id&&item.available!==false);}
+function renderOptionSetMenuItemChoices(){
+    const select=document.getElementById('optionSetMenuItem');if(!select)return;
+    const selectedIds=new Set([...document.querySelectorAll('#optionSetItems .option-set-item-row')].map(row=>String(row.dataset.menuItemId||'')));
+    const term=String(document.getElementById('optionSetMenuItemSearch')?.value||'').trim().toLocaleLowerCase();
+    const choices=availableOptionMenuItems().filter(item=>!selectedIds.has(String(item.id))).filter(item=>!term||`${item.name||''} ${item.category||''}`.toLocaleLowerCase().includes(term));
+    const prompt=term?(choices.length?'Choose a matching menu item':'No available menu items match your search'):'Choose an available menu item';
+    select.innerHTML=`<option value="">${prompt}</option>`+choices.map(item=>`<option value="${esc(item.id)}">${esc(item.name)}${item.category?` · ${esc(item.category)}`:''} · ${money(item.price||0)}</option>`).join('');
+}
+function renderOptionSetItems(options=[]){
+    const box=document.getElementById('optionSetItems');if(!box)return;
+    const linked=[],missing=[];
+    (options||[]).forEach(option=>{
+        const item=availableOptionMenuItems().find(candidate=>String(candidate.id)===String(option.menuItemId))||availableOptionMenuItems().find(candidate=>String(candidate.name||'').trim().toLowerCase()===String(option.name||'').trim().toLowerCase());
+        if(item)linked.push({item,option});else missing.push(option);
+    });
+    box.innerHTML=linked.map(({item,option})=>`<div class="option-set-item-row" data-menu-item-id="${esc(item.id)}"><input class="option-set-option-id" type="hidden" value="${esc(option.id||'')}"><input class="option-set-menu-item-id" type="hidden" value="${esc(item.id)}"><div class="option-set-item-copy"><strong>${esc(item.name)}</strong><small>Menu price ${money(item.price||0)}</small></div><label>Extra price<input class="option-set-item-price" type="number" min="0" step="0.01" value="${Number(option.price||0)}" aria-label="Extra price for ${esc(item.name)}"></label><button type="button" class="option-set-item-remove" onclick="removeOptionSetMenuItem(this)" aria-label="Remove ${esc(item.name)}">✕</button></div>`).join('')+
+        missing.map(option=>`<div class="option-set-legacy-row" data-option-id="${esc(option.id||'')}"><span>“${esc(option.name||'Unnamed option')}” is not an available menu item. Remove it or replace it with a menu item.</span><button type="button" onclick="this.closest('.option-set-legacy-row').remove()">Remove</button></div>`).join('')+
+        (linked.length||missing.length?'':'<div class="option-set-items-empty">Add choices from the available menu items above.</div>');
+    renderOptionSetMenuItemChoices();
+}
+function addOptionSetMenuItem(){
+    const select=document.getElementById('optionSetMenuItem'),item=availableOptionMenuItems().find(candidate=>String(candidate.id)===String(select?.value||''));if(!item)return;
+    const current=[...document.querySelectorAll('#optionSetItems .option-set-item-row')].map(row=>({id:row.querySelector('.option-set-option-id')?.value,menuItemId:row.querySelector('.option-set-menu-item-id')?.value,price:Number(row.querySelector('.option-set-item-price')?.value||0),name:currentMenu.find(candidate=>String(candidate.id)===String(row.dataset.menuItemId))?.name||''}));
+    if(current.some(option=>String(option.menuItemId)===String(item.id)))return;
+    current.push({id:`${optionSetNewId()}_option`,menuItemId:item.id,name:item.name,price:Number(item.price||0)});renderOptionSetItems(current);
+}
+function removeOptionSetMenuItem(button){const row=button?.closest('.option-set-item-row');if(!row)return;row.remove();renderOptionSetMenuItemChoices();}
+function newOptionSet(){document.getElementById('optionSetSelect').value='';document.getElementById('optionSetId').value='';document.getElementById('optionSetName').value='';document.getElementById('optionSetMin').value='0';document.getElementById('optionSetMax').value='1';const search=document.getElementById('optionSetMenuItemSearch');if(search)search.value='';renderOptionSetItems([]);}
+function selectOptionSetForEdit(id){const set=menuOptionSets.find(item=>String(item.id)===String(id));if(!set)return;document.getElementById('optionSetId').value=set.id;document.getElementById('optionSetName').value=set.name;document.getElementById('optionSetMin').value=set.minSelections??0;document.getElementById('optionSetMax').value=set.maxSelections??1;const search=document.getElementById('optionSetMenuItemSearch');if(search)search.value='';renderOptionSetItems(set.options||[]);}
+async function saveOptionSet(){
+    const existingId=document.getElementById('optionSetId').value||optionSetNewId(),name=document.getElementById('optionSetName').value.trim(),minSelections=Number(document.getElementById('optionSetMin').value||0),maxSelections=Number(document.getElementById('optionSetMax').value||1);
+    if(document.querySelector('#optionSetItems .option-set-legacy-row'))return alert('Replace or remove options that are not available menu items before saving this set.');
+    const options=[...document.querySelectorAll('#optionSetItems .option-set-item-row')].map(row=>{const menuItemId=Number(row.querySelector('.option-set-menu-item-id')?.value),menuItem=availableOptionMenuItems().find(item=>Number(item.id)===menuItemId),price=Number(row.querySelector('.option-set-item-price')?.value);return menuItem?{id:row.querySelector('.option-set-option-id')?.value||`${optionSetNewId()}_option`,menuItemId,name:menuItem.name,price}:null;}).filter(Boolean);
+    if(!name||!options.length||options.some(option=>!Number.isFinite(option.price)||option.price<0)||new Set(options.map(option=>Number(option.menuItemId))).size!==options.length)return alert('Choose a set name and at least one unique, available menu item with a valid extra price.');
+    if(!Number.isInteger(minSelections)||!Number.isInteger(maxSelections)||minSelections<0||maxSelections<1||minSelections>maxSelections||maxSelections>options.length)return alert('Check the minimum and maximum selections against the number of options.');
+    const item={id:existingId,name,minSelections,maxSelections,options},next=menuOptionSets.filter(set=>String(set.id)!==String(existingId)).concat(item);
+    try{const result=await api('/menu-option-sets',{method:'PUT',body:JSON.stringify({optionSets:next})});menuOptionSets=result.optionSets||next;renderMenuOptionSetsOverview();renderOptionSetList(item.id);selectOptionSetForEdit(item.id);renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));showProfileToast('Option set saved.');}catch(error){alert(error.message);}
+}
+async function deleteOptionSet(){const id=document.getElementById('optionSetId').value;if(!id)return;const next=menuOptionSets.filter(set=>String(set.id)!==String(id));try{const result=await api('/menu-option-sets',{method:'PUT',body:JSON.stringify({optionSets:next})});menuOptionSets=result.optionSets||next;renderMenuOptionSetsOverview();renderOptionSetList();newOptionSet();renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));}catch(error){alert(error.message);}}
 async function disableMenuItem(id){if(!confirm('Disable this menu item?'))return;try{await api(`/menu/${id}`,{method:'DELETE'});await loadMenuManagement();await loadMenu();}catch(e){alert(e.message);}}
 async function enableMenuItem(id){try{await api(`/menu/${id}/enable`,{method:'PUT'});await loadMenuManagement();await loadMenu();}catch(e){alert(e.message);}}
 
@@ -4442,6 +5015,36 @@ function downloadMenuImportTemplate() {
     link.download = "cafe-pos-menu-template.csv";
     link.click();
     URL.revokeObjectURL(link.href);
+}
+
+async function downloadExistingMenuSpreadsheet() {
+    try {
+        const items = await api("/menu");
+        if (!Array.isArray(items) || !items.length) {
+            alert("No existing menu items were found to export.");
+            return;
+        }
+        const headers = ["Item Name", "Category", "Price", "Dine-in Price", "Takeaway Price", "Delivery Price", "Online Price", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
+        const rows = items.map(item => {
+            const channelPrices = item.channel_prices || {};
+            return [
+                item.name || "", item.category || "", item.price ?? "",
+                channelPrices.dine_in ?? "", channelPrices.takeaway ?? "", channelPrices.delivery ?? "", channelPrices.online ?? "",
+                item.available === false ? "FALSE" : "TRUE", item.nature || "Goods", item.unit || "ea",
+                item.tax_rate ?? "", item.tax_mode || "exclusive", item.kot_group_name || ""
+            ];
+        });
+        const csvCell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+        const csv = String.fromCharCode(0xFEFF) + [headers, ...rows].map(row => row.map(csvCell).join(",")).join(String.fromCharCode(13, 10));
+        const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `cafe-pos-existing-menu-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+        alert("Unable to export existing menu items: " + error.message);
+    }
 }
 
 function parseMenuDelimited(text, delimiter) {
@@ -4596,15 +5199,17 @@ function mapMenuImportRows(matrix) {
         }
         const rawTax = optionalNumber(row, columns.taxRate);
         const rawAvailable = valueAt(row, columns.available).toLocaleLowerCase();
+        const rawNature = valueAt(row, columns.nature);
+        const rawTaxMode = valueAt(row, columns.taxMode).toLocaleLowerCase();
         return {
             rowNumber: index + 2, name, category, price,
             channelPrices,
-            available: !["false", "no", "0", "inactive", "disabled"].includes(rawAvailable),
-            nature: ["goods", "service"].includes(valueAt(row, columns.nature).toLocaleLowerCase()) ? valueAt(row, columns.nature)[0].toUpperCase() + valueAt(row, columns.nature).slice(1).toLowerCase() : "Goods",
-            unit: valueAt(row, columns.unit) || "ea",
-            taxRate: rawTax === null ? 5 : Number.isFinite(rawTax) && rawTax >= 0 && rawTax <= 100 ? rawTax : 5,
-            taxMode: valueAt(row, columns.taxMode).toLocaleLowerCase() === "inclusive" ? "inclusive" : "exclusive",
-            kotGroup: valueAt(row, columns.kotGroup),
+            available: rawAvailable === "" ? null : !["false", "no", "0", "inactive", "disabled"].includes(rawAvailable),
+            nature: ["goods", "service"].includes(rawNature.toLocaleLowerCase()) ? rawNature[0].toUpperCase() + rawNature.slice(1).toLowerCase() : null,
+            unit: valueAt(row, columns.unit) || null,
+            taxRate: rawTax === null ? null : Number.isFinite(rawTax) && rawTax >= 0 && rawTax <= 100 ? rawTax : null,
+            taxMode: ["inclusive", "exclusive"].includes(rawTaxMode) ? rawTaxMode : null,
+            kotGroup: valueAt(row, columns.kotGroup) || null,
             error: reason || (rawTax !== null && (!Number.isFinite(rawTax) || rawTax < 0 || rawTax > 100) ? "Tax rate must be between 0 and 100." : "")
         };
     }).filter(item => item.name || item.category || item.price !== null);
@@ -4629,7 +5234,7 @@ async function readMenuImportFile(file) {
         const valid = menuImportRows.filter(row => !row.error);
         const invalid = menuImportRows.length - valid.length;
         const limited = menuImportRows.length > 500;
-        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Existing item names will be skipped.`;
+        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Blank optional columns keep current values on matching items.`;
         const sample = menuImportRows.slice(0, 8);
         preview.innerHTML = sample.length ? `<div class="table-container"><table><thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Check</th></tr></thead><tbody>${sample.map(row => `<tr><td>${esc(row.name || "-")}</td><td>${esc(row.category || "-")}</td><td>${Number.isFinite(row.price) ? money(row.price) : "-"}</td><td>${row.error ? `<span class="menu-import-error">${esc(row.error)}</span>` : "Ready"}</td></tr>`).join("")}</tbody></table></div>${menuImportRows.length > sample.length ? `<small>Showing 8 of ${menuImportRows.length} rows.</small>` : ""}` : '<p class="access-muted">No menu rows found.</p>';
         submit.disabled = !valid.length || limited;
@@ -4647,9 +5252,10 @@ async function submitMenuSpreadsheet() {
     button.disabled = true;
     button.textContent = "Importing…";
     try {
-        const result = await api("/menu/import", { method: "POST", body: JSON.stringify({ items: valid }) });
+        const mode = document.getElementById("menuImportMode")?.value || "upsert";
+        const result = await api("/menu/import", { method: "POST", body: JSON.stringify({ items: valid, mode }) });
         const warnings = Array.isArray(result.warnings) ? result.warnings.length : 0;
-        status.textContent = `${result.imported} items imported · ${result.categoriesCreated} new categor${result.categoriesCreated === 1 ? "y" : "ies"}${result.skipped?.length ? ` · ${result.skipped.length} duplicate/invalid rows skipped` : ""}${warnings ? ` · ${warnings} KOT station warning${warnings === 1 ? "" : "s"}` : ""}.`;
+        status.textContent = `${result.imported || 0} new items added · ${result.updated || 0} existing items updated · ${result.categoriesCreated || 0} new categor${result.categoriesCreated === 1 ? "y" : "ies"}${result.skipped?.length ? ` · ${result.skipped.length} rows skipped` : ""}${warnings ? ` · ${warnings} KOT station warning${warnings === 1 ? "" : "s"}` : ""}.`;
         await Promise.all([loadMenuManagement(), loadMenu(), loadMenuCategories()]);
         button.textContent = "Done";
         setTimeout(closeMenuImportModal, 900);
@@ -4700,6 +5306,10 @@ function defaultAccessPermissions() {
             permissions[accessPermissionKey(mod.key, action)] = false;
         });
     });
+    permissions["orders.edit_open"] = true;
+    permissions["orders.print_open"] = true;
+    permissions["orders.edit_after_print"] = true;
+    permissions["orders.edit_closed"] = false;
     permissions["dashboard.view"] = true;
     return permissions;
 }
@@ -4711,6 +5321,7 @@ function normalizeAccessPermissions(permissions) {
             if (permissions[key] !== undefined) result[key] = Boolean(permissions[key]);
         });
     }
+    if (permissions && permissions["orders.edit_closed"] !== undefined) result["orders.edit_closed"] = Boolean(permissions["orders.edit_closed"]);
     return result;
 }
 
@@ -4905,11 +5516,24 @@ function buildAccessPermissionEditor(permissions) {
             </div>
         `;
     }).join("");
+    const orderControls = document.getElementById("accessOrderPermissionEditor");
+    if (orderControls) {
+        const controls = [
+            ["orders.edit_open", "Edit open orders"],
+            ["orders.print_open", "Print open orders"],
+            ["orders.edit_after_print", "Edit a bill after it has been printed"],
+            ["orders.edit_closed", "Edit a closed bill"]
+        ];
+        orderControls.innerHTML = controls.map(([key, label]) => `<label class="order-permission-check"><input type="checkbox" data-permission-key="${key}" ${normalized[key] ? "checked" : ""}><span>${label}</span></label>`).join("");
+    }
 }
 
 function readAccessPermissionEditor() {
     const permissions = defaultAccessPermissions();
     document.querySelectorAll("#accessPermissionsEditor input[data-permission-key]").forEach(function(input) {
+        permissions[input.dataset.permissionKey] = input.checked;
+    });
+    document.querySelectorAll("#accessOrderPermissionEditor input[data-permission-key]").forEach(function(input) {
         permissions[input.dataset.permissionKey] = input.checked;
     });
     return permissions;
@@ -5040,13 +5664,46 @@ function renderBillingAdjustmentSelectors() {
     updateBill();
 }
 
+function openBillingAdjustmentsDialog(){
+    updateBillingAdjustmentSummary();
+    const dialog=document.getElementById("billingAdjustmentsDialog");
+    if(dialog)dialog.style.display="flex";
+}
+
+function closeBillingAdjustmentsDialog(){document.getElementById("billingAdjustmentsDialog")?.style.setProperty("display","none");}
+
+function clearBillingAdjustmentsDialog(){
+    const discount=document.getElementById("billingDiscountSelect");
+    const charge=document.getElementById("billingChargeSelect");
+    if(discount)discount.value="";
+    if(charge)charge.value="";
+    updateCart();
+    updateBillingAdjustmentSummary();
+}
+
+function updateBillingAdjustmentSummary(){
+    const discount=getSelectedBillingAdjustment(document.getElementById("billingDiscountSelect")?.value||"");
+    const charge=getSelectedBillingAdjustment(document.getElementById("billingChargeSelect")?.value||"");
+    const summary=[discount?`Discount: ${discount.name}`:"",charge?`Charge: ${charge.name}`:""].filter(Boolean).join(" · ")||"No adjustments selected";
+    setText("billingAdjustmentsSummary",summary);
+    const ruleText=rule=>rule?`${rule.name} · ${rule.calculation==="percent"||rule.valueType==="percentage"?`${Number(rule.value||0)}%`:money(rule.value)}`:"";
+    setText("billingDiscountRuleHelp",discount?ruleText(discount):"No discount selected.");
+    setText("billingChargeRuleHelp",charge?ruleText(charge):"No charge selected.");
+    const breakdown=getBillingBreakdown();
+    setText("billingAdjustmentDialogTotal",`Order total: ${money(breakdown.total)}`);
+}
+
 
 async function editOpenOrder(orderId) {
     try {
         const data = await api(`/orders/${orderId}`);
-        if (String(data.order?.status || "").toLowerCase() !== "open") {
-            return alert("Only Open orders can be edited.");
-        }
+        try { data.paymentSummary = await api(`/orders/${orderId}/payment-summary`); }
+        catch (_) { data.paymentSummary = null; }
+        const status=String(data.order?.status||"").toLowerCase();
+        const isClosed=status==='completed';
+        const canEditClosed=isClosed&&(data.order?.bill_printed_at?hasPermission('orders','edit_after_print'):hasPermission('orders','edit_closed'));
+        const canEditActive=!isClosed&&status!=='cancelled'&&(hasPermission('orders','edit_open')||hasPermission('orders','edit'));
+        if(status==='cancelled'||(isClosed&&!canEditClosed)||(!isClosed&&!canEditActive))return alert(isClosed?'You do not have permission to edit this closed bill.':'You do not have permission to edit this open order.');
         currentOpenOrderId = orderId;
         currentOpenOrderData = data;
         cart = (data.items || []).map(item => ({
@@ -5055,6 +5712,8 @@ async function editOpenOrder(orderId) {
             cartKey: item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id),
             name: item.item_name,
             price: Number(item.price),
+            basePrice: Number(item.price)-((item.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0)),
+            options: item.options || [],
             quantity: Number(item.quantity),
             unit: item.unit || "ea",
             taxRate: Number(item.tax_rate ?? 5),
@@ -5064,14 +5723,19 @@ async function editOpenOrder(orderId) {
         setOrderType(orderType);
         const table = document.getElementById("tableNumber");
         if (table) table.value = data.order.table_number || "";
+        setBillingPaxForTable(data.order.table_number, data.order.pax || 1);
         const ds=document.getElementById("billingDiscountSelect");
         const cs=document.getElementById("billingChargeSelect");
-        if(ds) ds.value=data.order.discount_adjustment_id ? String(data.order.discount_adjustment_id) : "";
+        if(ds) ds.value=data.order.marketing_deal_id ? `marketing:${data.order.marketing_deal_id}` : data.order.discount_adjustment_id ? String(data.order.discount_adjustment_id) : "";
         if(cs) cs.value=data.order.charge_adjustment_id ? String(data.order.charge_adjustment_id) : "";
         const n=document.getElementById("billingCustomerNameQuick"); if(n)n.value=data.order.customer_name||"";
         const p=document.getElementById("billingCustomerPhoneQuick"); if(p)p.value=data.order.customer_phone||"";
+        const e=document.getElementById("billingCustomerEmailQuick"); if(e)e.value=data.order.customer_email||"";
+        fillBillingCustomerFields(data.order);
         const note=document.getElementById("billingOrderNotes"); if(note)note.value=data.order.notes||"";
         updateCart();
+        const saveButton=document.getElementById('saveOrderBtn');if(saveButton)saveButton.textContent=status==='completed'?'💾 Save Bill Changes':'💾 Save Order';
+        const orderBadge=document.getElementById('billingOrderState');if(orderBadge)orderBadge.textContent=status==='completed'?(data.order.bill_printed_at?'Editing printed bill':'Editing closed bill'):'Editing open order';
         showPage("new-order");
     } catch(e) {
         alert("Unable to edit open order: "+e.message);
@@ -5090,6 +5754,8 @@ function openBillingAdjustmentModal(id=null) {
     document.getElementById("billingAdjustmentDescription").value=item?.description||"";
     document.getElementById("billingAdjustmentModal").style.display="flex";
 }
+
+function closeBillingAdjustmentModal(){document.getElementById("billingAdjustmentModal")?.style.setProperty("display","none");}
 
 async function saveBillingAdjustment(){
     const id=document.getElementById("billingAdjustmentEditingId")?.value;
@@ -5171,30 +5837,47 @@ function renderMarketingDeals() {
         const schedule = [deal.startDate, deal.endDate].filter(Boolean).join(" – ") || "No date limit";
         const offer = deal.type && deal.type.startsWith("Buy") ? `Buy ${Number(deal.buyQuantity || 1)} · Get ${Number(deal.getQuantity || 1)}` : deal.value ? `${deal.valueType === "percentage" ? `${deal.value}% off` : money(deal.value)}` : "Custom offer";
         const channels = (deal.channels || []).map(key => POS_CHANNELS.find(channel => channel.key === key)?.label).filter(Boolean).join(", ") || "All channels";
-        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${deal.itemName ? ` · ${esc(deal.itemName)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm('${esc(deal.id)}')">Edit</button><button type="button" onclick="toggleMarketingDeal('${esc(deal.id)}')">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal('${esc(deal.id)}')">Delete</button></div></article>`;
+        const itemSummary=deal.itemName||(deal.itemNames||[]).join(", ");
+        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${itemSummary ? ` · ${esc(itemSummary)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm('${esc(deal.id)}')">Edit</button><button type="button" onclick="toggleMarketingDeal('${esc(deal.id)}')">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal('${esc(deal.id)}')">Delete</button></div></article>`;
     }).join("");
 }
 function populateMarketingDealOptions(selected = {}) {
     const categories = [...new Set(currentMenu.map(item => String(item.category || "").trim()).filter(Boolean))].sort();
     const categorySelect = document.getElementById("marketingDealCategory");
     if (categorySelect) categorySelect.innerHTML = '<option value="">All categories</option>' + categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
-    const items = currentMenu.filter(item => !selected.category || item.category === selected.category);
-    const itemMarkup = '<option value="">All items</option>' + items.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
     const itemSelect = document.getElementById("marketingDealItem");
     const rewardSelect = document.getElementById("marketingRewardItem");
-    if (itemSelect) itemSelect.innerHTML = itemMarkup;
-    if (rewardSelect) rewardSelect.innerHTML = '<option value="">Same item</option>' + currentMenu.map(item => `<option value="${esc(item.id)}">${esc(item.name)}</option>`).join("");
-    if (categorySelect) categorySelect.value = selected.category || "";
-    if (itemSelect) itemSelect.value = selected.itemId || "";
-    if (rewardSelect) rewardSelect.value = selected.rewardItemId || "";
+    const previouslySelected = new Set([...((itemSelect?.selectedOptions)||[])].map(option=>option.value));
+    const category = Object.prototype.hasOwnProperty.call(selected,"category")
+        ? String(selected.category || "")
+        : String(categorySelect?.value || "");
+    const eligibleItems = category
+        ? currentMenu.filter(item => String(item.category || "").trim().toLowerCase() === category.trim().toLowerCase())
+        : currentMenu;
+    const selectedIds = selected.itemIds || (selected.itemId ? [selected.itemId] : null) || [...previouslySelected];
+    const chosen = new Set(selectedIds.map(String));
+    if (itemSelect) {
+        itemSelect.innerHTML = eligibleItems.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
+        [...itemSelect.options].forEach(option=>option.selected=chosen.has(option.value));
+    }
+    if (rewardSelect) {
+        const previousReward = selected.rewardItemId || rewardSelect.value || "";
+        rewardSelect.innerHTML = '<option value="">Same item</option>' + eligibleItems.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
+        rewardSelect.value = eligibleItems.some(item => String(item.id) === String(previousReward)) ? String(previousReward) : "";
+    }
+    if (categorySelect) categorySelect.value = category;
 }
-function openMarketingDealForm(id = null) {
+async function openMarketingDealForm(id = null) {
+    if (!currentMenu.length) {
+        try { currentMenu = await api("/menu"); }
+        catch (error) { alert("Could not load menu items for this deal: " + error.message); return; }
+    }
     editingMarketingDealId = id;
     const deal = id === null ? null : marketingDeals.find(item => String(item.id) === String(id));
     document.getElementById("marketingDealModalTitle").textContent = deal ? "Edit Deal" : "Create Deal";
     document.getElementById("marketingDealName").value = deal?.name || "";
     document.getElementById("marketingDealType").value = deal?.type || "Discount";
-    populateMarketingDealOptions(deal || {});
+    populateMarketingDealOptions(deal || {category:"",itemIds:[]});
     document.getElementById("marketingBuyQuantity").value = deal?.buyQuantity || 1;
     document.getElementById("marketingGetQuantity").value = deal?.getQuantity || 1;
     document.getElementById("marketingValueType").value = deal?.valueType || "amount";
@@ -5229,11 +5912,15 @@ async function saveMarketingDeal() {
     const type = document.getElementById("marketingDealType").value;
     if (!MARKETING_DEAL_TYPES.includes(type)) return alert("Choose a valid deal type.");
     const prior = editingMarketingDealId === null ? null : marketingDeals.find(item => String(item.id) === String(editingMarketingDealId));
+    const selectedItemIds=[...document.getElementById("marketingDealItem").selectedOptions].map(option=>option.value).filter(Boolean);
+    const selectedItems=currentMenu.filter(item=>selectedItemIds.includes(String(item.id)));
     const deal = {
         id: prior?.id || String(Date.now()), name, type,
         category: document.getElementById("marketingDealCategory").value,
-        itemId: document.getElementById("marketingDealItem").value || null,
-        itemName: currentMenu.find(item => String(item.id) === document.getElementById("marketingDealItem").value)?.name || "",
+        itemIds: selectedItemIds,
+        itemNames: selectedItems.map(item=>item.name),
+        itemId: selectedItemIds[0] || null,
+        itemName: selectedItems.map(item=>item.name).join(", "),
         buyQuantity: Math.max(1, Number(document.getElementById("marketingBuyQuantity").value || 1)),
         getQuantity: Math.max(1, Number(document.getElementById("marketingGetQuantity").value || 1)),
         rewardItemId: document.getElementById("marketingRewardItem").value || null,
@@ -5299,6 +5986,7 @@ async function selectBillingTable(tableNumber, status) {
 
     selectedPOSChannelKey = "dine_in";
     setOrderType("Dine-in", true);
+    setBillingPaxForTable(tableNumber, document.getElementById("billingPax")?.value || 1);
     updateBillingTableSelection();
     showPage("new-order");
     await loadMenu();
@@ -5377,12 +6065,18 @@ async function loadSettings() {
     }
     try {
         const local = JSON.parse(localStorage.getItem(settingsLocalStorageKey()) || "null");
-        if (local && typeof local === "object") appSettings = { ...appSettings, ...local };
+        if (local && typeof local === "object") {
+            appSettings = { ...appSettings, ...local };
+            if (!Object.prototype.hasOwnProperty.call(local, "totalRoundingMode")) appSettings.totalRoundingMode = local.roundTotals ? "nearest" : "none";
+        }
     } catch (_) {}
 
     try {
         const saved = await api("/settings");
-        if (saved && typeof saved === "object") appSettings = { ...appSettings, ...saved };
+        if (saved && typeof saved === "object") {
+            appSettings = { ...appSettings, ...saved };
+            if (!Object.prototype.hasOwnProperty.call(saved, "totalRoundingMode")) appSettings.totalRoundingMode = saved.roundTotals ? "nearest" : "none";
+        }
     } catch (error) {
         console.warn("Settings API unavailable:", error.message);
     }
@@ -5415,7 +6109,8 @@ async function loadSettings() {
     setSettingValue("settingGstRate", appSettings.gstRate);
     setSettingValue("settingDefaultPayment", appSettings.defaultPayment);
     setSettingValue("settingOrderPrefix", appSettings.orderPrefix); setSettingValue("settingInvoicePrefix", appSettings.invoicePrefix);
-    setSettingValue("settingAllowZeroAmount", appSettings.allowZeroAmount); setSettingValue("settingRoundTotals", appSettings.roundTotals);
+    setSettingValue("settingAllowZeroAmount", appSettings.allowZeroAmount);
+    setSettingValue("settingTotalRoundingMode", ["none", "nearest", "up", "down"].includes(appSettings.totalRoundingMode) ? appSettings.totalRoundingMode : appSettings.roundTotals ? "nearest" : "none");
     setSettingValue("settingLogoUrl", appSettings.logoUrl); setSettingValue("settingUpiId", appSettings.upiId); setSettingValue("settingReceiptFont", appSettings.receiptFont);
     setSettingValue("settingPrintKitchenOnOrder", appSettings.printKitchenOnOrder); setSettingValue("settingEnableReceiptSound", appSettings.enableReceiptSound);
     setSettingValue("settingOpeningTime", appSettings.openingTime); setSettingValue("settingClosingTime", appSettings.closingTime); setSettingValue("settingDefaultOrderType", appSettings.defaultOrderType);
@@ -5460,7 +6155,9 @@ async function saveSettings() {
         defaultPayment: readSettingValue("settingDefaultPayment") || preferredPaymentMethod(),
         paymentModes: normalizePaymentModes(appSettings.paymentModes),
         orderPrefix: readSettingValue("settingOrderPrefix") || "ORD-", invoicePrefix: readSettingValue("settingInvoicePrefix") || "INV-",
-        allowZeroAmount: readSettingValue("settingAllowZeroAmount"), roundTotals: readSettingValue("settingRoundTotals"),
+        allowZeroAmount: readSettingValue("settingAllowZeroAmount"),
+        totalRoundingMode: readSettingValue("settingTotalRoundingMode") || "none",
+        roundTotals: (readSettingValue("settingTotalRoundingMode") || "none") !== "none",
         logoUrl: readSettingValue("settingLogoUrl") || "", upiId: readSettingValue("settingUpiId") || "", receiptFont: readSettingValue("settingReceiptFont") || "Arial",
         printKitchenOnOrder: readSettingValue("settingPrintKitchenOnOrder"), enableReceiptSound: readSettingValue("settingEnableReceiptSound"),
         openingTime: readSettingValue("settingOpeningTime") || "09:00", closingTime: readSettingValue("settingClosingTime") || "23:00", defaultOrderType: readSettingValue("settingDefaultOrderType") || "Takeaway",
@@ -5472,6 +6169,12 @@ async function saveSettings() {
     };
 
     appSettings = { ...appSettings, ...next };
+    if (!currentOpenOrderId) {
+        setOrderType(orderType === "Dine-in" ? "Dine-in" : "Takeaway");
+    } else {
+        renderBillingSaleChannelOptions();
+    }
+    updateCart();
     localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
     localStorage.setItem("cafeThermalPaperWidth", appSettings.paperWidth);
 
@@ -5493,7 +6196,7 @@ function resetSettings() {
         showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
         paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
         defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: normalizePaymentModes(STARTER_PAYMENT_MODES), orderPrefix: "ORD-", invoicePrefix: "INV-",
-        allowZeroAmount: false, roundTotals: false, logoUrl: "", upiId: "", receiptFont: "Arial",
+        allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
         printKitchenOnOrder: false, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
         defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
@@ -6066,6 +6769,65 @@ async function updateDashboard() {
 // ==========================================
 // CUSTOM REPORT DATE TOGGLE
 // ==========================================
+
+let salesAuditTransactions = [];
+
+async function loadSalesAuditReport() {
+    const status = document.getElementById("salesAuditStatus");
+    const body = document.getElementById("salesAuditBody");
+    const range = document.getElementById("reportDateFilter")?.value || "today";
+    const from = document.getElementById("reportFromDate")?.value || "";
+    const to = document.getElementById("reportToDate")?.value || "";
+    if (range === "custom" && (!from || !to || from > to)) {
+        if (status) status.textContent = "Choose a valid From and To date before loading the audit.";
+        return;
+    }
+    const params = new URLSearchParams({ range });
+    if (range === "custom") { params.set("from", from); params.set("to", to); }
+    if (status) status.textContent = "Loading sale transactions…";
+    if (body) body.innerHTML = '<tr><td colspan="10">Loading transactions…</td></tr>';
+    try {
+        const result = await api(`/reports/sales-audit?${params.toString()}`);
+        salesAuditTransactions = Array.isArray(result.transactions) ? result.transactions : [];
+        if (!body) return;
+        body.innerHTML = salesAuditTransactions.length ? salesAuditTransactions.map(row => `
+            <tr>
+                <td>${esc(row.payment_time ? new Date(row.payment_time).toLocaleString() : "-")}</td>
+                <td><strong>${esc(row.order_number || `#${row.order_id}`)}</strong><br><small>${esc(row.invoice_number || "No invoice")}</small></td>
+                <td>${esc(row.order_type || "-")}${row.table_number ? ` · ${esc(row.table_number)}` : ""}</td>
+                <td>${esc(row.payment_method || "-")}${row.payment_status && row.payment_status !== "Success" ? `<br><small>${esc(row.payment_status)}</small>` : ""}</td>
+                <td>${esc(row.transaction_id || "-")}</td>
+                <td>${money(row.transaction_amount)}</td>
+                <td>${money(row.bill_total)}</td>
+                <td>${money(row.amount_collected)}</td>
+                <td>${money(row.amount_due)}</td>
+                <td>${esc(row.order_status || "-")}</td>
+            </tr>`).join("") : '<tr><td colspan="10">No sale transactions found for this period.</td></tr>';
+        if (status) status.textContent = `${salesAuditTransactions.length} payment transaction${salesAuditTransactions.length === 1 ? "" : "s"} loaded. Split payments appear as separate rows; collected and due amounts are order-level totals.`;
+    } catch (error) {
+        salesAuditTransactions = [];
+        if (body) body.innerHTML = `<tr><td colspan="10">Unable to load audit: ${esc(error.message)}</td></tr>`;
+        if (status) status.textContent = "The transaction audit could not be loaded.";
+    }
+}
+
+function downloadSalesAuditCSV() {
+    if (!salesAuditTransactions.length) return alert("Load sale transactions before downloading the audit.");
+    const columns = [
+        ["Payment time", row => row.payment_time], ["Order number", row => row.order_number], ["Invoice number", row => row.invoice_number],
+        ["Order type", row => row.order_type], ["Table", row => row.table_number], ["Payment method", row => row.payment_method],
+        ["Payment status", row => row.payment_status], ["Transaction ID", row => row.transaction_id], ["Transaction amount", row => row.transaction_amount],
+        ["Bill total", row => row.bill_total], ["Order amount collected to date", row => row.amount_collected], ["Order amount due", row => row.amount_due], ["Order status", row => row.order_status]
+    ];
+    const csvCell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const content = "\uFEFF" + [columns.map(([label]) => label), ...salesAuditTransactions.map(row => columns.map(([, get]) => get(row)))].map(row => row.map(csvCell).join(",")).join("\r\n");
+    const blobUrl = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = `sale-transaction-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
 
 function toggleCustomReportDates() {
 
@@ -7250,14 +8012,27 @@ async function loadPrinters(){try{window.cafePrinters=await api("/printers");ren
 function editPrinter(id){const p=(window.cafePrinters||[]).find(function(x){return Number(x.id)===Number(id)});if(!p)return;document.getElementById("printerId").value=p.id;document.getElementById("printerName").value=p.name||"";document.getElementById("printerType").value=p.connection_type||"local";document.getElementById("printerHost").value=p.host||"";document.getElementById("printerPort").value=p.port||9100;document.getElementById("printerBluetoothName").value=p.bluetooth_name||"";document.getElementById("printerServiceUuid").value=p.service_uuid||"000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value=p.characteristic_uuid||"00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerPaperWidth").value=p.paper_width||"80";document.getElementById("printerIsDefault").checked=Boolean(p.is_default);document.getElementById("printerFormTitle").textContent="Edit Printer";togglePrinterFields();document.getElementById("printer").scrollIntoView({behavior:"smooth",block:"start"})}
 async function savePrinter(){try{const id=printerFormValue("printerId");const type=printerFormValue("printerType");const selectedWindowsPrinter=type==="local"?(document.getElementById("windowsPrinterSelect")?.value||""):"";const printerName=(type==="local"&&selectedWindowsPrinter)?selectedWindowsPrinter:printerFormValue("printerName").trim();const body={name:printerName,connectionType:type,host:printerFormValue("printerHost").trim(),port:Number(printerFormValue("printerPort")||9100),bluetoothName:printerFormValue("printerBluetoothName").trim(),serviceUuid:printerFormValue("printerServiceUuid").trim(),characteristicUuid:printerFormValue("printerCharacteristicUuid").trim(),paperWidth:printerFormValue("printerPaperWidth")||"80",isDefault:document.getElementById("printerIsDefault").checked};const saved=await api(id?"/printers/"+id:"/printers",{method:id?"PUT":"POST",body:JSON.stringify(body)});showPrinterMessage("Printer saved.");resetPrinterForm();await loadPrinters();if(saved.printer)showPrinterMessage("Saved "+saved.printer.name+".")}catch(e){showPrinterMessage(e.message,true)}}
 async function deletePrinter(id){if(!confirm("Delete this saved printer?"))return;try{await api("/printers/"+id,{method:"DELETE"});await loadPrinters();showPrinterMessage("Printer deleted.")}catch(e){showPrinterMessage(e.message,true)}}
-function printerReceiptText(data){const currency=appSettings.currency||"₹";const moneyValue=value=>currency+Number(value||0).toFixed(2);const lines=[appSettings.restaurantName||"CAFE POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------", "Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber:"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"","--------------------------------","ITEM / QTY / AMOUNT"];(Array.isArray(data.items)?data.items:[]).forEach(function(item){lines.push((appSettings.uppercaseItems?String(item.name||"-").toUpperCase():(item.name||"-"))+" x"+Number(item.quantity||0)+"  "+moneyValue(Number(item.price||0)*Number(item.quantity||0)))});lines.push("--------------------------------","Subtotal: "+moneyValue(data.subtotal||0),"GST: "+moneyValue(data.gst||0),"TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"),"--------------------------------",appSettings.footer||"Thank you!");return lines.filter(Boolean).join("\n")+"\n\n\n"}
+function printerReceiptText(data){
+    const currency=appSettings.currency||"₹";
+    const moneyValue=value=>currency+Number(value||0).toFixed(2);
+    const allocations=Array.isArray(data.paymentAllocations)?data.paymentAllocations:[];
+    const amountCollected=data.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(data.amountCollected||0);
+    const amountDue=data.amountDue===undefined?Math.max(0,Number(data.total||0)-amountCollected):Number(data.amountDue||0);
+    const lines=[appSettings.restaurantName||"CAFE POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------",data.isOpenOrder?"OPEN ORDER / PROFORMA":"Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber+(Number(data.pax)>0?" · "+Number(data.pax)+" PAX":""):"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"",data.customerPhone?"Phone: "+data.customerPhone:"",data.customerEmail?"Email: "+data.customerEmail:"",data.customerGstin?"Customer GSTIN: "+data.customerGstin:"",data.customerBirthDate?"Customer DOB: "+data.customerBirthDate:"",data.customerAddress?"Address: "+data.customerAddress:"",data.customerCity?"City: "+data.customerCity:"",data.customerState?"State: "+data.customerState:"","--------------------------------","ITEM / QTY / AMOUNT"];
+    (Array.isArray(data.items)?data.items:[]).forEach(function(item){lines.push((appSettings.uppercaseItems?String(item.name||"-").toUpperCase():(item.name||"-"))+" x"+Number(item.quantity||0)+"  "+moneyValue(Number(item.price||0)*Number(item.quantity||0)));const options=formatItemOptionNames(item.options);if(options)lines.push("  + "+options)});
+    lines.push("--------------------------------","Subtotal: "+moneyValue(data.subtotal||0));
+    if(Number(data.discount||0)>0)lines.push((data.discountName?"Discount · "+data.discountName:"Discount")+": -"+moneyValue(data.discount));
+    if(Number(data.serviceCharge||0)>0)lines.push((data.chargeName?"Charge · "+data.chargeName:"Charges")+": "+moneyValue(data.serviceCharge));
+    lines.push("GST: "+moneyValue(data.gst||0));
+    if(Math.abs(Number(data.roundingAdjustment||0))>=0.005)lines.push("Rounding: "+moneyValue(data.roundingAdjustment));
+    lines.push("TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"));
+    allocations.forEach(payment=>lines.push("  "+String(payment.method||"Payment")+": "+moneyValue(payment.amount||0)));
+    lines.push("Amount collected: "+moneyValue(amountCollected),"Amount due: "+moneyValue(amountDue),"--------------------------------",appSettings.footer||"Thank you!");
+    return lines.filter(Boolean).join("\n")+"\n\n\n";
+}
 async function sendBluetoothPrinterText(printer,text){if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable in this browser. Use Chrome or Edge on HTTPS or localhost.");const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";const name=printer.bluetooth_name||printer.bluetoothName||printer.name;const selection=navigator.bluetooth.requestDevice({filters:[{namePrefix:name}],optionalServices:[serviceUuid]});const device=await selection;const server=await device.gatt.connect();try{const service=await server.getPrimaryService(serviceUuid);const characteristic=await service.getCharacteristic(characteristicUuid);const bytes=new TextEncoder().encode(text);const payload=new Uint8Array(bytes.length+11);payload.set([0x1b,0x40,0x1b,0x61,0x01],0);payload.set(bytes,5);payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);for(let i=0;i<payload.length;i+=20)await writeChunk(payload.slice(i,i+20));}finally{if(device.gatt.connected)device.gatt.disconnect()}}
 async function pairBluetoothFromForm(){try{if(!navigator.bluetooth)throw new Error("Bluetooth setup needs Chrome or Edge on HTTPS or localhost.");const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});const name=device.name||"Bluetooth Printer";document.getElementById("printerBluetoothName").value=name;if(!printerFormValue("printerName"))document.getElementById("printerName").value=name;showPrinterMessage("Selected "+name+". Save the printer to finish setup.")}catch(e){showPrinterMessage(e.message,true)}}
 async function printLocalPrinterTest(name){
-    if (isVirtualWindowsPrinter(name)) {
-        showPrinterMessage("This is a virtual printer. Select a physical ESC/POS thermal receipt printer for direct receipt printing.", true);
-        return;
-    }
     try {
         const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
         const response = await fetch(serviceUrl + "/test", {
@@ -7275,7 +8050,6 @@ async function printLocalPrinterTest(name){
             : "Windows printer test failed: " + e.message, true);
     }
 }
-function isVirtualWindowsPrinter(name){return /(?:microsoft print to pdf|microsoft xps document writer|onenote|fax|adobe pdf|foxit pdf)/i.test(String(name||""))}
 async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(e.message,true)}}
 async function loadAdvancedReports(){
     try{

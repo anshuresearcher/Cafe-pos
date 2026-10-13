@@ -2,7 +2,7 @@
 
 This update keeps the existing Step 1–19 Cafe POS modules and focuses on the latest UI issues:
 
-- Added Rista-style staff profile button and slide-out profile panel.
+- Added Cafe Pilot-style staff profile button and slide-out profile panel.
 - Removed decorative circular/bullet markers from billing category buttons.
 - Fixed billing category sidebar so categories are real clickable controls backed by database menu categories.
 - Removed the visible table dropdown from billing and replaced it with clickable database-driven table cards.

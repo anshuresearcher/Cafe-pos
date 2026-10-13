@@ -125,7 +125,6 @@
             <button class="big-btn login-btn" type="submit">🔐 Login</button>
             <div id="loginError" class="login-error"></div>
         </form>
-        <div class="login-help">Initial users: <b>admin / admin123</b> · <b>manager / manager123</b> · <b>cashier / cashier123</b></div>
         <button type="button" class="register-business-link" onclick="showRegisterBusiness()">🏪 Create a new cafe business</button>
         <div class="device-registration-panel">
             <button type="button" class="device-registration-trigger" onclick="showDeviceRegistrationView()">
@@ -322,15 +321,6 @@
 
         <button
             class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('payments')">
-
-            💳 Payments
-
-        </button>
-
-
-        <button
-            class="nav-btn"
             onclick="document.body.classList.remove('billing-nav-open');showPage('reports')">
 
             📊 Reports
@@ -413,7 +403,6 @@
                             <button type="button" class="profile-panel-item disabled" disabled title="Not available for this branch">Close Branch</button>
                             <button type="button" class="profile-panel-item" onclick="profileAction('sync')">Sync Data</button>
                             <button type="button" class="profile-panel-item" onclick="profileAction('whats-new')">What's New</button>
-                            <button type="button" class="profile-panel-item" onclick="profileAction('change-business')">Change Business</button>
                             <button type="button" class="profile-panel-item" onclick="profileAction('about')">About</button>
                         </div>
 
@@ -589,6 +578,8 @@
                             </div>
                         </div>
 
+                        <label id="billingPaxField" class="billing-pax-field" hidden for="billingPax"><span>Guests at table</span><input id="billingPax" type="number" min="1" step="1" value="1" inputmode="numeric" aria-label="Number of people at the table"></label>
+
                         <div id="cartItems" class="billing-cart-items"><p class="empty">Select a table and add items.</p></div>
 
                         <div id="billingCustomerPanel" class="billing-customer-panel" role="region" aria-label="Customer information">
@@ -608,6 +599,11 @@
                                 <div class="billing-inline-grid">
                                     <label class="billing-customer-detail-field">Customer name<input id="billingCustomerNameQuick" type="text" placeholder="Enter customer name" autocomplete="name"></label>
                                     <label class="billing-customer-detail-field">Email address <span class="billing-muted">Optional</span><input id="billingCustomerEmailQuick" type="email" placeholder="Enter email address" autocomplete="email"></label>
+                                    <label class="billing-customer-detail-field">GST number <span class="billing-muted">Optional</span><input id="billingCustomerGstinQuick" type="text" maxlength="40" placeholder="Customer GSTIN" autocomplete="off"></label>
+                                    <label class="billing-customer-detail-field">Birth date <span class="billing-muted">Optional</span><input id="billingCustomerBirthDateQuick" type="date" autocomplete="bday"></label>
+                                    <label class="billing-customer-detail-field billing-customer-address-field">Address <span class="billing-muted">Optional</span><input id="billingCustomerAddressQuick" type="text" maxlength="500" placeholder="Street address" autocomplete="street-address"></label>
+                                    <label class="billing-customer-detail-field">City <span class="billing-muted">Optional</span><input id="billingCustomerCityQuick" type="text" maxlength="100" placeholder="City" autocomplete="address-level2"></label>
+                                    <label class="billing-customer-detail-field">State <span class="billing-muted">Optional</span><input id="billingCustomerStateQuick" type="text" maxlength="100" placeholder="State" autocomplete="address-level1"></label>
                                 </div>
                             </div>
                             <button type="button" class="billing-customer-next" onclick="closeBillingCustomerPanel()">Next: Add Items <span aria-hidden="true">&rarr;</span></button>
@@ -619,14 +615,11 @@
                         </div>
 
                         <div class="billing-adjustments-modern">
-                            <div class="billing-adjustment-field">
-                                <label for="billingDiscountSelect">Discount</label>
-                                <select id="billingDiscountSelect" onchange="updateCart()"><option value="">No discount</option></select>
-                            </div>
-                            <div class="billing-adjustment-field">
-                                <label for="billingChargeSelect">Charges</label>
-                                <select id="billingChargeSelect" onchange="updateCart()"><option value="">No charge</option></select>
-                            </div>
+                            <button type="button" class="billing-adjustment-launcher" onclick="openBillingAdjustmentsDialog()" aria-haspopup="dialog" aria-controls="billingAdjustmentsDialog">
+                                <span class="billing-adjustment-launcher-icon">％</span>
+                                <span class="billing-adjustment-launcher-copy"><strong>Discounts & charges</strong><small id="billingAdjustmentsSummary">No adjustments selected</small></span>
+                                <span class="billing-adjustment-launcher-action">Manage <b aria-hidden="true">›</b></span>
+                            </button>
                         </div>
 
                         <div class="bill modern-bill-card">
@@ -634,12 +627,13 @@
                             <div><span>GST</span><span id="gst">₹0</span></div>
                             <div id="billingDiscountRow"><span id="billingDiscountLabel">Discount</span><span id="discountAmount">₹0</span></div>
                             <div id="billingServiceChargeRow"><span id="billingChargeLabel">Service Charge</span><span id="serviceChargeAmount">₹0</span></div>
+                            <div id="billingRoundingRow" style="display:none"><span>Rounding</span><span id="billingRoundingAmount">₹0.00</span></div>
                             <hr>
                             <div class="total"><strong>Total</strong><strong id="total">₹0</strong></div>
                         </div>
 
                         <div class="billing-action-row">
-                            <button class="save-order-btn" type="button" onclick="saveOpenOrder()">💾 Save Order</button>
+                            <button id="saveOrderBtn" class="save-order-btn" type="button" onclick="saveOpenOrder()">💾 Save Order</button>
                             <button class="pay-btn" type="button" onclick="openPayment()">💳 Proceed to Payment</button>
                         </div>
                     </aside>
@@ -665,84 +659,39 @@
                             <div id="billingTablesGrid" class="billing-tables-grid"></div>
                         </div>
         </section>
-        <section
-            id="orders"
-            class="page">
-
-
+        <section id="orders" class="page orders-page">
             <div class="orders-page-header">
-                <div>
-                    <h2>Orders</h2>
-                    <p class="orders-subtitle">Manage saved, active and completed orders.</p>
-                </div>
+                <div><span class="eyebrow">SALES MANAGEMENT</span><h2>Orders</h2><p class="orders-subtitle">Search, filter and manage open and completed bills.</p></div>
                 <div class="orders-header-actions">
-                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order ID, table, type…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
-                    <button class="big-btn" onclick="showPage('new-order')">+ New Order</button>
+                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
+                    <button type="button" class="big-btn" onclick="showPage('new-order')">＋ New Order</button>
                 </div>
             </div>
-
-            <div class="orders-tabs">
-                <button type="button" class="orders-tab-btn active" data-tab="open" onclick="switchOrdersTab('open')">📂 Open <span id="openOrdersCount">0</span></button>
-                <button type="button" class="orders-tab-btn" data-tab="closed" onclick="switchOrdersTab('closed')">✅ Closed / Completed <span id="closedOrdersCount">0</span></button>
-                <button type="button" class="orders-tab-btn" data-tab="cancelled" onclick="switchOrdersTab('cancelled')">❌ Cancelled <span id="cancelledOrdersCount">0</span></button>
+            <div class="orders-tabs" role="tablist" aria-label="Order status">
+                <button type="button" class="orders-tab-btn active" data-tab="open" onclick="switchOrdersTab('open')">Open <span id="openOrdersCount">0</span></button>
+                <button type="button" class="orders-tab-btn" data-tab="closed" onclick="switchOrdersTab('closed')">Closed <span id="closedOrdersCount">0</span></button>
+                <button type="button" class="orders-tab-btn" data-tab="cancelled" onclick="switchOrdersTab('cancelled')">Cancelled <span id="cancelledOrdersCount">0</span></button>
             </div>
-
-            <div class="orders-status-note">Active KOT orders remain in the open workflow only when a kitchen/KOT process is being used. Cancelled orders are separated into their own tab.</div>
-
-            <div class="table-container">
-
-
-                <table>
-
-
-                    <thead>
-
-                        <tr>
-
-                            <th>
-                                Order ID
-                            </th>
-
-                            <th>
-                                Type
-                            </th>
-
-                            <th>
-                                Table
-                            </th>
-
-                            <th>
-                                Total
-                            </th>
-
-                            <th>
-                                Payment
-                            </th>
-
-                            <th>
-                                Status
-                            </th>
-
-                            <th>
-                                Date
-                            </th>
-
-                                                    <th>Actions</th>
-                        </tr>
-
-                    </thead>
-
-
-                    <tbody id="ordersTableBody">
-                    </tbody>
-
-
-                </table>
-
-
+            <div class="orders-filter-bar" aria-label="Advanced order search">
+                <label><span>Status</span><select id="ordersStatusFilter" onchange="filterOrders()"><option value="">Use selected tab</option><option value="open">Open</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option></select></label>
+                <label><span>From date</span><input id="ordersDateFrom" type="date" onchange="filterOrders()"></label>
+                <label><span>To date</span><input id="ordersDateTo" type="date" onchange="filterOrders()"></label>
+                <label><span>Sale channel</span><select id="ordersChannelFilter" onchange="filterOrders()"><option value="">All channels</option></select></label>
+                <label><span>Payment mode</span><select id="ordersPaymentFilter" onchange="filterOrders()"><option value="">All payment modes</option></select></label>
+                <button type="button" class="orders-filter-reset" onclick="resetOrdersFilters()">Reset filters</button>
             </div>
-
-
+            <div class="orders-workspace">
+                <section class="orders-list-panel" aria-label="Order list">
+                    <div class="orders-list-heading"><div><strong id="ordersListTitle">Open orders</strong><span id="ordersResultCount">0 orders</span></div><button type="button" onclick="updateOrdersTable(true)" aria-label="Refresh orders">↻</button></div>
+                    <div id="ordersTableBody" class="orders-list" role="list" aria-live="polite"></div>
+                </section>
+                <aside id="ordersDetailPane" class="orders-detail-panel" aria-label="Selected order details">
+                    <div class="orders-detail-heading"><div><span class="eyebrow">ORDER DETAILS</span><h3 id="orderDetailsPanelTitle">Select an order</h3><p id="orderDetailsPanelHint">Choose an order from the list to see its items and bill.</p></div><button type="button" class="orders-detail-close" onclick="closeOrderDetails()" aria-label="Clear selected order">×</button></div>
+                    <div id="orderDetailsEmpty" class="orders-detail-empty"><span>🧾</span><strong>No order selected</strong><p>Order items, payment status and actions will appear here.</p></div>
+                    <div id="orderDetailsContent" hidden></div>
+                    <div id="orderDetailsActions" class="orders-detail-actions" hidden></div>
+                </aside>
+            </div>
         </section>
 
 
@@ -991,15 +940,54 @@
              ================================================= -->
 
         <section id="kot-groups" class="page">
-            <div class="page-header">
-                <div>
-                    <h2>🧩 KOT Groups</h2>
-                    <p class="access-muted">Create production stations such as Main Kitchen, Bar, Dessert or Bakery and route menu items to the right KOT group.</p>
-                </div>
-                <button class="big-btn" onclick="openKOTGroupModal()">＋ Add KOT Group</button>
+            <div id="kotGroupsOverview" class="module-card-grid">
+                <button type="button" class="module-navigation-card" onclick="showKOTGroupsView('groups')">
+                    <span class="module-card-icon">🧩</span>
+                    <span class="module-card-copy"><strong>KOT Groups</strong><span>Route menu categories and items to production stations.</span><small><b id="kotGroupCount">0</b> groups</small></span>
+                    <span class="module-card-arrow" aria-hidden="true">›</span>
+                </button>
             </div>
-            <div class="dashboard-box">
-                <div id="kotGroupsContainer" class="access-profile-grid">Loading…</div>
+            <div id="kotGroupsDetail" hidden>
+                <div class="module-subpage-header">
+                    <button type="button" class="module-back-button" onclick="showKOTGroupsView('overview')">← KOT Groups</button>
+                    <div><span class="module-eyebrow">KITCHEN SETUP</span><h2>All KOT Groups</h2><p>Manage production stations and item routing.</p></div>
+                    <button class="big-btn" type="button" onclick="openKOTGroupModal()">＋ Add KOT Group</button>
+                </div>
+                <div class="dashboard-box"><div id="kotGroupsContainer" class="kot-groups-list-grid">Loading…</div></div>
+            </div>
+            <div id="kotGroupEditorPanel" hidden>
+                <div class="module-subpage-header">
+                    <button type="button" class="module-back-button" onclick="closeKOTGroupModal()">← All KOT Groups</button>
+                    <div><span class="module-eyebrow">KOT GROUPS</span><h2 id="kotGroupModalTitle">Add KOT Group</h2><p>Set the station and choose which categories or items should print to it.</p></div>
+                    <button class="big-btn" type="button" onclick="saveKOTGroup()">💾 Save Group</button>
+                </div>
+                <div id="kotGroupModal" class="kot-group-editor">
+                    <input type="hidden" id="kotGroupId">
+                    <div class="kot-group-form-grid">
+                        <div class="form-group"><label for="kotGroupName">Group Name</label><input id="kotGroupName" type="text" placeholder="e.g. Main Kitchen"></div>
+                        <div class="form-group"><label for="kotGroupDescription">Description</label><input id="kotGroupDescription" type="text" placeholder="e.g. Hot food station"></div>
+                        <div class="form-group"><label for="kotGroupStation">Production Station</label><select id="kotGroupStation"><option>Kitchen</option><option>Bar</option><option>Dessert</option><option>Bakery</option><option>Counter</option></select></div>
+                        <div class="form-group"><label for="kotGroupSort">Sort Order</label><input id="kotGroupSort" type="number" value="0"></div>
+                        <div class="form-group kot-group-printer-field"><label for="kotGroupPrinter">Printer</label><select id="kotGroupPrinter"><option value="">Use the regular print dialog</option></select><small class="access-muted">KOTs for this group go to the selected printer.</small></div>
+                    </div>
+                    <div class="kot-target-section">
+                        <div class="kot-target-section-heading"><div><span class="module-eyebrow">ROUTING</span><h3>Categories & items</h3><p>Choose the categories or individual items sent to this KOT group.</p></div></div>
+                        <div class="kot-target-pickers">
+                            <div class="kot-target-picker-card"><div><strong>Categories</strong><span id="kotGroupCategoriesSummary">No categories selected</span></div><button class="table-action-btn" type="button" onclick="openKOTGroupTargetPicker('categories')">Choose categories</button><div id="kotGroupCategoriesChips" class="kot-target-chips"></div></div>
+                            <div class="kot-target-picker-card"><div><strong>Items</strong><span id="kotGroupItemsSummary">No items selected</span></div><button class="table-action-btn" type="button" onclick="openKOTGroupTargetPicker('items')">Choose items</button><div id="kotGroupItemsChips" class="kot-target-chips"></div></div>
+                        </div>
+                    </div>
+                    <div class="kot-group-editor-footer"><label class="kot-group-active-toggle"><input id="kotGroupActive" type="checkbox" checked> Active</label><div class="modal-actions"><button class="cancel-btn" type="button" onclick="closeKOTGroupModal()">Cancel</button><button class="big-btn" type="button" onclick="saveKOTGroup()">💾 Save Group</button></div></div>
+                </div>
+            </div>
+            <div id="kotGroupTargetPickerModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="kotGroupTargetPickerTitle">
+                <div class="modal-content kot-target-picker-modal">
+                    <div class="modal-header"><div><span class="module-eyebrow">KOT ROUTING</span><h2 id="kotGroupTargetPickerTitle">Select categories</h2></div><button class="close-btn" type="button" onclick="closeKOTGroupTargetPicker()" aria-label="Close">✕</button></div>
+                    <label class="kot-target-search"><span aria-hidden="true">⌕</span><input id="kotGroupTargetSearch" type="search" placeholder="Search categories…" oninput="renderKOTGroupTargetOptions()"></label>
+                    <label class="kot-target-select-all"><input id="kotGroupTargetSelectAll" type="checkbox" onchange="toggleAllKOTGroupTargets(this.checked)"><span>Select all visible</span></label>
+                    <div id="kotGroupTargetOptions" class="kot-target-options"></div>
+                    <div class="modal-actions"><button class="cancel-btn" type="button" onclick="closeKOTGroupTargetPicker()">Cancel</button><button class="big-btn" type="button" onclick="confirmKOTGroupTargetPicker()">Done</button></div>
+                </div>
             </div>
         </section>
 
@@ -1009,9 +997,18 @@
              MENU MANAGEMENT
              ================================================= -->
         <section id="menu" class="page">
-          <div class="menu-management-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2>Menu Management</h2><p>Modern catalog with channel pricing, taxes, units, item nature and variants.</p></div><div style="display:flex;gap:8px;flex-wrap:wrap;"><button class="table-action-btn" type="button" onclick="openMenuCategoryModal()">🗂️ Manage Categories</button><button class="cancel-btn" type="button" onclick="openMenuImportModal()">⇧ Import Excel</button><button class="big-btn" onclick="openAddMenuModal()">＋ Add Menu Item</button></div></div>
-          <div class="dashboard-box menu-category-master-box"><div class="settings-master-header"><div><span class="eyebrow">CATEGORY MASTER</span><h3>Menu Categories</h3><p class="access-muted">Create categories once, then select them while creating menu items.</p></div><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div>
-          <div class="menu-list"></div>
+          <div id="menuModuleOverview" class="module-card-grid">
+            <button type="button" class="module-navigation-card" onclick="showMenuModuleView('items')"><span class="module-card-icon">🍽️</span><span class="module-card-copy"><strong>Menu Items</strong><span>Manage item prices, availability, variants and KOT routing.</span><small><b id="menuItemCount">0</b> items</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+            <button type="button" class="module-navigation-card" onclick="showMenuModuleView('categories')"><span class="module-card-icon">🗂️</span><span class="module-card-copy"><strong>Categories</strong><span>Organize the menu into categories for ordering and reports.</span><small><b id="menuCategoryCount">0</b> categories</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+            <button type="button" class="module-navigation-card" onclick="showMenuModuleView('options')"><span class="module-card-icon">🧩</span><span class="module-card-copy"><strong>Item option</strong><span>Manage option sets and choices attached to menu items.</span><small><b id="menuOptionSetCount">0</b> option sets</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+          </div>
+          <div id="menuDetailHeader" class="module-subpage-header" hidden><button type="button" class="module-back-button" onclick="showMenuModuleView('overview')">← Menu</button><div><span class="module-eyebrow">MENU MANAGEMENT</span><h2 id="menuDetailTitle">Menu Items</h2><p id="menuDetailDescription">Manage your catalog.</p></div></div>
+          <div id="menuItemsPanel" hidden>
+            <div class="menu-management-header"><div class="menu-management-actions"><button class="table-action-btn" type="button" onclick="showMenuModuleView('categories')">🗂️ Categories</button><button class="table-action-btn" type="button" onclick="downloadExistingMenuSpreadsheet()">↓ Export Items</button><button class="cancel-btn" type="button" onclick="openMenuImportModal()">⇧ Import Excel</button><button class="big-btn" type="button" onclick="openAddMenuModal()">＋ Add Menu Item</button></div></div>
+            <div class="menu-list"></div>
+          </div>
+          <div id="menuCategoriesPanel" hidden><div class="dashboard-box menu-category-master-box"><div class="menu-category-toolbar"><p class="access-muted">Create categories once, then select them while creating menu items.</p><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div></div>
+          <div id="menuOptionsPanel" hidden><div class="menu-management-header menu-option-sets-header"><div><span class="menu-eyebrow">MENU OPTIONS</span><h3>Item option sets</h3><p>Create choices such as sizes, add-ons or preferences, then attach them to menu items.</p></div><div class="menu-management-actions"><button type="button" class="big-btn" onclick="openOptionSetsModal()">⚙️ Manage option sets</button></div></div><div id="menuOptionSetOverviewList" class="menu-option-set-overview-grid"></div></div>
         </section>
 
         <!-- =================================================
@@ -1264,37 +1261,6 @@
              PAYMENTS
              ================================================= -->
 
-        <section
-            id="payments"
-            class="page">
-
-
-            <h2>
-                Payments
-            </h2>
-
-
-            <div class="dashboard-box">
-
-
-                <h3>
-                    Payment Management
-                </h3>
-
-
-                <p>
-                    Payment history will appear here.
-                </p>
-
-
-            </div>
-
-
-        </section>
-
-
-
-      
 <!-- =================================================
      ACCESS MANAGEMENT
      ================================================= -->
@@ -1364,21 +1330,6 @@
   <div class="cards"><div class="card"><span>Total Expenses</span><strong id="expenseTotal">₹0.00</strong></div><div class="card"><span>Expense Entries</span><strong id="expenseCount">0</strong></div></div>
   <div class="dashboard-box"><div class="section-toolbar"><div><h3>Expense History</h3></div><div><input id="expenseFrom" type="date"><input id="expenseTo" type="date"><button class="big-btn" onclick="loadExpenses()">Apply</button></div></div><div class="table-container"><table><thead><tr><th>Date</th><th>Category</th><th>Amount</th><th>Payment</th><th>Note</th><th>By</th><th></th></tr></thead><tbody id="expensesBody"><tr><td colspan="7">Loading…</td></tr></tbody></table></div></div>
 </section>
-<div id="kotGroupModal" class="modal">
-  <div class="modal-content">
-    <div class="modal-header">
-      <h2 id="kotGroupModalTitle">Add KOT Group</h2>
-      <button class="close-btn" onclick="closeKOTGroupModal()">✕</button>
-    </div>
-    <input type="hidden" id="kotGroupId">
-    <div class="form-group"><label>Group Name</label><input id="kotGroupName" type="text" placeholder="e.g. Main Kitchen"></div>
-    <div class="form-group"><label>Description</label><input id="kotGroupDescription" type="text" placeholder="e.g. Hot food station"></div>
-    <div class="billing-inline-grid"><div class="form-group"><label>Production Station</label><select id="kotGroupStation"><option>Kitchen</option><option>Bar</option><option>Dessert</option><option>Bakery</option><option>Counter</option></select></div><div class="form-group"><label>Sort Order</label><input id="kotGroupSort" type="number" value="0"></div></div>
-    <div class="settings-options"><label><input id="kotGroupActive" type="checkbox" checked> Active</label></div>
-    <div class="modal-actions"><button class="big-btn" onclick="saveKOTGroup()">💾 Save Group</button><button class="cancel-btn" onclick="closeKOTGroupModal()">Cancel</button></div>
-  </div>
-</div>
-
 <div id="expenseModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Add Expense</h2><button class="close-btn" onclick="closeExpenseModal()">✕</button></div><div class="form-group"><label>Category</label><select id="expenseCategory"></select></div><div class="form-group"><label>Amount</label><input id="expenseAmount" type="number" min="0" step="0.01"></div><div class="form-group"><label>Payment Method</label><select id="expensePayment"></select></div><div class="form-group"><label>Date</label><input id="expenseDate" type="date"></div><div class="form-group"><label>Note</label><textarea id="expenseNote" rows="3"></textarea></div><div class="modal-actions"><button class="big-btn" onclick="saveExpense()">Save Expense</button><button class="cancel-btn" onclick="closeExpenseModal()">Cancel</button></div></div></div>
 
 <!-- =================================================
@@ -1415,7 +1366,7 @@
             <div class="form-group marketing-deal-wide"><label for="marketingDealName">Deal name</label><input id="marketingDealName" maxlength="120" placeholder="e.g. Buy 2 coffees, get 1 free"></div>
             <div class="form-group"><label for="marketingDealType">Deal type</label><select id="marketingDealType" onchange="updateMarketingDealFields()"><option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option><option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option></select></div>
             <div class="form-group"><label for="marketingDealCategory">Category</label><select id="marketingDealCategory" onchange="populateMarketingDealOptions({category:this.value})"><option value="">All categories</option></select></div>
-            <div class="form-group"><label for="marketingDealItem">Eligible item</label><select id="marketingDealItem"><option value="">All items</option></select></div>
+            <div class="form-group marketing-deal-wide"><label for="marketingDealItem">Eligible items in selected category (optional)</label><select id="marketingDealItem" multiple size="5"></select><small class="access-muted">Selecting a category limits this list to its items. Leave the category empty to see all items.</small></div>
             <div id="marketingBuyQuantityField" class="form-group"><label for="marketingBuyQuantity">Buy quantity</label><input id="marketingBuyQuantity" type="number" min="1" value="1"></div>
             <div id="marketingGetQuantityField" class="form-group"><label for="marketingGetQuantity">Get quantity</label><input id="marketingGetQuantity" type="number" min="1" value="1"></div>
             <div id="marketingRewardItemField" class="form-group marketing-deal-wide"><label for="marketingRewardItem">Reward item</label><select id="marketingRewardItem"><option value="">Same item</option></select></div>
@@ -1456,9 +1407,18 @@
 <section id="advanced-reports" class="page">
   <div class="page-header"><div><h2>📈 Advanced Reports</h2><div id="advancedReportWarnings" class="report-warning" role="status"></div>
 <p>Operational analytics stay separate from the main sales dashboard.</p></div><div><select id="advancedReportRange"><option value="today">Today</option><option value="week">This Week</option><option value="month" selected>This Month</option><option value="custom">Custom</option></select><button class="big-btn" onclick="loadAdvancedReports()">Apply</button></div></div>
-  <div class="cards"><div class="card"><span>Expense Total</span><strong id="advancedExpenseTotal">₹0.00</strong></div><div class="card"><span>Cancellation Value</span><strong id="advancedCancelledValue">₹0.00</strong></div></div>
-  <div class="advanced-report-grid"><div class="dashboard-box"><h3>Hourly Sales</h3><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div><div class="dashboard-box"><h3>Top Customers</h3><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div></div>
-  <div class="dashboard-box"><h3>Cancelled Orders</h3><div class="table-container"><table><thead><tr><th>Date</th><th>Orders</th><th>Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+  <div id="advancedReportsOverview" class="module-card-grid">
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('hourly-sales')"><span class="module-card-icon">🕒</span><span class="module-card-copy"><strong>Hourly Sales</strong><span>Compare orders and sales across each hour.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('top-customers')"><span class="module-card-icon">👥</span><span class="module-card-copy"><strong>Top Customers</strong><span>See your highest value customers for this period.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review cancellations by date and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+  </div>
+  <div id="advancedReportDetails" hidden>
+    <div class="module-subpage-header"><button type="button" class="module-back-button" onclick="showAdvancedReportsView('overview')">← Advanced Reports</button><div><span class="module-eyebrow">ANALYTICS</span><h2 id="advancedReportDetailTitle">Hourly Sales</h2><p id="advancedReportDetailDescription">Review the selected report.</p></div></div>
+    <div class="cards advanced-report-summary-cards"><div class="card"><span>Expense Total</span><strong id="advancedExpenseTotal">₹0.00</strong></div><div class="card"><span>Cancellation Value</span><strong id="advancedCancelledValue">₹0.00</strong></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="hourly-sales"><h3>Hourly Sales</h3><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><h3>Top Customers</h3><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><h3>Cancelled Orders</h3><div class="table-container"><table><thead><tr><th>Date</th><th>Orders</th><th>Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+  </div>
 </section>
 <!-- =================================================
      ACCESS USER MODAL
@@ -1528,6 +1488,7 @@
             <span>Print</span>
         </div>
         <div id="accessPermissionsEditor" class="access-permissions-editor"></div>
+        <div class="order-permission-controls"><h3>Order controls</h3><p class="access-muted">Control open-order edits, printing and changes to completed bills.</p><div id="accessOrderPermissionEditor" class="order-permission-grid"></div></div>
         <div class="modal-actions">
             <button class="big-btn" type="button" onclick="saveAccessProfile()">💾 Save Profile</button>
             <button class="cancel-btn" type="button" onclick="closeAccessProfileModal()">Cancel</button>
@@ -1552,7 +1513,13 @@
             <button class="big-btn" type="button" onclick="saveSettings()">💾 Save Settings</button>
         </div>
 
-        <div class="settings-card payment-mode-master-card" style="margin:0 0 20px;">
+        <div id="settingsModuleOverview" class="module-card-grid settings-module-grid"></div>
+        <div id="settingsFeatureHeader" class="module-subpage-header" hidden>
+            <button type="button" class="module-back-button" onclick="showSettingsFeature('')">← Settings</button>
+            <div><span class="module-eyebrow">SETTINGS</span><h2 id="settingsFeatureTitle">Settings</h2><p id="settingsFeatureDescription">Manage this area of your POS.</p></div>
+        </div>
+
+        <div class="settings-card payment-mode-master-card" data-settings-feature="payment-modes" hidden style="margin:0 0 20px;">
             <div class="settings-master-header">
                 <div>
                     <span class="eyebrow">PAYMENT MASTER</span>
@@ -1569,7 +1536,7 @@
         </div>
 
         <div class="settings-grid">
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="restaurant-profile" hidden>
                 <h3>🏪 Restaurant Profile</h3>
                 <div class="form-group"><label>Restaurant Name</label><input id="settingRestaurantName" type="text" placeholder="Restaurant Name"></div>
                 <div class="form-group"><label>Address</label><input id="settingAddress" type="text" placeholder="Address"></div>
@@ -1577,7 +1544,7 @@
                 <div class="form-group"><label>GSTIN</label><input id="settingGstin" type="text" placeholder="GSTIN"></div>
             </div>
 
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="bill-template" hidden>
                 <h3>🧾 Bill Template</h3>
                 <div class="form-group"><label>Header</label><textarea id="settingHeader" rows="3" placeholder="Cafe Management System"></textarea></div>
                 <div class="form-group"><label>Footer</label><textarea id="settingFooter" rows="3" placeholder="Thank You!&#10;Visit Again 😊"></textarea></div>
@@ -1597,7 +1564,7 @@
                 </div>
             </div>
 
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="thermal-printer" hidden>
                 <h3>🖨️ Thermal Printer</h3>
                 <div class="form-group"><label>Paper Width</label><select id="settingPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
                 <div class="settings-options">
@@ -1606,14 +1573,14 @@
                 </div>
             </div>
 
-            <div class="settings-card">
-                <h3>💱 General</h3>
+            <div class="settings-card" data-settings-feature="general-currency" hidden>
+                <h3>💱 General / Currency</h3>
                 <div class="form-group"><label>Currency</label><input id="settingCurrency" type="text" maxlength="5" value="₹"></div>
                 <div class="form-group"><label>GST Rate (%)</label><input id="settingGstRate" type="number" min="0" max="100" step="0.01" value="5"></div>
             </div>
         </div>
 
-                <div class="settings-card pos-preferences-card">
+        <div class="settings-card pos-preferences-card" data-settings-feature="pos-preferences" hidden>
             <div class="settings-master-header">
                 <div>
                     <span class="eyebrow">POINT OF SALE</span>
@@ -1627,35 +1594,36 @@
             </div>
         </div>
 <div class="settings-grid advanced-settings-grid">
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="billing-rules" hidden>
                 <h3>🧮 Billing Rules</h3>
                 <div class="form-group"><label>Default Payment</label><select id="settingDefaultPayment"></select></div>
                 <div class="form-group"><label>Order Prefix</label><input id="settingOrderPrefix" value="ORD-"></div>
                 <div class="form-group"><label>Invoice Prefix</label><input id="settingInvoicePrefix" value="INV-"></div>
-                <div class="settings-options"><label><input type="checkbox" id="settingAllowZeroAmount"> Allow zero-value bills</label><label><input type="checkbox" id="settingRoundTotals"> Round final total to nearest rupee</label></div>
+                <div class="settings-options"><label><input type="checkbox" id="settingAllowZeroAmount"> Allow zero-value bills</label></div>
+                <div class="form-group"><label for="settingTotalRoundingMode">Bill amount rounding</label><select id="settingTotalRoundingMode"><option value="none">Disabled</option><option value="nearest">Nearest rupee</option><option value="up">Round up to next rupee</option><option value="down">Round down to rupee</option></select></div>
             </div>
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="printer-receipt" hidden>
                 <h3>🖨️ Printer & Receipt</h3>
                 <div class="form-group"><label>Receipt Logo URL</label><input id="settingLogoUrl" placeholder="https://…/logo.png"></div>
                 <div class="form-group"><label>UPI ID</label><input id="settingUpiId" placeholder="cafe@upi"></div>
                 <div class="form-group"><label>Receipt Font</label><select id="settingReceiptFont"><option value="Arial">Arial</option><option value="Inter">Inter</option><option value="system-ui">System UI</option></select></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingPrintKitchenOnOrder"> Print KOT on successful order</label><label><input type="checkbox" id="settingEnableReceiptSound"> Receipt sound</label></div>
             </div>
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="operations" hidden>
                 <h3>🏪 Operations</h3>
                 <div class="form-group"><label>Opening Time</label><input id="settingOpeningTime" type="time" value="09:00"></div>
                 <div class="form-group"><label>Closing Time</label><input id="settingClosingTime" type="time" value="23:00"></div>
                 <div class="form-group"><label>Default Order Type</label><select id="settingDefaultOrderType"><option>Dine-in</option><option selected>Takeaway</option></select></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingAllowOrderNotes"> Allow order notes</label><label><input type="checkbox" id="settingShowItemNotes"> Show item notes on bill</label></div>
             </div>
-            <div class="settings-card">
-                <h3>🔔 Alerts & Customer Experience</h3>
+            <div class="settings-card" data-settings-feature="alerts-customer-experience" hidden>
+                <h3>🔔 Alert & Customer Experience</h3>
                 <div class="form-group"><label>Low Stock Threshold (future inventory)</label><input id="settingLowStockThreshold" type="number" min="0" value="5"></div>
                 <div class="form-group"><label>Customer Display Message</label><input id="settingCustomerMessage" placeholder="Thank you for visiting!"></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingEnableNotifications"> Enable operational notifications</label><label><input type="checkbox" id="settingEnableKOTSound"> KOT alert sound (Kitchen users)</label></div>
                 <div class="form-group"><label>KOT Alert Check Interval (seconds)</label><input id="settingKOTAlertInterval" type="number" min="3" max="60" value="5"></div>
             </div>
-            <div class="settings-card kot-setting-card">
+            <div class="settings-card kot-setting-card" data-settings-feature="kitchen-kot" hidden>
                 <h3>👨‍🍳 Kitchen / KOT</h3>
                 <div class="settings-options">
                     <label><input type="checkbox" id="settingKOTEnabled"> Enable KOT / Kitchen workflow</label>
@@ -1663,12 +1631,12 @@
                 <p class="access-muted">Disable this for cafes that prepare and serve orders directly without a KOT/KDS workflow. Existing KOT history is kept.</p>
                 <div class="form-group"><label>When KOT is disabled</label><select id="settingKOTDisabledBehavior"><option value="hide">Hide Kitchen & KOT Groups</option><option value="keep">Keep modules visible (read-only history)</option></select></div>
             </div>
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="data-admin" hidden>
                 <h3>🛡️ Data & Admin</h3>
                 <div class="form-group"><label>Session Timeout (hours)</label><input id="settingSessionTimeout" type="number" min="1" max="48" value="12"></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingAuditLog"> Enable audit logging flag</label></div>
             </div>
-            <div class="settings-card">
+            <div class="settings-card" data-settings-feature="appearance" hidden>
                 <h3>🎨 Appearance</h3>
                 <div class="form-group"><label>UI Density</label><select id="settingUiDensity"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div>
                 <div class="form-group"><label>Accent Label</label><input id="settingAccentLabel" placeholder="e.g. Cafe Theme"></div>
@@ -1676,11 +1644,11 @@
             </div>
         </div>
 
-        <div class="settings-card billing-adjustment-master-card" style="margin-top:20px;">
+        <div class="settings-card billing-adjustment-master-card" data-settings-feature="discount-charges" hidden style="margin-top:20px;">
             <div class="settings-master-header">
                 <div>
                     <span class="eyebrow">BILLING MASTER</span>
-                    <h3>Discounts & Charges</h3>
+                    <h3>Discount & Charges</h3>
                     <p class="access-muted">Create reusable billing rules once and select them during billing. Manual discount/charge entry is disabled.</p>
                 </div>
                 <button type="button" class="big-btn" onclick="openBillingAdjustmentModal()">＋ Create Rule</button>
@@ -1702,7 +1670,7 @@
             </div>
         </div>
 
-<div style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;">
+<div id="settingsFooterActions" hidden style="margin-top:20px;display:flex;gap:10px;flex-wrap:wrap;">
             <button class="big-btn" type="button" onclick="saveSettings()">💾 Save Settings</button>
             <button class="cancel-btn" type="button" onclick="resetSettings()">↩ Reset Defaults</button>
         </div>
@@ -1725,7 +1693,7 @@
             </div>
             <div id="localPrinterFields" class="printer-note">
                 <strong>Windows printer</strong>
-                <p style="margin:6px 0 10px">Select an installed 58/80mm thermal receipt printer with ESC/POS support. Bills go straight to Windows; virtual printers such as Microsoft Print to PDF are not suitable for direct receipt printing.</p>
+                <p style="margin:6px 0 10px">Select any printer installed in Windows, including PDF, Fax and other virtual printers. The selected Windows printer receives the bill or test print.</p>
                 <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
                     <select id="windowsPrinterSelect" style="min-width:280px;flex:1"><option value="">Detecting Windows printers…</option></select>
                     <button class="cancel-btn" type="button" onclick="discoverWindowsPrinters()">🔄 Refresh</button>
@@ -1826,7 +1794,7 @@
 
             <button
                 class="big-btn"
-                onclick="loadReports()">
+                onclick="loadReports();loadSalesAuditReport()">
 
                 🔄 Apply
 
@@ -2269,6 +2237,20 @@
 
 </div>
 
+<div class="dashboard-box sales-audit-box">
+    <div class="sales-audit-header">
+        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review payment transactions, payment methods, amounts collected, and remaining due for the selected report period.</p></div>
+        <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
+    </div>
+    <div id="salesAuditStatus" class="access-muted" role="status">Choose a date range above, then load the transaction audit.</div>
+    <div class="table-container">
+        <table>
+            <thead><tr><th>Payment time</th><th>Order / Invoice</th><th>Type / Table</th><th>Payment mode</th><th>Transaction ID</th><th>Transaction</th><th>Bill total</th><th>Order collected to date</th><th>Order due</th><th>Order status</th></tr></thead>
+            <tbody id="salesAuditBody"><tr><td colspan="10">No audit loaded.</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
 </section>
 
 <div id="menuCategoryModal" class="modal"><div class="modal-content menu-modal-content category-master-modal"><div class="modal-header"><div><span class="menu-eyebrow">CATEGORY MASTER</span><h2 id="menuCategoryModalTitle">Create Menu Category</h2></div><button class="close-btn" onclick="closeMenuCategoryModal()">✕</button></div><input id="menuCategoryEditingId" type="hidden"><div class="menu-form-grid"><div class="form-group full"><label>Category Name</label><input id="menuCategoryName" type="text" maxlength="120" placeholder="e.g. Beverages"></div><div class="form-group"><label>Sort Order</label><input id="menuCategorySort" type="number" min="0" step="1" value="0"></div><div class="form-group"><label>Status</label><select id="menuCategoryActive"><option value="true">Active</option><option value="false">Inactive</option></select></div></div><div class="modal-actions"><button type="button" class="big-btn" onclick="saveMenuCategory()">💾 Save Category</button><button type="button" class="cancel-btn" onclick="closeMenuCategoryModal()">Cancel</button></div><div id="menuCategoryMasterList" class="menu-category-master-list"></div></div></div>
@@ -2280,6 +2262,7 @@
       <div class="menu-form-grid">
         <div class="form-group"><label>Item Name</label><input id="menuName" type="text" placeholder="e.g. Cappuccino"></div>
         <div class="form-group menu-category-field"><label>Category</label><div class="menu-category-input-row"><select id="menuCategory"><option value="">Select category</option></select><button type="button" class="table-action-btn" onclick="openMenuCategoryModal()">＋ New</button></div></div>
+        <div class="form-group menu-image-field"><label for="menuImageFile">Item Image</label><input id="menuImageFile" type="file" accept="image/jpeg,image/png,image/webp" onchange="previewMenuItemImage(this.files?.[0])"><small class="access-muted">Choose a JPG, PNG or WebP image (up to 8 MB).</small><div id="menuImagePreview" class="menu-image-preview"></div><button type="button" class="table-action-btn" onclick="clearMenuItemImage()">Remove image</button></div>
         <div class="form-group"><label>Base Price</label><input id="menuPrice" type="number" min="0" step="0.01"></div>
         <div class="form-group"><label>Nature</label><select id="menuNature"><option>Goods</option><option>Service</option></select></div>
         <div class="form-group"><label>Measuring Unit</label><select id="menuUnit"><option>ea</option><option>pcs</option><option>g</option><option>kg</option><option>ml</option><option>lt</option><option>plate</option><option>cup</option><option>glass</option><option>box</option></select></div>
@@ -2289,13 +2272,54 @@
       </div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Prices</h3><p>Dine-in, Takeaway, Delivery and Online prices can differ.</p></div></div><div class="menu-channel-price-grid"><div class="form-group"><label>Dine-in</label><input id="menuPrice_dine_in" type="number" min="0" step="0.01"></div><div class="form-group"><label>Takeaway</label><input id="menuPrice_takeaway" type="number" min="0" step="0.01"></div><div class="form-group"><label>Delivery</label><input id="menuPrice_delivery" type="number" min="0" step="0.01"></div><div class="form-group"><label>Online</label><input id="menuPrice_online" type="number" min="0" step="0.01"></div></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
-      <div class="modal-actions"><button class="big-btn" onclick="addMenuItem()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
+      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach saved option sets such as milk choice, add-ons or spice level.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></div>
+      <div class="modal-actions"><button class="big-btn" onclick="saveMenuItemV2()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
     <div id="variantPickerModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Select Variant</h2><button class="close-btn" onclick="closeVariantPicker()">✕</button></div><div id="variantPickerBody"></div></div></div>
+    <div id="itemOptionsModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Choose Item Options</h2><button class="close-btn" onclick="closeItemOptions()">✕</button></div><div id="itemOptionsBody"></div><div class="modal-actions"><button type="button" class="big-btn" onclick="confirmItemOptions()">Add to Order</button><button type="button" class="cancel-btn" onclick="closeItemOptions()">Cancel</button></div></div></div>
+    <div id="menuOptionSetsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="optionSetModalTitle">
+      <div class="modal-content option-sets-modal option-set-builder-modal">
+        <div class="modal-header option-set-modal-header">
+          <div><span class="menu-eyebrow">MENU OPTIONS · CONFIGURATION</span><h2 id="optionSetModalTitle">Build item option sets</h2><p>Create reusable choices and attach them to menu items.</p></div>
+          <button type="button" class="close-btn" onclick="closeOptionSetsModal()" aria-label="Close option set editor">✕</button>
+        </div>
+        <div class="option-set-layout">
+          <aside class="option-set-sidebar">
+            <div class="option-set-section-heading"><span class="option-set-step">01</span><div><strong>Saved sets</strong><small>Select a set to edit, or start a new one.</small></div></div>
+            <select id="optionSetSelect" size="8" aria-label="Saved option sets" onchange="selectOptionSetForEdit(this.value)"></select>
+            <button type="button" class="option-set-new-button" onclick="newOptionSet()">＋ Create new set</button>
+            <div class="option-set-sidebar-tip"><span>✦</span><div><strong>Quick tip</strong><small>Use one set for a group of choices, like sizes or add-ons.</small></div></div>
+          </aside>
+          <div class="option-set-editor">
+            <input id="optionSetId" type="hidden">
+            <div class="option-set-editor-heading"><div><span class="option-set-step-label">SETUP</span><h3>Option set details</h3><p>Name this group and decide how many choices customers can make.</p></div><span class="option-set-editor-icon">🧩</span></div>
+            <div class="form-group option-set-name-field"><label for="optionSetName">Option set name</label><input id="optionSetName" maxlength="100" placeholder="e.g. Choose your milk"><small>Customers see this name when they customize an item.</small></div>
+            <div class="billing-inline-grid option-set-limits">
+              <div class="form-group"><label for="optionSetMin">Minimum choices</label><input id="optionSetMin" type="number" min="0" value="0"><small>Use 0 to make this group optional.</small></div>
+              <div class="form-group"><label for="optionSetMax">Maximum choices</label><input id="optionSetMax" type="number" min="1" value="1"><small>Limit how many choices can be selected.</small></div>
+            </div>
+            <section class="option-set-choices-section">
+              <div class="option-set-choices-heading"><div><span class="option-set-step-label">CHOICES</span><h3>Available choices</h3><p>Add choices from your existing menu items.</p></div><span class="option-set-choice-badge">Menu items</span></div>
+              <div class="form-group option-set-add-field">
+                <label for="optionSetMenuItemSearch">Search menu items</label>
+                <input id="optionSetMenuItemSearch" type="search" placeholder="Search by item name or category…" autocomplete="off" oninput="renderOptionSetMenuItemChoices()">
+                <label for="optionSetMenuItem">Choose a menu item</label>
+                <div class="option-set-add-row"><select id="optionSetMenuItem"><option value="">Choose an available menu item</option></select><button type="button" class="option-set-add-button" onclick="addOptionSetMenuItem()">＋ Add item</button></div>
+                <small>Each selected menu item becomes a choice. Set its extra price below.</small>
+              </div>
+              <div id="optionSetItems" class="option-set-items-list"></div>
+            </section>
+            <div class="modal-actions option-set-form-actions"><button type="button" class="big-btn" onclick="saveOptionSet()">Save Option Set</button><button type="button" class="danger-btn" onclick="deleteOptionSet()">Delete Set</button></div>
+          </div>
+        </div>
+        <div class="option-set-footer-note"><span>ⓘ</span><p>Extra prices are added to the menu item price. Set the minimum to 0 when customers can skip these choices.</p></div>
+      </div>
+    </div>
     <div id="menuImportModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="menuImportTitle">
         <div class="modal-content menu-import-modal">
             <div class="modal-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2 id="menuImportTitle">Import menu from Excel</h2></div><button class="close-btn" type="button" onclick="closeMenuImportModal()" aria-label="Close">✕</button></div>
-            <p class="access-muted">Upload an .xlsx workbook or CSV file. Use the template to match the expected column names.</p>
-            <div class="menu-import-actions"><button type="button" class="table-action-btn" onclick="downloadMenuImportTemplate()">↓ Download template</button><label class="menu-import-file-btn">Choose file<input id="menuImportFile" type="file" accept=".xlsx,.csv,.tsv,text/csv" onchange="readMenuImportFile(this.files?.[0])"></label><span id="menuImportFileName" class="access-muted">No file selected</span></div>
+            <p class="access-muted">Upload an .xlsx workbook or CSV file. Use the template to add items and update existing items by matching their names.</p>
+            <div class="form-group menu-import-mode"><label for="menuImportMode">Import action</label><select id="menuImportMode"><option value="upsert">Update matching items and add new items</option><option value="update">Update matching items only</option><option value="insert">Add new items only</option></select></div>
+            <div class="menu-import-actions"><button type="button" class="table-action-btn" onclick="downloadMenuImportTemplate()">↓ Download template</button><button type="button" class="table-action-btn" onclick="downloadExistingMenuSpreadsheet()">↓ Export existing items</button><label class="menu-import-file-btn">Choose file<input id="menuImportFile" type="file" accept=".xlsx,.csv,.tsv,text/csv" onchange="readMenuImportFile(this.files?.[0])"></label><span id="menuImportFileName" class="access-muted">No file selected</span></div>
             <div id="menuImportStatus" class="menu-import-status" role="status">Required columns: Item Name, Category, Price. Optional columns support channel prices, tax, unit, availability and KOT group.</div>
             <div id="menuImportPreview" class="menu-import-preview"></div>
             <div class="modal-actions"><button id="menuImportSubmit" type="button" class="big-btn" onclick="submitMenuSpreadsheet()" disabled>Import items</button><button type="button" class="cancel-btn" onclick="closeMenuImportModal()">Cancel</button></div>
@@ -2327,7 +2351,10 @@
                     <button type="button" class="cancel-btn" onclick="addSplitPayment()">＋ Add payment</button>
                     <div id="splitPaymentList" class="split-payment-list"></div>
                 </div>
-                <div class="pos-payment-footer"><button type="button" class="cancel-btn" onclick="closePayment()">Cancel</button><button type="button" class="big-btn pos-confirm-payment" onclick="confirmPOSPayment()">Confirm Payment</button></div>
+                <div class="pos-payment-footer">
+                    <div class="payment-collected-due checkout-payment-balance"><div><span>Amount Collected</span><strong id="checkoutAmountCollected">₹0.00</strong></div><div><span>Amount Due</span><strong id="checkoutAmountDue">₹0.00</strong></div></div>
+                    <div class="pos-payment-footer-actions"><button type="button" class="cancel-btn" onclick="closePayment()">Cancel</button><button type="button" class="big-btn pos-confirm-payment" onclick="confirmPOSPayment()">Confirm Payment</button></div>
+                </div>
             </section>
             <aside class="pos-payment-summary">
                 <div class="pos-payment-summary-header"><div><small id="paymentOrderDate"></small><span id="paymentOrderType">Dine-in</span></div><strong id="paymentBillTotalHeader">₹0.00</strong></div>
@@ -2336,6 +2363,7 @@
                     <div><span>Charges</span><strong id="paymentCharges">₹0.00</strong></div>
                     <div><span>Tax</span><strong id="paymentTax">₹0.00</strong></div>
                     <div><span>Discount</span><strong id="paymentDiscount">₹0.00</strong></div>
+                    <div id="paymentRoundingRow" hidden><span>Rounding</span><strong id="paymentRounding">₹0.00</strong></div>
                     <div class="payment-summary-total"><span>Bill Total</span><strong id="paymentBillTotal">₹0.00</strong></div>
                 </div>
                 <div id="paymentAllocations" class="payment-allocation-list"></div>
@@ -2555,80 +2583,6 @@
     </div>
 
 
-
-    <!-- =====================================================
-         ORDER DETAILS MODAL
-         ===================================================== -->
-
-    <div
-        id="orderDetailsModal"
-        class="modal">
-
-
-        <div
-            class="modal-content"
-            style="
-                width:650px;
-                max-width:95%;
-                text-align:left;
-                max-height:90vh;
-                overflow:auto;
-            ">
-
-
-            <div class="modal-header">
-
-
-                <h2>
-                    Order Details
-                </h2>
-
-
-                <button
-                    class="close-btn"
-                    onclick="closeOrderDetails()">
-
-                    ✕
-
-                </button>
-
-
-            </div>
-
-
-            <div
-                id="orderDetailsContent">
-            </div>
-
-
-            <div class="modal-actions">
-
-
-                <button
-                    class="big-btn"
-                    onclick="printCurrentOrder()">
-
-                    🖨️ Print Bill
-
-                </button>
-
-
-                <button
-                    class="cancel-btn"
-                    onclick="closeOrderDetails()">
-
-                    Close
-
-                </button>
-
-
-            </div>
-
-
-        </div>
-
-
-    </div>
 
     <div id="orderActivityModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="orderActivityTitle">
         <div class="modal-content order-activity-dialog">
@@ -2854,6 +2808,11 @@
                 <span id="billOrderNumber">-</span>
             </div>
 
+            <div id="billInvoiceRow" style="display:none">
+                <strong>Invoice:</strong>
+                <span id="billInvoiceNumber">-</span>
+            </div>
+
             <div>
                 <strong>Date:</strong>
                 <span id="billDate">-</span>
@@ -2922,6 +2881,11 @@
                 <strong id="billGST">₹0.00</strong>
             </div>
 
+            <div id="billRoundingRow" style="display:none">
+                <span>Rounding</span>
+                <strong id="billRounding">₹0.00</strong>
+            </div>
+
             <div class="bill-total">
                 <span>TOTAL</span>
                 <strong id="billTotal">₹0.00</strong>
@@ -2934,7 +2898,11 @@
         <div class="bill-payment">
 
             <strong>Payment:</strong>
-            <span id="billPaymentMethod">-</span>
+	        <span id="billPaymentMethod">-</span>
+
+            <div id="billPaymentAllocations" class="bill-payment-allocations"></div>
+            <div class="bill-payment-balance"><span>Amount Collected</span><strong id="billAmountCollected">₹0.00</strong></div>
+            <div class="bill-payment-balance due"><span>Amount Due</span><strong id="billAmountDue">₹0.00</strong></div>
 
         </div>
 
@@ -2988,6 +2956,21 @@
             <button type="button" class="cancel-btn" onclick="closeBillingAdjustmentModal()">Cancel</button>
             <button type="button" class="big-btn" onclick="saveBillingAdjustment()">💾 Save Rule</button>
         </div>
+    </div>
+</div>
+
+<div id="billingAdjustmentsDialog" class="modal" role="dialog" aria-modal="true" aria-labelledby="billingAdjustmentsDialogTitle">
+    <div class="modal-content billing-adjustments-dialog-content">
+        <div class="modal-header">
+            <div><span class="module-eyebrow">CURRENT BILL</span><h2 id="billingAdjustmentsDialogTitle">Discounts & charges</h2><p>Choose the saved rules to apply to this order.</p></div>
+            <button class="close-btn" type="button" onclick="closeBillingAdjustmentsDialog()" aria-label="Close">✕</button>
+        </div>
+        <div class="billing-adjustment-dialog-grid">
+            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading"><span>−</span><div><strong>Discount</strong><small>Reduce the bill total</small></div></div><label for="billingDiscountSelect">Choose a discount</label><select id="billingDiscountSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No discount</option></select><small id="billingDiscountRuleHelp" class="billing-adjustment-rule-help">No discount selected.</small></div>
+            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading charge"><span>＋</span><div><strong>Charge</strong><small>Add a service charge</small></div></div><label for="billingChargeSelect">Choose a charge</label><select id="billingChargeSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No charge</option></select><small id="billingChargeRuleHelp" class="billing-adjustment-rule-help">No charge selected.</small></div>
+        </div>
+        <div class="billing-adjustments-dialog-footer"><span id="billingAdjustmentDialogTotal">Order total: ₹0</span><div><button type="button" class="table-action-btn" onclick="clearBillingAdjustmentsDialog()">Clear selections</button><button type="button" class="cancel-btn" onclick="closeBillingAdjustmentsDialog()">Cancel</button><button type="button" class="big-btn" onclick="closeBillingAdjustmentsDialog()">Apply</button></div></div>
+        <button type="button" class="billing-adjustment-create-link" onclick="closeBillingAdjustmentsDialog();openBillingAdjustmentModal()">＋ Create a discount or charge rule</button>
     </div>
 </div>
 

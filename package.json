@@ -1,8 +1,61 @@
 {
+  "name": "cafe-pilot-pos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Cafe Pilot point of sale web and Windows desktop app",
+  "author": "Cafe Pilot",
+  "main": "desktop/main.js",
+  "scripts": {
+    "start": "node server.js",
+    "desktop:dev": "electron .",
+    "desktop:build:win": "electron-builder --win nsis --x64 --publish never"
+  },
   "dependencies": {
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "pg": "^8.23.0"
+  },
+  "devDependencies": {
+    "electron": "44.7.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.cafepilot.pos",
+    "productName": "Cafe Pilot POS",
+    "asar": true,
+    "directories": {
+      "output": "desktop-dist"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "public",
+        "to": "public",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   }
 }

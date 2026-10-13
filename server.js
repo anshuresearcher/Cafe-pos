@@ -21,6 +21,7 @@ const PORT = Number(process.env.PORT || 3000);
 
 const corsAllowedOrigins = new Set([
     "https://cafe-pos-six-gamma.vercel.app",
+    "https://cafe-pos-pos-cafe.vercel.app",
     "cafe-pos://app",
     "https://localhost",
     "http://localhost",
@@ -471,13 +472,32 @@ async function getEffectiveLicense(businessId) {
     return license;
 }
 
-const SUPPORT_LICENSE_TYPES = ['Trial', 'Sales', 'Marketing'];
+const SUPPORT_LICENSE_TYPES = ['Trial', 'Sales'];
+
+function normalizeSupportLicenseSelection(licenseTypeInput, addOnInput, fallbackType = 'Sales', fallbackAddOn = null) {
+    const rawType = String(licenseTypeInput === undefined ? fallbackType : licenseTypeInput || fallbackType).trim();
+    const legacyMarketing = rawType.toLowerCase() === 'marketing';
+    const licenseType = legacyMarketing ? 'Sales' : rawType;
+    const rawAddOn = addOnInput === undefined
+        ? (legacyMarketing ? 'Marketing' : fallbackAddOn)
+        : addOnInput;
+    const normalizedAddOn = String(rawAddOn || '').trim().toLowerCase();
+    const addOn = normalizedAddOn === '' || normalizedAddOn === 'none'
+        ? null
+        : normalizedAddOn === 'marketing'
+            ? 'Marketing'
+            : null;
+    if (normalizedAddOn && normalizedAddOn !== 'none' && !addOn) {
+        throw Object.assign(new Error('Add-on must be None or Marketing'), { status: 400 });
+    }
+    return { licenseType, addOn };
+}
 
 function normalizeSupportLicenseTerm(licenseTypeInput, durationInput, fallbackPlan = 'Sales', fallbackDuration = null) {
     const rawType = licenseTypeInput === undefined ? fallbackPlan : licenseTypeInput;
     const normalized = String(rawType || 'Sales').trim().toLowerCase();
     const licenseType = SUPPORT_LICENSE_TYPES.find(type => type.toLowerCase() === normalized);
-    if (!licenseType) throw Object.assign(new Error('License type must be Trial, Sales, or Marketing'), { status: 400 });
+    if (!licenseType) throw Object.assign(new Error('License type must be Trial or Sales'), { status: 400 });
 
     const allowedDurations = licenseType === 'Trial' ? [1] : [3, 6, 12];
     const durationMonths = Number(durationInput === undefined || durationInput === null || durationInput === ''
@@ -486,7 +506,7 @@ function normalizeSupportLicenseTerm(licenseTypeInput, durationInput, fallbackPl
     if (!allowedDurations.includes(durationMonths)) {
         throw Object.assign(new Error(licenseType === 'Trial'
             ? 'Trial licenses are valid for 1 month'
-            : `${licenseType} licenses must be valid for 3, 6, or 12 months`), { status: 400 });
+            : 'Sales licenses must be valid for 3, 6, or 12 months'), { status: 400 });
     }
     return { licenseType, durationMonths };
 }
@@ -541,9 +561,10 @@ function permissionForRequest(req) {
     if (path === "/reports/advanced") return "advanced_reports.view";
     if (path.startsWith("/reports/")) return "reports.view";
     if (path === "/settings") return method === "GET" ? "settings.view" : "settings.edit";
+    if (path === "/menu-option-sets") return method === "GET" ? "menu.view" : "menu.edit";
     if (path === "/printers" || path.startsWith("/printers/")) {
-        if (path.endsWith("/test") || path.endsWith("/print")) return "printer.print";
-        if (method === "GET") return "printer.view";
+        if (path.endsWith("/test") || path.endsWith("/print")) return req.query?.source === "kot" ? "kitchen.print" : req.query?.source === "order" ? "orders.print_open" : "printer.print";
+        if (method === "GET") return req.query?.source === "order" ? "orders.print_open" : "printer.view";
         if (method === "POST") return "printer.create";
         if (["PUT","PATCH"].includes(method)) return "printer.edit";
         if (method === "DELETE") return "printer.delete";
@@ -575,9 +596,10 @@ function permissionForRequest(req) {
     }
     if (path.endsWith("/payment-summary")) return "payments.view";
     if (path === "/orders" || path.startsWith("/orders/")) {
+        if (/^\/orders\/\d+\/printed$/.test(path)) return "orders.print_open";
         if (method === "GET") return "orders.view";
         if (method === "POST") return "new_order.create";
-        if (["PUT","PATCH"].includes(method)) return "orders.edit";
+        if (["PUT","PATCH"].includes(method)) return /^\/orders\/\d+$/.test(path) ? "orders.edit_open" : "orders.edit";
         if (method === "DELETE") return "orders.delete";
     }
     return null;
@@ -628,7 +650,10 @@ async function requireAuth(req, res, next) {
                 ? user.permissions
                 : {};
 
-            if ((user.profile_name !== "Admin" || user.permissions_override !== null) && permissions[required] !== true) {
+            const hasRequestedPermission = permissions[required] === true || (
+                required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true)
+            );
+            if ((user.profile_name !== "Admin" || user.permissions_override !== null) && !hasRequestedPermission) {
                 return res.status(403).json({ error: `Permission denied: ${required}` });
             }
 
@@ -707,6 +732,12 @@ async function ensureBusinessTables() {
 
     
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS pax INTEGER`);
+    await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS gstin VARCHAR(40)`);
+    await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS birth_date DATE`);
+    await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS address TEXT`);
+    await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS city VARCHAR(100)`);
+    await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS state VARCHAR(100)`);
 
     // Menu master enhancements: item nature, unit, item-level tax and channel pricing.
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS nature VARCHAR(20) NOT NULL DEFAULT 'Goods'`);
@@ -718,6 +749,8 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tax_mode VARCHAR(20) NOT NULL DEFAULT 'exclusive'`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tax_label VARCHAR(60) NOT NULL DEFAULT 'GST 5%'`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS channel_prices JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS image_url TEXT`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS option_set_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`CREATE TABLE IF NOT EXISTS menu_variants (
         id SERIAL PRIMARY KEY,
         menu_id INTEGER NOT NULL REFERENCES menu(id) ON DELETE CASCADE,
@@ -735,12 +768,18 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit VARCHAR(20)`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(6,2) NOT NULL DEFAULT 5`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_mode VARCHAR(20) NOT NULL DEFAULT 'exclusive'`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
 
     await pool.query(`CREATE TABLE IF NOT EXISTS kot_groups (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, description TEXT, station VARCHAR(60) NOT NULL DEFAULT 'Kitchen', sort_order INTEGER NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+    await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS printer_id INTEGER`);
+    await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS category_names JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS item_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_printed_at TIMESTAMP`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
     await pool.query(`CREATE TABLE IF NOT EXISTS order_activity (
         id SERIAL PRIMARY KEY,
@@ -754,6 +793,10 @@ async function ensureBusinessTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_activity_order_time ON order_activity(order_id, created_at DESC)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_id VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_name VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_adjustment_id VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_adjustment_name VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS charge_adjustment_id VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS charge_adjustment_name VARCHAR(120)`);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS expense_categories (
@@ -1307,6 +1350,69 @@ function cleanVariants(value) {
     })).filter(v => v.name && Number.isFinite(v.price) && v.price >= 0);
 }
 
+function cleanMenuImage(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const image = String(value);
+    if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
+        throw Object.assign(new Error("Choose a JPG, PNG or WebP image."), { status: 400 });
+    }
+    if (image.length > 2_100_000) throw Object.assign(new Error("The processed menu image is too large. Choose a smaller image."), { status: 413 });
+    return image;
+}
+
+function cleanMenuOptionSetIds(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.map(id => String(id || "").trim()).filter(id => /^[a-zA-Z0-9_-]{1,80}$/.test(id)))].slice(0, 30);
+}
+
+function cleanOrderOptions(value) {
+    if (!Array.isArray(value)) return [];
+    return value.slice(0, 30).map(set => ({
+        setId: String(set?.setId || "").slice(0, 80),
+        setName: String(set?.setName || "").trim().slice(0, 100),
+        options: (Array.isArray(set?.options) ? set.options : []).slice(0, 50).map(option => ({
+            id: String(option?.id || "").slice(0, 80),
+            name: String(option?.name || "").trim().slice(0, 100),
+            price: Math.max(0, Number(option?.price || 0))
+        })).filter(option => option.name && Number.isFinite(option.price))
+    })).filter(set => set.setName && set.options.length);
+}
+
+async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppliedBasePrice, suppliedPrice) {
+    const submitted = cleanOrderOptions(value);
+    const assignedIds = Array.isArray(menuItem?.option_set_ids) ? menuItem.option_set_ids.map(String) : [];
+    if (!assignedIds.length) return { options: submitted, addOnPrice: submitted.reduce((sum, set) => sum + set.options.reduce((subtotal, option) => subtotal + option.price, 0), 0) };
+    const settingsResult = await db.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [businessId]);
+    const allSets = Array.isArray(settingsResult.rows[0]?.sets) ? settingsResult.rows[0].sets : [];
+    const configured = allSets.filter(set => assignedIds.includes(String(set.id)));
+    const selectedBySet = new Map(submitted.map(set => [String(set.setId), set]));
+    const options = [];
+    let addOnPrice = 0;
+    for (const set of configured) {
+        const selected = selectedBySet.get(String(set.id));
+        const choices = Array.isArray(selected?.options) ? selected.options : [];
+        const min = Math.max(0, Number(set.minSelections) || 0);
+        const max = Math.max(1, Number(set.maxSelections) || 1);
+        if (choices.length < min || choices.length > max) throw new Error(`Choose ${min === max ? min : `${min} to ${max}`} option${max === 1 ? "" : "s"} for ${set.name}.`);
+        const authoritative = [];
+        for (const choice of choices) {
+            const saved = (set.options || []).find(option => String(option.id) === String(choice.id));
+            if (!saved) throw new Error(`An option for ${set.name} is no longer available.`);
+            const price = Math.max(0, Number(saved.price) || 0);
+            addOnPrice += price;
+            authoritative.push({ id: String(saved.id), name: String(saved.name), price });
+        }
+        if (authoritative.length) options.push({ setId: String(set.id), setName: String(set.name), options: authoritative });
+        selectedBySet.delete(String(set.id));
+    }
+    const basePrice = Number(suppliedBasePrice);
+    const finalPrice = Number(suppliedPrice);
+    if (Number.isFinite(basePrice) && Number.isFinite(finalPrice) && Math.abs((basePrice + addOnPrice) - finalPrice) > 0.02) {
+        throw new Error("Item total does not match the selected option prices. Reopen the item and choose its options again.");
+    }
+    return { options, addOnPrice };
+}
+
 async function replaceMenuVariants(client, menuId, variants) {
     const businessId = Number(tenantContext.getStore()?.businessId || 0);
     if (!businessId) throw new Error("Business context is missing");
@@ -1343,16 +1449,18 @@ app.post(
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
+            const imageUrl = cleanMenuImage(req.body.imageUrl);
+            const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
             }
             const businessId = Number(req.user.business_id);
             const result = await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
                 RETURNING *
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId]);
             await replaceMenuVariants(client, result.rows[0].id, variants);
             await client.query('COMMIT');
             res.status(201).json({ success: true, menu: result.rows[0] });
@@ -1368,13 +1476,16 @@ app.post("/api/menu/import", async (req, res) => {
     const rows = req.body?.items;
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: "Choose at least one valid menu item to import." });
     if (rows.length > 500) return res.status(400).json({ error: "Import up to 500 menu items at a time." });
+    const mode = ["insert", "update", "upsert"].includes(req.body?.mode) ? req.body.mode : "insert";
 
     const businessId = Number(req.user?.business_id);
     if (!Number.isInteger(businessId) || businessId <= 0) return res.status(403).json({ error: "A valid business account is required to import menu items." });
     const client = await pool.connect();
     const skipped = [];
     const warnings = [];
+    const seenNames = new Set();
     let imported = 0;
+    let updated = 0;
     let categoriesCreated = 0;
     try {
         await client.query("BEGIN");
@@ -1389,12 +1500,25 @@ app.post("/api/menu/import", async (req, res) => {
                 continue;
             }
 
+            const nameKey = name.toLocaleLowerCase();
+            if (seenNames.has(nameKey)) {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "This item name appears more than once in the spreadsheet." });
+                continue;
+            }
+            seenNames.add(nameKey);
+
             const existing = await client.query(
-                `SELECT id FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
+                `SELECT id,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices
+                 FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
                 [businessId, name]
             );
-            if (existing.rows.length) {
+            const current = existing.rows[0] || null;
+            if (current && mode === "insert") {
                 skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "An item with this name already exists for this business." });
+                continue;
+            }
+            if (!current && mode === "update") {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "No existing item with this name was found to update." });
                 continue;
             }
 
@@ -1410,30 +1534,47 @@ app.post("/api/menu/import", async (req, res) => {
                 categoriesCreated += 1;
             }
 
-            let kotGroupId = null;
+            let kotGroupId = current?.kot_group_id || null;
             const rawKOTGroup = String(source.kotGroup || source.kot_group || "").trim();
             if (rawKOTGroup) {
                 const byId = /^\d+$/.test(rawKOTGroup)
                     ? await client.query(`SELECT id FROM kot_groups WHERE id=$1 AND business_id=$2`, [Number(rawKOTGroup), businessId])
                     : await client.query(`SELECT id FROM kot_groups WHERE LOWER(name)=LOWER($1) AND business_id=$2`, [rawKOTGroup, businessId]);
                 kotGroupId = byId.rows[0]?.id || null;
-                if (!kotGroupId) warnings.push({ row: Number(source.rowNumber) || index + 2, name, reason: `KOT group "${rawKOTGroup}" was not found for this business; item imported without a station.` });
+                if (!kotGroupId) warnings.push({ row: Number(source.rowNumber) || index + 2, name, reason: `KOT group "${rawKOTGroup}" was not found for this business; the existing station was kept.` });
             }
 
-            const nature = ["Goods", "Service"].includes(source.nature) ? source.nature : "Goods";
-            const unit = String(source.unit || "ea").trim().slice(0, 20) || "ea";
-            const available = source.available !== false;
-            const tax = normaliseTaxPayload(source);
-            const taxMode = ["inclusive", "exclusive"].includes(source.taxMode) ? source.taxMode : "exclusive";
-            const channelPrices = cleanChannelPrices(source.channelPrices);
-            await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
-            imported += 1;
+            const nature = ["Goods", "Service"].includes(source.nature) ? source.nature : current?.nature || "Goods";
+            const unit = String(source.unit || current?.unit || "ea").trim().slice(0, 20) || "ea";
+            const available = source.available === null || source.available === undefined ? current?.available !== false : source.available !== false;
+            const taxSource = {
+                ...source,
+                taxRate: source.taxRate ?? current?.tax_rate ?? 5,
+                cgstRate: source.taxRate === null || source.taxRate === undefined ? current?.cgst_rate : undefined,
+                sgstRate: source.taxRate === null || source.taxRate === undefined ? current?.sgst_rate : undefined,
+                igstRate: source.taxRate === null || source.taxRate === undefined ? current?.igst_rate : undefined,
+                taxLabel: source.taxRate === null || source.taxRate === undefined ? current?.tax_label : undefined
+            };
+            const tax = normaliseTaxPayload(taxSource);
+            const taxMode = ["inclusive", "exclusive"].includes(source.taxMode) ? source.taxMode : current?.tax_mode || "exclusive";
+            const channelPrices = cleanChannelPrices({ ...(current?.channel_prices || {}), ...(source.channelPrices || {}) });
+            if (current) {
+                await client.query(`
+                    UPDATE menu SET name=$1,price=$2,category=$3,available=$4,kot_group_id=$5,nature=$6,unit=$7,
+                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14
+                    WHERE id=$15 AND business_id=$16
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), current.id, businessId]);
+                updated += 1;
+            } else {
+                await client.query(`
+                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
+                imported += 1;
+            }
         }
         await client.query("COMMIT");
-        res.status(201).json({ success: true, imported, categoriesCreated, skipped, warnings });
+        res.status(201).json({ success: true, imported, updated, categoriesCreated, skipped, warnings });
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Menu import error:", error);
@@ -1459,6 +1600,8 @@ app.put(
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
+            const imageUrl = cleanMenuImage(req.body.imageUrl);
+            const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
@@ -1466,9 +1609,9 @@ app.put(
             const result = await client.query(`
                 UPDATE menu SET name=$1, price=$2, category=$3, kot_group_id=$4,
                     nature=$5, unit=$6, tax_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10,
-                    tax_mode=$11, tax_label=$12, channel_prices=$13
-                WHERE id=$14 AND business_id=$15 RETURNING *
-            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), req.params.id, Number(req.user.business_id)]);
+                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15
+                WHERE id=$16 AND business_id=$17 RETURNING *
+            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), req.params.id, Number(req.user.business_id)]);
             if (!result.rows.length) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: "Menu item not found" });
@@ -1740,6 +1883,33 @@ async function recordOrderActivity(db, orderId, eventType, description, req) {
     `, [Number(orderId), String(eventType).slice(0, 100), String(description || ""), actor, businessId]);
 }
 
+async function createKOTForOrder(db, businessId, orderId) {
+    const existing = await db.query("SELECT id FROM kot WHERE order_id=$1 LIMIT 1", [Number(orderId)]);
+    if (existing.rows.length) return 0;
+    const items = await db.query(`
+        SELECT oi.menu_id,oi.item_name,oi.quantity,oi.options,m.category,m.kot_group_id
+        FROM order_items oi
+        LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2
+        WHERE oi.order_id=$1
+        ORDER BY oi.id
+    `, [Number(orderId), Number(businessId)]);
+    if (!items.rows.length) return 0;
+    const groups = await db.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [Number(businessId)]);
+    const activeGroupIds = new Set(groups.rows.map(group=>Number(group.id)));
+    const values=[];
+    const rows=items.rows.map((item,index)=>{
+        const itemRoute=groups.rows.find(group=>Number(item.menu_id)>0&&Array.isArray(group.item_ids)&&group.item_ids.map(Number).includes(Number(item.menu_id)));
+        const categoryRoute=groups.rows.find(group=>item.category&&Array.isArray(group.category_names)&&group.category_names.some(category=>String(category).toLowerCase()===String(item.category).toLowerCase()));
+        const fallback=activeGroupIds.has(Number(item.kot_group_id))?Number(item.kot_group_id):null;
+        const groupId=Number(itemRoute?.id||categoryRoute?.id||fallback)||null;
+        const offset=index*6;
+        values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]));
+        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb)`;
+    });
+    await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options) VALUES ${rows.join(",")}`,values);
+    return items.rows.length;
+}
+
 app.post(
     "/api/orders",
     async (req, res) => {
@@ -1757,6 +1927,7 @@ app.post(
         const tableNumber =
             b.tableNumber ||
             b.table_number;
+        const pax = orderType === "Dine-in" ? Number(b.pax) || 1 : null;
 
         const subtotal =
             Number(b.subtotal);
@@ -1803,9 +1974,9 @@ app.post(
         }
 
 
-        if (
-            orderType === "Dine-in" &&
-            !tableNumber
+            if (
+                orderType === "Dine-in" &&
+                !tableNumber
         ) {
 
             return res.status(400).json({
@@ -1850,6 +2021,10 @@ app.post(
 
                 }
 
+                if (!Number.isInteger(pax) || pax < 1 || (Number(table.capacity) > 0 && pax > Number(table.capacity))) {
+                    throw new Error(`Number of guests must be between 1 and ${Number(table.capacity) || "the table capacity"}`);
+                }
+
 
                 if (
                     table.status !==
@@ -1863,6 +2038,60 @@ app.post(
                 }
 
             }
+
+
+            const businessId = Number(req.user.business_id);
+            const normalizedItems = items.map(item => {
+                const rawMenuId = item.menuId ?? item.menu_id ?? item.id ?? null;
+                const parsedMenuId = Number(rawMenuId);
+                const menuId = Number.isInteger(parsedMenuId) && parsedMenuId > 0 ? parsedMenuId : null;
+                const price = Number(item.price);
+                const quantity = Number(item.quantity);
+                const name = String(item.name || item.item_name || "").trim();
+                if (!name || !Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) {
+                    throw new Error("Invalid order item information");
+                }
+                return {
+                    source: item, name, price, quantity, menuId,
+                    variantId: Number(item.variantId ?? item.variant_id) || null,
+                    kotGroupId: Number(item.kotGroupId ?? item.kot_group_id) || null,
+                    options: cleanOrderOptions(item.options),
+                    basePrice: Number(item.basePrice ?? item.base_price ?? price)
+                };
+            });
+            const menuIds = [...new Set(normalizedItems.map(item => item.menuId).filter(Boolean))];
+            const menuMetadata = menuIds.length ? await client.query(
+                `SELECT id,unit,tax_rate,tax_mode,kot_group_id,category,option_set_ids FROM menu WHERE id=ANY($1::int[]) AND business_id=$2`,
+                [menuIds, businessId]
+            ) : { rows: [] };
+            const menuMetadataById = new Map(menuMetadata.rows.map(item => [Number(item.id), item]));
+            for (const item of normalizedItems) {
+                if (item.menuId && !menuMetadataById.has(item.menuId)) throw new Error("One of the menu items is no longer available for this business.");
+                const metadata = item.menuId ? menuMetadataById.get(item.menuId) : null;
+                item.unit = item.source.unit || metadata?.unit || null;
+                item.taxRate = Number(item.source.taxRate ?? item.source.tax_rate ?? metadata?.tax_rate ?? 5);
+                item.taxMode = item.source.taxMode === "inclusive" || item.source.tax_mode === "inclusive" || (!item.source.taxMode && !item.source.tax_mode && metadata?.tax_mode === "inclusive") ? "inclusive" : "exclusive";
+                item.category = String(metadata?.category || item.source.category || "");
+                const normalizedOptions = await normalizeOrderItemOptions(client, businessId, metadata, item.source.options, item.basePrice, item.price);
+                item.options = normalizedOptions.options;
+                const optionTotal = normalizedOptions.addOnPrice;
+                if (!Number.isFinite(item.basePrice)) item.basePrice = Math.max(0, item.price - optionTotal);
+                item.price = item.basePrice + optionTotal;
+            }
+            const routeGroups = await client.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [businessId]);
+            for (const item of normalizedItems) {
+                const menuGroupId = Number(menuMetadataById.get(item.menuId)?.kot_group_id) || null;
+                const itemRoute = routeGroups.rows.find(group => Array.isArray(group.item_ids) && group.item_ids.map(Number).includes(Number(item.menuId)));
+                const categoryRoute = routeGroups.rows.find(group => Array.isArray(group.category_names) && group.category_names.some(category => String(category).toLowerCase() === item.category.toLowerCase()));
+                item.kotGroupId = Number(itemRoute?.id || categoryRoute?.id || item.kotGroupId || menuGroupId) || null;
+            }
+            const kotGroupIds = [...new Set(normalizedItems.map(item => item.kotGroupId).filter(Boolean))];
+            const validKotGroupIds = kotGroupIds.length ? await client.query(
+                `SELECT id FROM kot_groups WHERE id=ANY($1::int[]) AND business_id=$2 AND active=TRUE`,
+                [kotGroupIds, businessId]
+            ) : { rows: [] };
+            const validKotSet = new Set(validKotGroupIds.rows.map(item => Number(item.id)));
+            normalizedItems.forEach(item => { if (!validKotSet.has(item.kotGroupId)) item.kotGroupId = null; });
 
 
             const orderResult =
@@ -1883,11 +2112,16 @@ app.post(
                         service_charge,
                         notes,
                         marketing_deal_id,
-                        marketing_deal_name
+                        marketing_deal_name,
+                        discount_adjustment_id,
+                        discount_adjustment_name,
+                        charge_adjustment_id,
+                        charge_adjustment_name,
+                        pax
                     )
                     VALUES
                     (
-                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14
+                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14,$15,$16,$17,$18,$19
                     )
                     RETURNING *
                     `,
@@ -1905,7 +2139,12 @@ app.post(
                         b.notes ? String(b.notes).slice(0, 1000) : null,
                         orderStatus,
                         b.marketingDealId ? String(b.marketingDealId).slice(0, 120) : null,
-                        b.marketingDealName ? String(b.marketingDealName).slice(0, 120) : null
+                        b.marketingDealName ? String(b.marketingDealName).slice(0, 120) : null,
+                        b.discountAdjustmentId ? String(b.discountAdjustmentId).slice(0, 120) : null,
+                        b.discountAdjustmentName ? String(b.discountAdjustmentName).slice(0, 120) : null,
+                        b.chargeAdjustmentId ? String(b.chargeAdjustmentId).slice(0, 120) : null,
+                        b.chargeAdjustmentName ? String(b.chargeAdjustmentName).slice(0, 120) : null,
+                        pax
                     ]
                 );
 
@@ -1914,118 +2153,24 @@ app.post(
                 orderResult.rows[0];
 
 
-            for (const item of items) {
-
-                const name =
-                    item.name ||
-                    item.item_name;
-
-                const price =
-                    Number(item.price);
-
-                const quantity =
-                    Number(item.quantity);
-
-                const menuId =
-                    item.menuId ||
-                    item.menu_id ||
-                    item.id ||
-                    null;
-
-                const variantId = item.variantId || item.variant_id || null;
-                let itemUnit = item.unit || null;
-                let itemTaxRate = Number(item.taxRate ?? item.tax_rate ?? 5);
-                let itemTaxMode = item.taxMode === 'inclusive' || item.tax_mode === 'inclusive' ? 'inclusive' : 'exclusive';
-                if (menuId) {
-                    const meta = await client.query(`SELECT unit,tax_rate,tax_mode FROM menu WHERE id=$1`, [menuId]);
-                    if (meta.rows[0]) {
-                        itemUnit = itemUnit || meta.rows[0].unit;
-                        itemTaxRate = Number(meta.rows[0].tax_rate ?? itemTaxRate);
-                        if (!item.taxMode && meta.rows[0].tax_mode === 'inclusive') itemTaxMode = 'inclusive';
-                    }
-                }
-
-                let kotGroupId = item.kotGroupId || item.kot_group_id || null;
-                if (menuId && !kotGroupId) {
-                    const mg = await client.query(`SELECT kot_group_id FROM menu WHERE id=$1`, [menuId]);
-                    kotGroupId = mg.rows[0]?.kot_group_id || null;
-                }
-                if (kotGroupId) {
-                    const gg = await client.query(`SELECT id FROM kot_groups WHERE id=$1 AND active=TRUE`, [kotGroupId]);
-                    kotGroupId = gg.rows[0]?.id || null;
-                }
-
-
-                if (
-                    !name ||
-                    !Number.isFinite(price) ||
-                    !Number.isFinite(quantity) ||
-                    quantity <= 0
-                ) {
-
-                    throw new Error(
-                        "Invalid order item information"
-                    );
-
-                }
-
-
-                await client.query(
-                    `
-                    INSERT INTO order_items
-                    (
-                        order_id,
-                        menu_id,
-                        variant_id,
-                        item_name,
-                        price,
-                        quantity,
-                        line_total,
-                        unit,
-                        tax_rate,
-                        tax_mode
-                    )
-                    VALUES
-                    ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                    `,
-                    [
-                        order.id,
-                        menuId,
-                        variantId,
-                        name,
-                        price,
-                        quantity,
-                        price * quantity,
-                        itemUnit,
-                        itemTaxRate,
-                        itemTaxMode
-                    ]
-                );
-
-
-                if (createKot) {
-                    await client.query(
-                        `
-                        INSERT INTO kot
-                        (
-                            order_id,
-                            item_name,
-                            quantity,
-                            status,
-                            kot_group_id
-                        )
-                        VALUES
-                        ($1,$2,$3,'Pending',$4)
-                        `,
-                        [
-                            order.id,
-                            name,
-                            quantity,
-                            kotGroupId
-                        ]
-                    );
-                }
-
+            const itemValues = [];
+            const itemRows = normalizedItems.map((item, index) => {
+                const offset = index * 11;
+                itemValues.push(order.id,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options));
+                return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb)`;
+            });
+            await client.query(`
+                INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
+                VALUES ${itemRows.join(",")}
+            `, itemValues);
+            if (createKot) {
+                const kotValues = [];
+                const kotRows = normalizedItems.map((item, index) => {
+                    const offset = index * 5;
+                    kotValues.push(order.id,item.name,item.quantity,item.kotGroupId,JSON.stringify(item.options));
+                    return `($${offset+1},$${offset+2},$${offset+3},'Pending',$${offset+4},$${offset+5}::jsonb)`;
+                });
+                await client.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options) VALUES ${kotRows.join(",")}`, kotValues);
             }
 
 
@@ -2063,7 +2208,7 @@ app.post(
 
             console.error(e);
 
-            res.status(400).json({
+            res.status(e.status || 400).json({
                 error: e.message
             });
 
@@ -2076,6 +2221,16 @@ app.post(
     }
 );
 
+app.post("/api/orders/:id/printed", async (req,res)=>{
+    try {
+        const result=await pool.query(`UPDATE orders SET bill_printed_at=COALESCE(bill_printed_at,CURRENT_TIMESTAMP),updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND business_id=$2 AND status='Completed' RETURNING id,bill_printed_at`,[Number(req.params.id),Number(req.user.business_id)]);
+        if(!result.rows.length)return res.status(404).json({error:"Completed order not found"});
+        res.json({success:true,billPrintedAt:result.rows[0].bill_printed_at});
+    } catch(e) {
+        res.status(500).json({error:"Could not record the bill print"});
+    }
+});
+
 
 app.get(
     "/api/orders",
@@ -2086,10 +2241,19 @@ app.get(
             const result =
                 await pool.query(
                     `
-                    SELECT *
-                    FROM orders
-                    WHERE business_id = $1
-                    ORDER BY created_at DESC
+                    SELECT o.*,
+                           c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
+                           c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
+                           c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
+                           COALESCE((
+                               SELECT json_agg(DISTINCT p.payment_method)
+                               FROM payments p
+                               WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
+                           ), '[]'::json) AS payment_modes
+                    FROM orders o
+                    LEFT JOIN customers c ON c.id=o.customer_id AND c.business_id=o.business_id
+                    WHERE o.business_id = $1
+                    ORDER BY o.created_at DESC
                     `
                     , [Number(req.user.business_id)]
                 );
@@ -2129,19 +2293,159 @@ app.get("/api/orders/:id/payment-summary", async (req,res)=>{
         const orderId=Number(req.params.id);
         const businessId=Number(req.user.business_id);
         const result=await pool.query(`
-            SELECT o.total,
-                   COALESCE(SUM(CASE WHEN p.payment_status='Success' THEN p.amount ELSE 0 END),0) AS amount_collected
-            FROM orders o LEFT JOIN payments p ON p.order_id=o.id
+            SELECT o.total,o.payment_method,
+                   COALESCE(summary.amount_collected,0) AS amount_collected,
+                   COALESCE(summary.allocations,'[]'::json) AS allocations
+            FROM orders o
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(SUM(method_amount),0) AS amount_collected,
+                       COALESCE(json_agg(json_build_object('method',payment_method,'amount',method_amount) ORDER BY payment_method),'[]'::json) AS allocations
+                FROM (
+                    SELECT payment_method,SUM(amount) AS method_amount
+                    FROM payments
+                    WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success'
+                    GROUP BY payment_method
+                ) payment_totals
+            ) summary ON TRUE
             WHERE o.id=$1 AND o.business_id=$2
-            GROUP BY o.id
         `,[orderId,businessId]);
         if(!result.rows.length) return res.status(404).json({error:'Order not found'});
         const total=Number(result.rows[0].total||0);
         const amountCollected=Number(result.rows[0].amount_collected||0);
-        res.json({total,amountCollected,amountDue:Math.max(0,total-amountCollected)});
+        const nonChargeable = /non.?chargeable/i.test(String(result.rows[0].payment_method || ""));
+        res.json({total,amountCollected,amountDue:nonChargeable?0:Math.max(0,total-amountCollected),allocations:result.rows[0].allocations||[]});
     } catch(e) {
         console.error('Order payment summary error:',e);
         res.status(500).json({error:'Failed to load payment summary'});
+    }
+});
+
+app.post("/api/orders/:id/settle", async (req, res) => {
+    const client = await pool.connect();
+    const businessId = Number(req.user?.business_id);
+    try {
+        const orderId = Number(req.params.id);
+        if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: "Invalid order ID" });
+        await client.query("BEGIN");
+        const orderResult = await client.query(
+            `SELECT * FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE`,
+            [orderId, businessId]
+        );
+        const order = orderResult.rows[0];
+        if (!order) throw new Error("Order not found");
+
+        const collectedResult = await client.query(
+            `SELECT COALESCE(SUM(amount),0) AS collected FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'`,
+            [orderId, businessId]
+        );
+        const collectedBefore = Number(collectedResult.rows[0]?.collected || 0);
+        const billTotal = Math.max(0, Number(order.total || 0));
+        const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
+        const nonChargeable = req.body?.nonChargeable === true;
+        const keepOpen = req.body?.keepOpen === true && !nonChargeable;
+        const methodLabel = String(req.body?.paymentMethod || "").trim().slice(0, 50) || (nonChargeable ? "Non-chargeable" : "Payment");
+        const payments = nonChargeable ? [{ method: "Non-chargeable", amount: 0 }] : (Array.isArray(req.body?.payments) ? req.body.payments : []);
+        const normalizedPayments = payments.map(payment => ({
+            method: String(payment?.method || "").trim().slice(0, 50),
+            amount: Math.round(Number(payment?.amount) * 100) / 100
+        }));
+        if (!nonChargeable && (!normalizedPayments.length || normalizedPayments.some(payment => !payment.method || !Number.isFinite(payment.amount) || payment.amount < 0))) {
+            throw new Error("Add a valid payment method and amount.");
+        }
+        const currentAmount = Math.round(normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
+        if (!nonChargeable && keepOpen && (currentAmount <= 0 || currentAmount >= remaining)) {
+            throw new Error("A partial payment must be greater than zero and less than the remaining balance.");
+        }
+        if (!nonChargeable && !keepOpen && Math.abs(currentAmount - remaining) > 0.01) {
+            throw new Error(`Payments must add up to the remaining balance of ${remaining.toFixed(2)}.`);
+        }
+
+        let insertedPayments = [];
+        if (normalizedPayments.length) {
+            const values = [];
+            const rows = normalizedPayments.map((payment, index) => {
+                const offset = index * 5;
+                values.push(orderId, order.order_number, payment.amount, payment.method, businessId);
+                return `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},'Success',NULL,$${offset + 5})`;
+            });
+            const inserted = await client.query(`
+                INSERT INTO payments(order_id,order_number,amount,payment_method,payment_status,transaction_id,business_id)
+                VALUES ${rows.join(",")}
+                RETURNING id,amount,payment_method,payment_status,created_at
+            `, values);
+            insertedPayments = inserted.rows;
+        }
+
+        const nextStatus = keepOpen ? "Open" : "Completed";
+        const orderUpdate = await client.query(`
+            UPDATE orders SET payment_method=$1,status=$2,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$3 AND business_id=$4 RETURNING *
+        `, [methodLabel, nextStatus, orderId, businessId]);
+        const savedOrder = orderUpdate.rows[0];
+        if (!keepOpen && req.body?.createKot === true) await createKOTForOrder(client,businessId,orderId);
+        const paymentDescription = nonChargeable
+            ? "Non-chargeable sale recorded."
+            : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
+        await recordOrderActivity(client, orderId, "Payment recorded", paymentDescription, req);
+        if (!keepOpen) await recordOrderActivity(client, orderId, "Order completed", "Sale completed.", req);
+
+        if (!keepOpen && savedOrder.order_type === "Dine-in" && savedOrder.table_number) {
+            await client.query(`UPDATE restaurant_tables SET status='Available' WHERE table_number=$1 AND business_id=$2`, [savedOrder.table_number, businessId]);
+        }
+
+        const status = nonChargeable ? "Non-chargeable" : keepOpen ? "Partially Paid" : "Paid";
+        const invoiceMethod = methodLabel;
+        let invoiceResult = await client.query(`SELECT * FROM invoices WHERE order_id=$1 FOR UPDATE`, [orderId]);
+        let invoice = invoiceResult.rows[0] || null;
+        let customerId = req.body?.customerId ?? savedOrder.customer_id ?? null;
+        if (customerId !== null) {
+            customerId = Number(customerId);
+            if (!Number.isInteger(customerId) || customerId <= 0) throw new Error("Invalid customer ID");
+            const customer = await client.query(`SELECT id FROM customers WHERE id=$1 AND business_id=$2`, [customerId, businessId]);
+            if (!customer.rows.length) throw new Error("Customer not found");
+        }
+        if (invoice) {
+            const updatedInvoice = await client.query(`UPDATE invoices SET customer_id=COALESCE($1,customer_id),payment_method=$2,status=$3 WHERE id=$4 RETURNING *`, [customerId, invoiceMethod, status, invoice.id]);
+            invoice = updatedInvoice.rows[0];
+        } else {
+            const sequence = Number((await client.query(`SELECT nextval('invoice_number_seq') AS number`)).rows[0].number);
+            const invoiceNumber = "INV-" + String(sequence).padStart(6, "0");
+            const createdInvoice = await client.query(`
+                INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
+                VALUES($1,$2,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8) RETURNING *
+            `, [invoiceNumber, orderId, customerId, Number(savedOrder.subtotal), Number(savedOrder.gst), Number(savedOrder.total), invoiceMethod, status]);
+            invoice = createdInvoice.rows[0];
+        }
+
+        const summaryResult = await client.query(`
+            SELECT payment_method,SUM(amount) AS amount
+            FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
+            GROUP BY payment_method ORDER BY payment_method
+        `, [orderId, businessId]);
+        const amountCollected = summaryResult.rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+        const amountDue = nonChargeable ? 0 : Math.max(0, Math.round((billTotal - amountCollected) * 100) / 100);
+        await client.query("COMMIT");
+
+        for (const payment of insertedPayments) {
+            if (Number(payment.amount) > 0) awardLoyaltyForPayment(payment.id, orderId, Number(payment.amount));
+        }
+        res.json({
+            success: true,
+            order: savedOrder,
+            invoice,
+            paymentSummary: {
+                total: billTotal,
+                amountCollected,
+                amountDue,
+                allocations: summaryResult.rows.map(row => ({ method: row.payment_method, amount: Number(row.amount || 0) }))
+            }
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Order settlement error:", error);
+        res.status(error.message === "Order not found" ? 404 : 400).json({ error: error.message || "Failed to settle order" });
+    } finally {
+        client.release();
     }
 });
 app.get(
@@ -2157,15 +2461,35 @@ app.get(
                         o.*,
                         c.name AS customer_name,
                         c.phone AS customer_phone,
-                        c.email AS customer_email
+                        c.email AS customer_email,
+                        c.gstin AS customer_gstin,
+                        c.birth_date AS customer_birth_date,
+                        c.address AS customer_address,
+                        c.city AS customer_city,
+                        c.state AS customer_state
                     FROM orders o
                     LEFT JOIN customers c ON c.id = o.customer_id
                     WHERE o.id = $1 AND o.business_id = $2
                     `,
                     [req.params.id, Number(req.user.business_id)]
                 );
+            if (!orderResult.rows.length) return res.status(404).json({ error: "Order not found" });
+            const itemsResult = await pool.query(`
+                SELECT oi.*,m.category
+                FROM order_items oi
+                LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2
+                WHERE oi.order_id=$1
+                ORDER BY oi.id
+            `, [Number(req.params.id), Number(req.user.business_id)]);
+            res.json({ order: orderResult.rows[0], items: itemsResult.rows });
+        } catch (error) {
+            console.error("Order detail load error:", error);
+            res.status(500).json({ error: "Failed to load order" });
+        }
+    }
+);
 
-                app.put(
+app.put(
     "/api/orders/:id",
     async (req, res) => {
         const client = await pool.connect();
@@ -2182,6 +2506,7 @@ app.get(
             const {
                 orderType,
                 tableNumber,
+                pax,
                 subtotal,
                 gst,
                 total,
@@ -2189,6 +2514,10 @@ app.get(
                 customerId,
                 discount,
                 serviceCharge,
+                discountAdjustmentId,
+                discountAdjustmentName,
+                chargeAdjustmentId,
+                chargeAdjustmentName,
                 marketingDealId,
                 marketingDealName,
                 notes,
@@ -2224,9 +2553,18 @@ app.get(
             if (!existingOrder) {
                 throw new Error("Order not found");
             }
-
-            if (["Completed", "Cancelled"].includes(existingOrder.status)) {
-                throw new Error("This order cannot be edited");
+            const permissions = req.user.permissions && typeof req.user.permissions === "object" ? req.user.permissions : {};
+            const adminDefaults = req.user.profile_name === "Admin" && req.user.permissions_override === null;
+            const canEditClosed = adminDefaults || permissions["orders.edit_closed"] === true;
+            const canEditAfterPrint = adminDefaults || permissions["orders.edit_after_print"] === true;
+            const canEditOpen = adminDefaults || permissions["orders.edit_open"] === true || permissions["orders.edit"] === true;
+            if (existingOrder.status === "Cancelled") throw new Error("Cancelled orders cannot be edited.");
+            if (existingOrder.status === "Completed") {
+                if (existingOrder.bill_printed_at ? !(canEditAfterPrint || canEditClosed) : !canEditClosed) {
+                    throw Object.assign(new Error(existingOrder.bill_printed_at ? "You do not have permission to edit a printed bill." : "Only an Admin profile with closed-bill editing can edit this closed bill."), { status: 403 });
+                }
+            } else if (!canEditOpen) {
+                throw Object.assign(new Error("You do not have permission to edit open orders."), { status: 403 });
             }
 
             if (orderType === "Dine-in" && !tableNumber) {
@@ -2271,6 +2609,11 @@ app.get(
                     throw new Error("Selected table does not exist");
                 }
 
+                const partySize = Number(pax) || 1;
+                if (!Number.isInteger(partySize) || partySize < 1 || (Number(table.capacity) > 0 && partySize > Number(table.capacity))) {
+                    throw new Error(`Number of guests must be between 1 and ${Number(table.capacity) || "the table capacity"}`);
+                }
+
                 if (
                     table.status !== "Available" &&
                     table.table_number !== existingOrder.table_number
@@ -2294,8 +2637,13 @@ app.get(
                     service_charge = $9,
                     notes = $10,
                     marketing_deal_id = $11,
-                    marketing_deal_name = $12
-                WHERE id = $13 AND business_id = $14
+                    marketing_deal_name = $12,
+                    discount_adjustment_id = $13,
+                    discount_adjustment_name = $14,
+                    charge_adjustment_id = $15,
+                    charge_adjustment_name = $16,
+                    pax = $17
+                WHERE id = $18 AND business_id = $19
                 RETURNING *
                 `,
                 [
@@ -2311,6 +2659,11 @@ app.get(
                     notes ? String(notes).slice(0, 1000) : null,
                     marketingDealId ? String(marketingDealId).slice(0, 120) : null,
                     marketingDealName ? String(marketingDealName).slice(0, 120) : null,
+                    discountAdjustmentId ? String(discountAdjustmentId).slice(0, 120) : null,
+                    discountAdjustmentName ? String(discountAdjustmentName).slice(0, 120) : null,
+                    chargeAdjustmentId ? String(chargeAdjustmentId).slice(0, 120) : null,
+                    chargeAdjustmentName ? String(chargeAdjustmentName).slice(0, 120) : null,
+                    orderType === "Dine-in" ? (Number(pax) || 1) : null,
                     orderId,
                     Number(req.user.business_id)
                 ]
@@ -2329,79 +2682,47 @@ app.get(
                 [orderId, Number(req.user.business_id)]
             );
 
-            for (const item of items) {
-                const name =
-                    item.name ||
-                    item.item_name ||
-                    "";
-
+            const normalizedItems = items.map(item => {
+                const rawMenuId = item.menuId ?? item.menu_id ?? item.id ?? null;
+                const parsedMenuId = Number(rawMenuId);
+                const name = String(item.name || item.item_name || "").trim();
                 const price = Number(item.price);
                 const quantity = Number(item.quantity);
+                if (!name || !Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) throw new Error("Invalid order item");
+                return {
+                    name, price, quantity,
+                    menuId: Number.isInteger(parsedMenuId) && parsedMenuId > 0 ? parsedMenuId : null,
+                    variantId: Number(item.variantId ?? item.variant_id) || null,
+                    unit: item.unit || "ea",
+                    taxRate: Number(item.taxRate ?? item.tax_rate ?? 5),
+                    taxMode: item.taxMode === "inclusive" || item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
+                    options: cleanOrderOptions(item.options),
+                    basePrice: Number(item.basePrice ?? item.base_price ?? price),
+                    source: item
+                };
+            });
+            const menuIds = [...new Set(normalizedItems.map(item => item.menuId).filter(Boolean))];
+            const metadataRows = menuIds.length ? await client.query(`SELECT id,option_set_ids FROM menu WHERE id=ANY($1::int[]) AND business_id=$2`, [menuIds, Number(req.user.business_id)]) : { rows: [] };
+            const metadataById = new Map(metadataRows.rows.map(item => [Number(item.id), item]));
+            for (const item of normalizedItems) {
+                const optionData = await normalizeOrderItemOptions(client, Number(req.user.business_id), metadataById.get(item.menuId), item.source.options, item.basePrice, item.price);
+                item.options = optionData.options;
+                if (!Number.isFinite(item.basePrice)) item.basePrice = Math.max(0, item.price - optionData.addOnPrice);
+                item.price = item.basePrice + optionData.addOnPrice;
+            }
+            const itemValues = [];
+            const itemRows = normalizedItems.map((item, index) => {
+                const offset = index * 11;
+                itemValues.push(orderId,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options));
+                return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb)`;
+            });
+            await client.query(`
+                INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
+                VALUES ${itemRows.join(",")}
+            `, itemValues);
 
-                const menuId =
-                    item.menuId ||
-                    item.menu_id ||
-                    item.id ||
-                    null;
-
-                const variantId =
-                    item.variantId ||
-                    item.variant_id ||
-                    null;
-
-                const itemUnit =
-                    item.unit || "ea";
-
-                const itemTaxRate =
-                    Number(item.taxRate ?? item.tax_rate ?? 5);
-
-                const itemTaxMode =
-                    item.taxMode === "inclusive"
-                        ? "inclusive"
-                        : "exclusive";
-
-                if (
-                    !name ||
-                    !Number.isFinite(price) ||
-                    !Number.isFinite(quantity) ||
-                    quantity <= 0
-                ) {
-                    throw new Error("Invalid order item");
-                }
-
-                await client.query(
-                    `
-                    INSERT INTO order_items
-                    (
-                        order_id,
-                        menu_id,
-                        variant_id,
-                        item_name,
-                        price,
-                        quantity,
-                        line_total,
-                        unit,
-                        tax_rate,
-                        tax_mode
-                    )
-                    VALUES
-                    (
-                        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
-                    )
-                    `,
-                    [
-                        orderId,
-                        menuId,
-                        variantId,
-                        name,
-                        price,
-                        quantity,
-                        price * quantity,
-                        itemUnit,
-                        itemTaxRate,
-                        itemTaxMode
-                    ]
-                );
+            if (existingOrder.status === "Completed") {
+                await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [Number(subtotal), Number(gst), Number(total), orderId]);
             }
 
             /*
@@ -2418,7 +2739,7 @@ app.get(
                 );
             }
 
-            await recordOrderActivity(client, updatedOrder.id, "Order updated", `Order details saved. New total: ${Number(total).toFixed(2)}.`, req);
+            await recordOrderActivity(client, updatedOrder.id, existingOrder.status === "Completed" ? "Closed bill edited" : "Order updated", `Order details saved. New total: ${Number(total).toFixed(2)}.`, req);
             if (marketingDealId && marketingDealName && Number(discount || 0) > 0) {
                 await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${Number(discount || 0).toFixed(2)}.`, req);
             }
@@ -2438,7 +2759,7 @@ app.get(
                 e
             );
 
-            res.status(400).json({
+            res.status(e.status || 400).json({
                 error: e.message
             });
 
@@ -2447,52 +2768,6 @@ app.get(
         }
     }
 );
-
-            const order =
-                orderResult.rows[0];
-
-
-            if (!order) {
-
-                return res.status(404).json({
-                    error:
-                        "Order not found"
-                });
-
-            }
-
-
-            const items =
-                (
-                    await pool.query(
-                        `
-                        SELECT *
-                        FROM order_items
-                        WHERE order_id = $1 AND business_id = $2
-                        ORDER BY id
-                        `,
-                        [req.params.id, Number(req.user.business_id)]
-                    )
-                ).rows;
-
-
-            res.json({
-                order,
-                items
-            });
-
-        } catch (e) {
-
-            res.status(500).json({
-                error:
-                    "Failed to load order"
-            });
-
-        }
-
-    }
-);
-
 
 app.put(
     "/api/orders/:id/cancel",
@@ -3605,26 +3880,48 @@ app.put(
 
 app.get("/api/kot-groups", async (req,res)=>{
     try {
-        const r=await pool.query(`SELECT * FROM kot_groups WHERE business_id=$1 ORDER BY sort_order ASC, name ASC`,[Number(req.user.business_id)]);
+        const r=await pool.query(`SELECT kg.*,p.name AS printer_name,p.connection_type AS printer_connection_type FROM kot_groups kg LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=kg.business_id WHERE kg.business_id=$1 ORDER BY kg.sort_order ASC, kg.name ASC`,[Number(req.user.business_id)]);
         res.json(r.rows);
     } catch(e){res.status(500).json({error:"Failed to load KOT groups"});}
 });
+app.get("/api/kot-groups/printers", async (req,res)=>{
+    try {
+        const rows=await pool.query(`SELECT id,name,connection_type,paper_width FROM printers WHERE business_id=$1 AND active=TRUE ORDER BY is_default DESC,name`,[Number(req.user.business_id)]);
+        res.json(rows.rows);
+    } catch(e){res.status(500).json({error:"Failed to load printers for KOT groups"});}
+});
+async function validateKOTGroupPrinter(value,businessId){
+    const id=Number(value)||null;
+    if(!id)return null;
+    const found=await pool.query(`SELECT id FROM printers WHERE id=$1 AND business_id=$2 AND active=TRUE`,[id,businessId]);
+    if(!found.rows.length)throw Object.assign(new Error("Select an active printer for this business."),{status:400});
+    return id;
+}
+function cleanKOTGroupTargets(body={}){
+    const categoryNames=[...new Set((Array.isArray(body.categoryNames)?body.categoryNames:[]).map(value=>String(value||"").trim().slice(0,120)).filter(Boolean))].slice(0,100);
+    const itemIds=[...new Set((Array.isArray(body.itemIds)?body.itemIds:[]).map(Number).filter(id=>Number.isInteger(id)&&id>0))].slice(0,1000);
+    return {categoryNames,itemIds};
+}
 app.post("/api/kot-groups", async (req,res)=>{
     try {
         const businessId=Number(req.user.business_id);
         const name=String(req.body.name||"").trim();
         if(!name)return res.status(400).json({error:"KOT group name is required"});
-        const r=await pool.query(`INSERT INTO kot_groups(name,description,station,sort_order,active,business_id) VALUES($1,$2,$3,$4,$5,$6) RETURNING *`,[name,String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,businessId]);
+        const printerId=await validateKOTGroupPrinter(req.body.printerId,businessId);
+        const targets=cleanKOTGroupTargets(req.body);
+        const r=await pool.query(`INSERT INTO kot_groups(name,description,station,sort_order,active,business_id,printer_id,category_names,item_ids) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb) RETURNING *`,[name,String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,businessId,printerId,JSON.stringify(targets.categoryNames),JSON.stringify(targets.itemIds)]);
         res.status(201).json(r.rows[0]);
-    }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(500).json({error:"Failed to create KOT group"});}
+    }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(e.status||500).json({error:e.message||"Failed to create KOT group"});}
 });
 app.put("/api/kot-groups/:id", async (req,res)=>{
     try {
         const id=Number(req.params.id); const businessId=Number(req.user.business_id);
         if(!Number.isInteger(id)||id<=0)return res.status(400).json({error:"Invalid KOT group ID"});
-        const r=await pool.query(`UPDATE kot_groups SET name=$1,description=$2,station=$3,sort_order=$4,active=$5,updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING *`,[String(req.body.name||"").trim(),String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,id,businessId]);
+        const printerId=await validateKOTGroupPrinter(req.body.printerId,businessId);
+        const targets=cleanKOTGroupTargets(req.body);
+        const r=await pool.query(`UPDATE kot_groups SET name=$1,description=$2,station=$3,sort_order=$4,active=$5,printer_id=$6,category_names=$7::jsonb,item_ids=$8::jsonb,updated_at=CURRENT_TIMESTAMP WHERE id=$9 AND business_id=$10 RETURNING *`,[String(req.body.name||"").trim(),String(req.body.description||"").trim()||null,String(req.body.station||"Kitchen"),Number(req.body.sortOrder||0),req.body.active!==false,printerId,JSON.stringify(targets.categoryNames),JSON.stringify(targets.itemIds),id,businessId]);
         if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json(r.rows[0]);
-    }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(500).json({error:"Failed to update KOT group"});}
+    }catch(e){if(e.code==="23505")return res.status(409).json({error:"KOT group already exists"});res.status(e.status||500).json({error:e.message||"Failed to update KOT group"});}
 });
 app.delete("/api/kot-groups/:id", async (req,res)=>{
     try { const id=Number(req.params.id); const r=await pool.query(`DELETE FROM kot_groups WHERE id=$1 AND business_id=$2 RETURNING id`,[id,Number(req.user.business_id)]); if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json({success:true}); } catch(e){res.status(500).json({error:"Failed to delete KOT group"});}
@@ -3639,11 +3936,16 @@ app.get(
     async (req,res)=>{
         try {
             const range=req.query.range||"today";
-            const dateRange=getReportDateRange(range,req.query.from,req.query.to);
+            const dateRange=range==="all"?{start:"TIMESTAMP '1970-01-01'",end:"CURRENT_TIMESTAMP + INTERVAL '1 day'"}:getReportDateRange(range,req.query.from,req.query.to);
             const result=await pool.query(`
-                SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,o.order_number,o.order_type,o.table_number
+                SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,kg.printer_id,
+                       p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
+                       p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
+                       p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
+                       o.order_number,o.order_type,o.table_number,o.pax
                 FROM kot k JOIN orders o ON k.order_id=o.id
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id
+                LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=o.business_id
                 WHERE o.business_id=$1
                   AND k.created_at >= ${dateRange.start}
                   AND k.created_at < ${dateRange.end}
@@ -3869,11 +4171,7 @@ app.post(
 
         try {
 
-            const {
-                name,
-                phone,
-                email
-            } = req.body;
+            const { name, phone, email, gstin, birthDate, address, city, state } = req.body;
 
 
             if (!name || !phone) {
@@ -3894,16 +4192,26 @@ app.post(
                         name,
                         phone,
                         email,
+                        gstin,
+                        birth_date,
+                        address,
+                        city,
+                        state,
                         business_id
                     )
                     VALUES
-                    ($1,$2,$3,$4)
+                    ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                     RETURNING *
                     `,
                     [
                         name,
                         phone,
                         email || null,
+                        String(gstin || "").trim() || null,
+                        birthDate || null,
+                        String(address || "").trim() || null,
+                        String(city || "").trim() || null,
+                        String(state || "").trim() || null,
                         Number(req.user.business_id)
                     ]
                 );
@@ -3952,6 +4260,11 @@ app.post(
             const name = String(req.body.name || "").trim();
             const phone = String(req.body.phone || "").trim();
             const email = String(req.body.email || "").trim() || null;
+            const gstin = String(req.body.gstin || "").trim() || null;
+            const birthDate = req.body.birthDate || null;
+            const address = String(req.body.address || "").trim() || null;
+            const city = String(req.body.city || "").trim() || null;
+            const state = String(req.body.state || "").trim() || null;
 
             if (!name || !phone) {
                 return res.status(400).json({
@@ -3975,11 +4288,16 @@ app.post(
                     `
                     UPDATE customers
                     SET name = $1,
-                        email = $2
-                    WHERE id = $3 AND business_id = $4
+                        email = $2,
+                        gstin = $3,
+                        birth_date = $4,
+                        address = $5,
+                        city = $6,
+                        state = $7
+                    WHERE id = $8 AND business_id = $9
                     RETURNING *
                     `,
-                    [name, email, existing.rows[0].id, Number(req.user.business_id)]
+                    [name, email, gstin, birthDate, address, city, state, existing.rows[0].id, Number(req.user.business_id)]
                 );
 
                 return res.json({
@@ -3992,11 +4310,11 @@ app.post(
             const created = await pool.query(
                 `
                 INSERT INTO customers
-                (name, phone, email, business_id)
-                VALUES ($1,$2,$3,$4)
+                (name, phone, email, gstin, birth_date, address, city, state, business_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
                 RETURNING *
                 `,
-                [name, phone, email, Number(req.user.business_id)]
+                [name, phone, email, gstin, birthDate, address, city, state, Number(req.user.business_id)]
             );
 
             return res.status(201).json({
@@ -4026,11 +4344,7 @@ app.put(
 
         try {
 
-            const {
-                name,
-                phone,
-                email
-            } = req.body;
+            const { name, phone, email, gstin, birthDate, address, city, state } = req.body;
 
 
             if (!name || !phone) {
@@ -4050,14 +4364,24 @@ app.put(
                     SET
                         name = $1,
                         phone = $2,
-                        email = $3
-                    WHERE id = $4 AND business_id = $5
+                        email = $3,
+                        gstin = COALESCE($4,gstin),
+                        birth_date = COALESCE($5,birth_date),
+                        address = COALESCE($6,address),
+                        city = COALESCE($7,city),
+                        state = COALESCE($8,state)
+                    WHERE id = $9 AND business_id = $10
                     RETURNING *
                     `,
                     [
                         name,
                         phone,
                         email || null,
+                        String(gstin || "").trim() || null,
+                        birthDate || null,
+                        String(address || "").trim() || null,
+                        String(city || "").trim() || null,
+                        String(state || "").trim() || null,
                         req.params.id,
                         Number(req.user.business_id)
                     ]
@@ -4370,6 +4694,38 @@ function getReportDateRange(range, from, to) {
 // -----------------------------------------------------
 // REPORT SUMMARY
 // -----------------------------------------------------
+
+app.get("/api/reports/sales-audit", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const dateRange = getReportDateRange(req.query.range || "today", req.query.from, req.query.to);
+        const result = await pool.query(`
+            SELECT p.id AS payment_id,p.created_at AS payment_time,p.amount AS transaction_amount,
+                   p.payment_method,p.payment_status,p.transaction_id,
+                   o.id AS order_id,o.order_number,o.order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
+                   i.invoice_number,
+                   COALESCE(paid.amount_collected,0) AS amount_collected,
+                   CASE WHEN o.payment_method='Non-chargeable' THEN 0
+                        ELSE GREATEST(o.total-COALESCE(paid.amount_collected,0),0) END AS amount_due
+            FROM payments p
+            INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id
+            LEFT JOIN invoices i ON i.order_id=o.id
+            LEFT JOIN LATERAL (
+                SELECT SUM(p2.amount) AS amount_collected
+                FROM payments p2
+                WHERE p2.order_id=o.id AND p2.business_id=o.business_id AND p2.payment_status='Success'
+            ) paid ON TRUE
+            WHERE p.business_id=$1
+              AND p.created_at >= ${dateRange.start}
+              AND p.created_at < ${dateRange.end}
+            ORDER BY p.created_at DESC,p.id DESC
+        `, [businessId]);
+        res.json({ transactions: result.rows });
+    } catch (error) {
+        console.error("Sales audit report error:", error);
+        res.status(400).json({ error: error.message || "Failed to load sales audit report" });
+    }
+});
 
 app.get(
     "/api/reports/summary",
@@ -5634,6 +5990,7 @@ const ACCESS_MODULES_SERVER = [
     "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "marketing", "invoice_designer", "advanced_reports", "printer"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
+const ACCESS_ORDER_PERMISSIONS_SERVER = ["orders.edit_open", "orders.print_open", "orders.edit_after_print", "orders.edit_closed"];
 
 function defaultPermissionsServer() {
     const p = {};
@@ -5642,6 +5999,7 @@ function defaultPermissionsServer() {
             p[`${moduleKey}.${action}`] = false;
         }
     }
+    for (const key of ACCESS_ORDER_PERMISSIONS_SERVER) p[key] = key !== "orders.edit_closed";
     p["dashboard.view"] = true;
     return p;
 }
@@ -5661,6 +6019,7 @@ function managerPermissionsServer() {
         "menu.view", "menu.create", "menu.edit", "customers.view", "customers.create", "customers.edit",
         "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
     ];
+    allow.push("orders.edit_open", "orders.print_open", "orders.edit_after_print");
     allow.forEach(k => p[k] = true);
     return p;
 }
@@ -5697,6 +6056,14 @@ async function ensureAccessTables() {
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions_override JSONB`);
+    await pool.query(`
+        UPDATE access_profiles
+        SET permissions=COALESCE(permissions,'{}'::jsonb)
+            || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.edit_open') THEN '{"orders.edit_open":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.print_open') THEN '{"orders.print_open":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.edit_after_print') THEN '{"orders.edit_after_print":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Admin' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.edit_closed') THEN '{"orders.edit_closed":true}'::jsonb ELSE '{}'::jsonb END
+    `);
     await pool.query(`
         UPDATE access_profiles
         SET permissions=COALESCE(permissions,'{}'::jsonb)||CASE
@@ -5935,6 +6302,73 @@ async function ensureSettingsTable() {
     console.log("✅ Application settings ready");
 }
 
+app.get("/api/menu-option-sets", async (req, res) => {
+    try {
+        const result = await pool.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [Number(req.user.business_id)]);
+        res.json({ optionSets: Array.isArray(result.rows[0]?.sets) ? result.rows[0].sets : [] });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to load menu option sets" });
+    }
+});
+
+app.put("/api/menu-option-sets", async (req, res) => {
+    const input = req.body?.optionSets;
+    if (!Array.isArray(input) || input.length > 200) return res.status(400).json({ error: "Option sets must be a list of up to 200 sets." });
+    const ids = new Set();
+    const names = new Set();
+    const optionSets = [];
+    for (const source of input) {
+        const id = String(source?.id || "").trim().slice(0, 80);
+        const name = String(source?.name || "").trim().slice(0, 100);
+        const options = (Array.isArray(source?.options) ? source.options : []).slice(0, 50).map(option => ({
+            id: String(option?.id || "").trim().slice(0, 80),
+            menuItemId: Number.isSafeInteger(Number(option?.menuItemId)) && Number(option?.menuItemId) > 0 ? Number(option.menuItemId) : null,
+            name: String(option?.name || "").trim().slice(0, 100),
+            price: Number(option?.price)
+        }));
+        const minSelections = Number(source?.minSelections ?? 0);
+        const maxSelections = Number(source?.maxSelections ?? 1);
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !name || !options.length || options.some(option => !option.id || !option.name || !Number.isFinite(option.price) || option.price < 0)) {
+            return res.status(400).json({ error: "Each option set needs a name and at least one option with a valid non-negative price." });
+        }
+        if (ids.has(id) || names.has(name.toLocaleLowerCase())) return res.status(400).json({ error: "Option set IDs and names must be unique." });
+        if (!Number.isInteger(minSelections) || !Number.isInteger(maxSelections) || minSelections < 0 || maxSelections < 1 || minSelections > maxSelections || maxSelections > options.length) {
+            return res.status(400).json({ error: `Selection limits for “${name}” are invalid.` });
+        }
+        ids.add(id);
+        names.add(name.toLocaleLowerCase());
+        optionSets.push({ id, name, minSelections, maxSelections, options });
+    }
+    try {
+        const businessId = Number(req.user.business_id);
+        const menuItemIds = [...new Set(optionSets.flatMap(set => set.options.map(option => option.menuItemId).filter(Boolean)))];
+        const menuItemRows = menuItemIds.length
+            ? await pool.query("SELECT id,name FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE", [businessId, menuItemIds])
+            : { rows: [] };
+        const menuItemsById = new Map(menuItemRows.rows.map(item => [Number(item.id), item]));
+        for (const set of optionSets) {
+            const usedMenuItems = new Set();
+            for (const option of set.options) {
+                if (!option.menuItemId) continue; // Keep existing unlinked sets readable until edited in the menu-item picker.
+                const menuItem = menuItemsById.get(option.menuItemId);
+                if (!menuItem) return res.status(400).json({ error: "Option set choices must reference available menu items for this business." });
+                if (usedMenuItems.has(option.menuItemId)) return res.status(400).json({ error: "A menu item can appear only once in an option set." });
+                usedMenuItems.add(option.menuItemId);
+                option.name = String(menuItem.name || "").slice(0, 100);
+            }
+        }
+        const result = await pool.query(`
+            INSERT INTO app_settings(id,business_id,settings,updated_at)
+            VALUES($1,$1,$2::jsonb,CURRENT_TIMESTAMP)
+            ON CONFLICT (business_id) DO UPDATE SET settings=app_settings.settings || EXCLUDED.settings,updated_at=CURRENT_TIMESTAMP
+            RETURNING settings->'menuOptionSets' AS sets
+        `, [businessId, JSON.stringify({ menuOptionSets: optionSets })]);
+        res.json({ success: true, optionSets: result.rows[0]?.sets || [] });
+    } catch (error) {
+        res.status(500).json({ error: "Failed to save menu option sets" });
+    }
+});
+
 app.get("/api/marketing/deals", async (req,res)=>{
     try {
         const result=await pool.query("SELECT settings->'marketingDeals' AS deals FROM app_settings WHERE business_id=$1",[Number(req.user.business_id)]);
@@ -6052,7 +6486,7 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
         settings.phone?'Phone: '+clean(settings.phone):'',
         settings.gstin?'GSTIN: '+clean(settings.gstin):'',
         line,
-        'Invoice: '+clean(receipt.invoiceNumber||'-'),
+        receipt.isOpenOrder?'OPEN ORDER / PROFORMA':'Invoice: '+clean(receipt.invoiceNumber||'-'),
         'Order: '+clean(receipt.orderNumber||'-'),
         'Type: '+clean(receipt.orderType||'-'),
         receipt.tableNumber?'Table: '+clean(receipt.tableNumber):'',
@@ -6060,10 +6494,13 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
         receipt.customerName?'Customer: '+clean(receipt.customerName):'',
         line,
         'ITEM                         QTY      AMOUNT',
-        ...(Array.isArray(receipt.items)?receipt.items.map(item=>{
+        ...(Array.isArray(receipt.items)?receipt.items.flatMap(item=>{
             const name=clean(settings.uppercaseItems?String(item.name||'-').toUpperCase():(item.name||'-')).slice(0,width-17);
             const qty=Number(item.quantity||0),amount=qty*Number(item.price||0);
-            return name.padEnd(width-16)+String(qty).padStart(4)+' '+moneyValue(amount).padStart(12);
+            const row=[name.padEnd(width-16)+String(qty).padStart(4)+' '+moneyValue(amount).padStart(12)];
+            const options=Array.isArray(item.options)?item.options.flatMap(set=>Array.isArray(set.options)?set.options.map(option=>clean(option.name)):[]).filter(Boolean):[];
+            if(options.length)row.push('  + '+options.join(', ').slice(0,width-4));
+            return row;
         }):[]),
         line,
         'Subtotal: '+moneyValue(receipt.subtotal||0),
@@ -6163,7 +6600,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
         const printer=await getTenantPrinter(req,res,req.params.id);
         if(!printer)return;
         if(printer.connection_type!=='network')return res.status(400).json({error:'Use the local print dialog or Bluetooth connection for this printer'});
-        if(!req.body.receipt||typeof req.body.receipt!=='object')return res.status(400).json({error:'Receipt data is required'});
+        if(!req.body.receipt||!['object','string'].includes(typeof req.body.receipt))return res.status(400).json({error:'Receipt data is required'});
         const savedSettings=(await pool.query('SELECT settings FROM app_settings WHERE business_id=$1',[Number(req.user.business_id)])).rows[0]?.settings||{};
         const settings={
             restaurantName:req.user.business_name||'CAFE POS',
@@ -6173,7 +6610,9 @@ app.post('/api/printers/:id/print',async(req,res)=>{
             currency:req.user.currency||'₹',
             ...savedSettings
         };
-        const bytes=receiptTextForPrinter(req.body.receipt,settings,printer.paper_width);
+        const bytes=typeof req.body.receipt==='string'
+            ? Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),Buffer.from(req.body.receipt,'utf8'),Buffer.from([0x1b,0x64,0x04,0x1d,0x56,0x00])])
+            : receiptTextForPrinter(req.body.receipt,settings,printer.paper_width);
         await sendRawPrinterBytes(printer.host,printer.port,bytes);
         res.json({success:true});
     }catch(e){res.status(502).json({error:e.message||'Could not print to the network printer'});}
@@ -6401,11 +6840,31 @@ async function ensureLicenseTables() {
 
     await pool.query(`ALTER TABLE business_licenses ADD COLUMN IF NOT EXISTS license_type VARCHAR(20)`);
     await pool.query(`ALTER TABLE business_licenses ADD COLUMN IF NOT EXISTS duration_months INTEGER`);
+    await pool.query(`ALTER TABLE business_licenses ADD COLUMN IF NOT EXISTS add_on VARCHAR(60)`);
+    await pool.query(`
+        DO $$ BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname='business_licenses_valid_term'
+                  AND conrelid='business_licenses'::regclass
+                  AND LOWER(pg_get_constraintdef(oid)) LIKE '%marketing%'
+            ) THEN
+                ALTER TABLE business_licenses DROP CONSTRAINT business_licenses_valid_term;
+            END IF;
+        END $$
+    `);
+    await pool.query(`
+        UPDATE business_licenses
+        SET add_on=COALESCE(NULLIF(BTRIM(add_on),''),'Marketing'),
+            license_type='Sales',
+            plan='Sales'
+        WHERE LOWER(BTRIM(COALESCE(license_type,'')))='marketing'
+           OR LOWER(BTRIM(COALESCE(plan,'')))='marketing'
+    `);
     await pool.query(`
         UPDATE business_licenses
         SET license_type = CASE
                 WHEN LOWER(BTRIM(COALESCE(plan, ''))) = 'trial' THEN 'Trial'
-                WHEN LOWER(BTRIM(COALESCE(plan, ''))) = 'marketing' THEN 'Marketing'
                 ELSE 'Sales'
             END,
             duration_months = CASE
@@ -6420,10 +6879,10 @@ async function ensureLicenseTables() {
     await pool.query(`ALTER TABLE business_licenses ALTER COLUMN duration_months SET NOT NULL`);
     await pool.query(`
         DO $$ BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='business_licenses_valid_term') THEN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='business_licenses_valid_term' AND conrelid='business_licenses'::regclass) THEN
                 ALTER TABLE business_licenses ADD CONSTRAINT business_licenses_valid_term
                 CHECK ((license_type = 'Trial' AND duration_months = 1)
-                    OR (license_type IN ('Sales','Marketing') AND duration_months IN (3,6,12)));
+                    OR (license_type = 'Sales' AND duration_months IN (3,6,12)));
             END IF;
         END $$
     `);
@@ -6907,7 +7366,7 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
                    CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS business_status,
                    CASE WHEN b.active THEN 'Active' ELSE 'Inactive' END AS branch_status,
                    b.business_type,b.owner_name,b.phone,b.email,b.address,b.city,b.state,b.active,b.created_at,
-                   l.id AS license_id,l.plan,l.license_type,l.duration_months,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
+                   l.id AS license_id,l.plan,l.license_type,l.add_on,l.duration_months,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
                    (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
                    (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users
             FROM businesses b
@@ -6918,6 +7377,22 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
         `));
         res.json(r.rows);
     } catch(e){console.error(e);res.status(500).json({error:'Failed to load businesses'});}
+});
+
+app.patch('/api/support/businesses/:id', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const businessName=String(req.body.businessName||'').trim();
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        if(!businessName)return res.status(400).json({error:'Business name is required'});
+        if(businessName.length>200)return res.status(400).json({error:'Business name must be 200 characters or fewer'});
+        const result=await runSystemContext(()=>pool.query(
+            `UPDATE businesses SET business_name=$1 WHERE id=$2 RETURNING id,business_name`,
+            [businessName,businessId]
+        ));
+        if(!result.rows.length)return res.status(404).json({error:'Business not found'});
+        res.json({success:true,business:result.rows[0]});
+    } catch(e){console.error(e);res.status(500).json({error:'Failed to update business name'});}
 });
 
 app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
@@ -6969,7 +7444,7 @@ app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
             let permissionsOverride=null;
             if(req.body.permissionsOverride!==undefined&&req.body.permissionsOverride!==null){
                 if(typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride))throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
-                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)));
+                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER));
                 permissionsOverride={};
                 for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
             }
@@ -7024,7 +7499,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
                 else if(!req.body.permissionsOverride||typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride)){
                     throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
                 }else{
-                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)));
+                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER));
                     permissionsOverride={};
                     for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
                 }
@@ -7063,11 +7538,9 @@ app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
     try {
         const businessId=Number(req.params.id);
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
-        const legacyType=String(req.body.plan||'Sales').trim();
-        const safeLegacyType=['trial','sales','marketing'].includes(legacyType.toLowerCase())
-            ? SUPPORT_LICENSE_TYPES.find(type=>type.toLowerCase()===legacyType.toLowerCase())
-            : 'Sales';
-        const {licenseType,durationMonths}=normalizeSupportLicenseTerm(req.body.licenseType,req.body.durationMonths,safeLegacyType);
+        const rawType=req.body.licenseType===undefined?req.body.plan:req.body.licenseType;
+        const {licenseType,addOn}=normalizeSupportLicenseSelection(rawType,req.body.addOn);
+        const {durationMonths}=normalizeSupportLicenseTerm(licenseType,req.body.durationMonths,'Sales');
         const status=String(req.body.status||'active');
         if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
         const startsAt=req.body.startsAt?new Date(req.body.startsAt):new Date();
@@ -7078,7 +7551,7 @@ app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
         if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(expiresAt.getTime()) || expiresAt<=startsAt) return res.status(400).json({error:'Invalid license dates'});
         const result=await runSystemContext(async()=>{
             await pool.query(`UPDATE business_licenses SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE business_id=$1 AND status='active'`,[businessId]);
-            return pool.query(`INSERT INTO business_licenses(business_id,plan,license_type,duration_months,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,[businessId,licenseType,durationMonths,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
+            return pool.query(`INSERT INTO business_licenses(business_id,plan,license_type,add_on,duration_months,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[businessId,licenseType,addOn,durationMonths,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
         });
         res.status(201).json({success:true,license:result.rows[0]});
     }catch(e){res.status(e.status||500).json({error:e.message||'Failed to issue license'});}
@@ -7090,16 +7563,11 @@ app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
         const current=(await runSystemContext(()=>pool.query(`SELECT * FROM business_licenses WHERE id=$1`,[id]))).rows[0];
         if(!current)return res.status(404).json({error:'License not found'});
         const status=req.body.status===undefined?current.status:String(req.body.status);
-        const legacyType=String(req.body.plan===undefined?(current.license_type||current.plan):req.body.plan).trim();
-        const safeLegacyType=['trial','sales','marketing'].includes(legacyType.toLowerCase())
-            ? SUPPORT_LICENSE_TYPES.find(type=>type.toLowerCase()===legacyType.toLowerCase())
-            : (current.license_type||'Sales');
-        const {licenseType,durationMonths}=normalizeSupportLicenseTerm(
-            req.body.licenseType,
-            req.body.durationMonths,
-            safeLegacyType,
-            current.duration_months
-        );
+        const rawType=req.body.licenseType===undefined
+            ? (req.body.plan===undefined?(current.license_type||current.plan):req.body.plan)
+            : req.body.licenseType;
+        const {licenseType,addOn}=normalizeSupportLicenseSelection(rawType,req.body.addOn,current.license_type||current.plan||'Sales',current.add_on);
+        const {durationMonths}=normalizeSupportLicenseTerm(licenseType,req.body.durationMonths,licenseType,current.duration_months);
         const maxDevices=req.body.maxDevices===undefined?current.max_devices:Number(req.body.maxDevices);
         const startsAt=req.body.startsAt===undefined?current.starts_at:new Date(req.body.startsAt);
         const legacyExpiry=req.body.licenseType===undefined&&req.body.durationMonths===undefined&&req.body.expiresAt!==undefined;
@@ -7108,7 +7576,7 @@ app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
         if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
         if(!Number.isInteger(maxDevices)||maxDevices<1)return res.status(400).json({error:'Max devices must be a positive whole number'});
         if(!Number.isFinite(new Date(startsAt).getTime())||!Number.isFinite(new Date(expiresAt).getTime())||new Date(expiresAt)<=new Date(startsAt))return res.status(400).json({error:'Expiry must be after start date'});
-        const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,license_type=$1,duration_months=$2,status=$3,starts_at=$4,expires_at=$5,max_devices=$6,notes=$7,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $3='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$8 RETURNING *`,[licenseType,durationMonths,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
+        const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,license_type=$1,add_on=$2,duration_months=$3,status=$4,starts_at=$5,expires_at=$6,max_devices=$7,notes=$8,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $4='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$9 RETURNING *`,[licenseType,addOn,durationMonths,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
         res.json({success:true,license:r.rows[0]});
     }catch(e){res.status(e.status||500).json({error:e.message||'Failed to update license'});}
 });
