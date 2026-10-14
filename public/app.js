@@ -731,7 +731,9 @@ function showPage(pageName) {
 
     if (pageName !== "new-order") {
         closeBillingCustomerPanel();
-        if (document.getElementById("billModal")?.classList.contains("bill-preview-sidecar")) closeBillModal();
+        const billModal = document.getElementById("billModal");
+        if (billModal?.classList.contains("bill-preview-sidecar") ||
+            billModal?.classList.contains("bill-preview-clean")) closeBillModal();
     }
 
     // Hide all pages
@@ -761,11 +763,14 @@ function showPage(pageName) {
     if (pageName === "kot-groups") showKOTGroupsView("overview");
     if (pageName === "advanced-reports") showAdvancedReportsView("overview");
 
-    // The header's "+ New Order" button is redundant once you're already
-    // on the billing screen, so hide it there and show it everywhere else.
+    // Keep the shared business summary and order shortcut on the dashboard.
+    const isDashboardPage = pageName === "dashboard";
+    const headerBusinessInfo = document.querySelector(".header .header-business-info");
+    if (headerBusinessInfo) headerBusinessInfo.style.display = isDashboardPage ? "" : "none";
+
     const newOrderHeaderBtn = document.querySelector(".header .new-order-btn");
     if (newOrderHeaderBtn) {
-        newOrderHeaderBtn.style.display = (pageName === "new-order") ? "none" : "";
+        newOrderHeaderBtn.style.display = isDashboardPage ? "" : "none";
     }
 
 
@@ -1319,7 +1324,7 @@ function previewCurrentBill() {
     const breakdown = getBillingBreakdown();
     const order = currentOpenOrderData?.order || {};
     openBillPreview({
-        viewMode: "side-panel",
+        viewMode: "clean",
         orderNumber: order.order_number || "New Order",
         invoiceNumber: currentOpenOrderData?.invoice?.invoice_number || null,
         orderType,
@@ -1450,7 +1455,7 @@ function updateCart() {
 
 function refreshSideBillPreview() {
     const modal = document.getElementById("billModal");
-    if (modal?.classList.contains("bill-preview-sidecar") && modal.style.display !== "none") previewCurrentBill();
+    if ((modal?.classList.contains("bill-preview-sidecar") || modal?.classList.contains("bill-preview-clean")) && modal.style.display !== "none") previewCurrentBill();
 }
 
 
@@ -2367,7 +2372,30 @@ window.openBillPreview = function(data) {
     window.currentBillData = data || {};
 
     const modal = document.getElementById("billModal");
+    const isCleanPreview = data?.viewMode === "clean";
     modal?.classList.toggle("bill-preview-sidecar", data?.viewMode === "side-panel");
+    modal?.classList.toggle("bill-preview-clean", isCleanPreview);
+
+    const restaurantName = document.getElementById("billRestaurantName");
+    if (restaurantName) restaurantName.textContent = isCleanPreview ? "Order" : (appSettings.restaurantName || "CAFE POS");
+    const restaurantAddress = document.getElementById("billRestaurantAddress");
+    if (restaurantAddress) restaurantAddress.textContent = appSettings.address || "Cafe Management System";
+    const restaurantPhone = document.getElementById("billRestaurantPhone");
+    if (restaurantPhone) restaurantPhone.textContent = appSettings.phone || "";
+
+    const items = Array.isArray(data?.items) ? data.items : [];
+    const itemCount = document.getElementById("billQuickItemCount");
+    if (itemCount) itemCount.textContent = `${items.length} ${items.length === 1 ? "item" : "items"}`;
+    const subtotalLabel = document.getElementById("billSubtotalLabel");
+    if (subtotalLabel) subtotalLabel.textContent = isCleanPreview ? "Sub Total" : "Subtotal";
+    const totalLabel = document.getElementById("billTotalLabel");
+    if (totalLabel) totalLabel.textContent = isCleanPreview ? "Bill Total" : "TOTAL";
+    const nameHeader = document.getElementById("billItemNameHeader");
+    if (nameHeader) nameHeader.textContent = isCleanPreview ? "Name" : "Item";
+    const rateHeader = document.getElementById("billItemRateHeader");
+    if (rateHeader) rateHeader.textContent = isCleanPreview ? "Rate" : "Price";
+    const amountHeader = document.getElementById("billItemAmountHeader");
+    if (amountHeader) amountHeader.textContent = isCleanPreview ? "Amount" : "Total";
 
         const billActions =
         document.querySelector(
@@ -2497,6 +2525,8 @@ window.openBillPreview = function(data) {
 
     document.getElementById("billGST").textContent =
         money(data.gst || 0);
+    const billGstRow = document.getElementById("billGstRow");
+    if (billGstRow) billGstRow.style.display = isCleanPreview && Number(data.gst || 0) <= 0 ? "none" : "";
 
     document.getElementById("billTotal").textContent =
         money(data.total || 0);
@@ -2590,6 +2620,7 @@ window.closeBillModal = function() {
     if (modal) {
         modal.style.display = "none";
         modal.classList.remove("bill-preview-sidecar");
+        modal.classList.remove("bill-preview-clean");
     }
 
 };

@@ -12,6 +12,7 @@
 
     <link rel="stylesheet"
         href="style.css">
+    <link rel="stylesheet" href="login.css">
 
 
 <style>
@@ -108,11 +109,30 @@
 
 <body>
 <div id="loginScreen" class="login-screen">
+    <aside class="login-showcase" aria-label="Cafe Pilot point of sale">
+        <div class="login-brand-top">
+            <span class="login-brand-icon" aria-hidden="true">☕</span>
+            <span class="login-brand-name"><strong>Cafe Pilot</strong><small>POINT OF SALE</small></span>
+        </div>
+        <div class="login-brand-copy">
+            <p class="login-brand-kicker">A BETTER FLOW FOR YOUR CAFE</p>
+            <h2>A smoother service starts here.</h2>
+            <p>Bring your café’s day-to-day work into one clear, easy-to-use workspace.</p>
+        </div>
+        <div class="login-brand-art" aria-hidden="true">
+            <div class="login-art-orbit login-art-orbit-one"></div>
+            <div class="login-art-orbit login-art-orbit-two"></div>
+            <div class="login-art-cup"><span>☕</span></div>
+            <span class="login-art-spark login-art-spark-one">✦</span>
+            <span class="login-art-spark login-art-spark-two">✳</span>
+        </div>
+        <div class="login-brand-footer"><span></span>Made for the rhythm of café service</div>
+    </aside>
     <div id="loginCard" class="login-card">
         <div id="loginView">
         <div class="login-logo">☕</div>
-        <h1>Cafe POS</h1>
-        <p>Sign in to continue</p>
+        <h1>Welcome back</h1>
+        <p>Sign in to your Cafe Pilot workspace.</p>
         <div id="loginBusinessWelcome" class="login-business-welcome" hidden>
             <span id="loginBusinessWelcomeCopy">Welcome back to</span>
             <strong id="loginBusinessName"></strong>
@@ -122,7 +142,7 @@
             <input id="loginUsername" type="text" autocomplete="username" placeholder="Username" required>
             <label for="loginPassword">Password</label>
             <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Password" required>
-            <button class="big-btn login-btn" type="submit">🔐 Login</button>
+            <button class="big-btn login-btn" type="submit">Sign in</button>
             <div id="loginError" class="login-error"></div>
         </form>
         <button type="button" class="register-business-link" onclick="showRegisterBusiness()">🏪 Create a new cafe business</button>
@@ -360,7 +380,7 @@
 
         <header class="header">
 
-            <div>
+            <div class="header-business-info">
 
                 <h1>
                     Cafe Management
@@ -374,7 +394,7 @@
             </div>
 
 
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;position:relative;">
+            <div class="header-actions" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;position:relative;">
                 <button
                 class="new-order-btn"
                 onclick="showPage('new-order')">
@@ -664,7 +684,7 @@
                 <div><span class="eyebrow">SALES MANAGEMENT</span><h2>Orders</h2><p class="orders-subtitle">Search, filter and manage open and completed bills.</p></div>
                 <div class="orders-header-actions">
                     <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
-                    <button type="button" class="big-btn" onclick="showPage('new-order')">＋ New Order</button>
+                    <button type="button" class="big-btn orders-new-order-btn" onclick="showPage('new-order')">＋ New Order</button>
                 </div>
             </div>
             <div class="orders-tabs" role="tablist" aria-label="Order status">
@@ -2791,6 +2811,14 @@
 
     <div class="modal-content bill-modal">
 
+        <div class="bill-preview-toolbar">
+            <h2>Bill</h2>
+            <div>
+                <button type="button" class="bill-preview-print" onclick="printBill()" aria-label="Print bill" title="Print bill">🖨</button>
+                <button type="button" class="bill-preview-close" onclick="closeBillModal()" aria-label="Close bill preview" title="Close">×</button>
+            </div>
+        </div>
+
         <div class="bill-header">
             <h2 id="billRestaurantName">CAFE POS</h2>
             <p id="billRestaurantAddress">
@@ -2837,16 +2865,21 @@
 
         <hr>
 
+        <div class="bill-quick-order-summary">
+            <span>Order</span>
+            <span id="billQuickItemCount">0 items</span>
+        </div>
+
         <div class="bill-items">
 
             <table>
 
                 <thead>
                     <tr>
-                        <th>Item</th>
+                        <th id="billItemNameHeader">Item</th>
                         <th>Qty</th>
-                        <th>Price</th>
-                        <th>Total</th>
+                        <th id="billItemRateHeader">Price</th>
+                        <th id="billItemAmountHeader">Total</th>
                     </tr>
                 </thead>
 
@@ -2862,7 +2895,7 @@
         <div class="bill-summary">
 
             <div>
-                <span>Subtotal</span>
+                <span id="billSubtotalLabel">Subtotal</span>
                 <strong id="billSubtotal">₹0.00</strong>
             </div>
 
@@ -2876,7 +2909,7 @@
                 <strong id="billChargeAmount">₹0.00</strong>
             </div>
 
-            <div>
+            <div id="billGstRow">
                 <span>GST</span>
                 <strong id="billGST">₹0.00</strong>
             </div>
@@ -2887,7 +2920,7 @@
             </div>
 
             <div class="bill-total">
-                <span>TOTAL</span>
+                <span id="billTotalLabel">TOTAL</span>
                 <strong id="billTotal">₹0.00</strong>
             </div>
 

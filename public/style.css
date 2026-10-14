@@ -2531,3 +2531,118 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .kot-target-picker-card>div:first-child strong{font-size:14px}.kot-target-picker-card>div:first-child>span{font-size:12px}.kot-target-chips{padding-top:2px}
 @media(max-width:900px){.orders-workspace{grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr)}.orders-list-panel,.orders-detail-panel{max-height:calc(100vh - 275px)}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.orders-workspace{grid-template-columns:1fr}.orders-list-panel,.orders-detail-panel{max-height:none;min-height:0}.orders-list-panel{max-height:42vh}.orders-detail-panel{min-height:400px}.orders-filter-bar{align-items:stretch}.orders-filter-bar label{flex:1 1 42%;min-width:130px}.orders-filter-reset{flex:1 1 100%}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.orders-search{width:100%}.kot-target-picker-card{grid-template-columns:1fr;align-items:start}.kot-target-picker-card .table-action-btn{justify-self:start}.kot-target-chips{grid-column:1}}
+
+/* Keep module pages focused. The Dashboard keeps its own Create New Order action. */
+.header .header-actions { margin-left: auto; }
+#orders .orders-new-order-btn { display: none !important; }
+
+/* Clean Bill View for the in-progress Billing page. */
+.bill-preview-toolbar { display: none; }
+.bill-quick-order-summary { display: none; }
+#billModal.bill-preview-clean {
+  z-index: 5000;
+  padding: 20px;
+  background: rgba(17, 24, 39, .52);
+}
+#billModal.bill-preview-clean .bill-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(548px, calc(100vw - 32px));
+  max-width: none;
+  min-height: min(532px, calc(100dvh - 40px));
+  max-height: calc(100dvh - 40px);
+  box-sizing: border-box;
+  margin: auto;
+  padding: 0;
+  overflow: auto;
+  border: 1px solid #e5e7eb;
+  border-radius: 9px;
+  text-align: left;
+  box-shadow: 0 22px 65px rgba(0, 0, 0, .2);
+}
+#billModal.bill-preview-clean .bill-preview-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 68px;
+  padding: 12px 28px;
+  border-bottom: 1px solid #e0e2e5;
+}
+#billModal.bill-preview-clean .bill-preview-toolbar h2 { margin: 0; color: #17191c; font-size: 20px; font-weight: 700; }
+#billModal.bill-preview-clean .bill-preview-toolbar > div { display: flex; align-items: center; gap: 8px; }
+#billModal.bill-preview-clean .bill-preview-toolbar button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border: 1px solid #d2e3ff;
+  border-radius: 9px;
+  background: #fff;
+  color: #1674ef;
+  font-size: 19px;
+  cursor: pointer;
+}
+#billModal.bill-preview-clean .bill-preview-toolbar .bill-preview-close {
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  background: #eef0f2;
+  color: #6c737a;
+  font-size: 24px;
+  line-height: 1;
+}
+#billModal.bill-preview-clean .bill-header {
+  flex: 0 0 auto;
+  padding: 31px 28px 24px;
+  border-bottom: 1px solid #dedfe1;
+  text-align: center;
+}
+#billModal.bill-preview-clean .bill-header h2 { margin: 0; color: #222; font-size: 20px; font-weight: 400; }
+#billModal.bill-preview-clean .bill-header p,
+#billModal.bill-preview-clean .bill-info,
+#billModal.bill-preview-clean .bill-payment,
+#billModal.bill-preview-clean .bill-footer,
+#billModal.bill-preview-clean .bill-actions,
+#billModal.bill-preview-clean > .bill-modal > hr { display: none !important; }
+#billModal.bill-preview-clean .bill-quick-order-summary {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  margin: 0 28px;
+  padding: 12px 0;
+  border-bottom: 1px solid #dedfe1;
+  color: #30343a;
+  font-size: 13px;
+}
+#billModal.bill-preview-clean .bill-items { flex: 0 0 auto; padding: 0 28px; overflow: visible; }
+#billModal.bill-preview-clean .bill-items table { width: 100%; font-size: 13px; }
+#billModal.bill-preview-clean .bill-items th,
+#billModal.bill-preview-clean .bill-items td { padding: 8px 4px; border-bottom: 0; color: #222; }
+#billModal.bill-preview-clean .bill-items th { border-bottom: 1px solid #e1e2e4; font-size: 12px; font-weight: 700; text-transform: none; }
+#billModal.bill-preview-clean .bill-items th:first-child,
+#billModal.bill-preview-clean .bill-items td:first-child { text-align: left; }
+#billModal.bill-preview-clean .bill-items th:nth-child(2),
+#billModal.bill-preview-clean .bill-items td:nth-child(2) { text-align: center; }
+#billModal.bill-preview-clean .bill-items th:nth-child(n+3),
+#billModal.bill-preview-clean .bill-items td:nth-child(n+3) { text-align: right; white-space: nowrap; }
+#billModal.bill-preview-clean .bill-summary {
+  flex: 0 0 auto;
+  margin: 0 28px;
+  padding: 7px 0 21px;
+  border-top: 1px solid #dedfe1;
+}
+#billModal.bill-preview-clean .bill-summary > div { display: flex; justify-content: space-between; gap: 14px; margin: 0; padding: 6px 0; color: #50545a; font-size: 13px; }
+#billModal.bill-preview-clean .bill-summary > .bill-total { padding-top: 7px; border: 0; color: #17191c; font-size: 21px; font-weight: 400; }
+#billModal.bill-preview-clean .bill-summary > .bill-total strong { color: #17191c; font-size: 21px; font-weight: 500; }
+
+@media(max-width:600px) {
+  #billModal.bill-preview-clean { padding: 12px; }
+  #billModal.bill-preview-clean .bill-modal { width: calc(100vw - 24px); min-height: min(480px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); }
+  #billModal.bill-preview-clean .bill-preview-toolbar { min-height: 60px; padding: 10px 18px; }
+  #billModal.bill-preview-clean .bill-header { padding: 26px 18px 19px; }
+  #billModal.bill-preview-clean .bill-quick-order-summary { margin-inline: 18px; }
+  #billModal.bill-preview-clean .bill-items { padding-inline: 18px; }
+  #billModal.bill-preview-clean .bill-summary { margin-inline: 18px; }
+}
