@@ -864,6 +864,7 @@ function runPgDump(args, env, cb) {
     console.log("Using pg_dump:", binary);
 
     execFile(
+        /*turbopackIgnore: true*/
         binary,
         args,
         {
@@ -5172,7 +5173,7 @@ app.get('/api/backup/health', async (_, res) => {
     const configured = Boolean(process.env.DB_USER && process.env.DB_NAME && process.env.DB_HOST);
 
     const pgDumpAvailable = await new Promise(resolve => {
-        execFile(binary, ["--version"], {
+        execFile(/*turbopackIgnore: true*/ binary, ["--version"], {
             env: databaseEnv(),
             windowsHide: true,
             maxBuffer: 1024 * 1024
@@ -5228,7 +5229,7 @@ app.post('/api/backup/restore', async (req,res)=>{
         const sql=String(req.body.sql||''); if(!sql.trim()) return res.status(400).json({error:'Backup SQL is empty'}); if(sql.length>25*1024*1024) return res.status(413).json({error:'Backup exceeds 25MB restore limit'});
         const temp=path.join(os.tmpdir(),`cafe-pos-restore-${Date.now()}.sql`); fs.writeFileSync(temp,sql,'utf8');
         const args=['--no-owner','--no-privileges','--host',String(process.env.DB_HOST||'localhost'),'--port',String(process.env.DB_PORT||5432),'--username',String(process.env.DB_USER||''),String(process.env.DB_NAME||'')];
-        await new Promise((resolve,reject)=>execFile(process.env.PSQL_PATH||'psql',args,{env:databaseEnv(),maxBuffer:5*1024*1024},(err,stdout,stderr)=>err?reject(new Error(stderr||err.message)):resolve(stdout)));
+        await new Promise((resolve,reject)=>execFile(/*turbopackIgnore: true*/ process.env.PSQL_PATH||'psql',args,{env:databaseEnv(),maxBuffer:5*1024*1024},(err,stdout,stderr)=>err?reject(new Error(stderr||err.message)):resolve(stdout)));
         fs.unlinkSync(temp); res.json({success:true});
     } catch(e){console.error('Restore failed:',e);res.status(500).json({error:'Restore failed: '+e.message});}
 });
@@ -5411,7 +5412,7 @@ app.get('/api/system/deployment-check', async (_,res)=>{
     checks.push({key:'database',label:'PostgreSQL configuration',ok:Boolean(process.env.DB_USER&&process.env.DB_NAME&&process.env.DB_HOST)});
     try{await pool.query('SELECT 1');checks.push({key:'dbConnection',label:'Database connection',ok:true});}catch(e){checks.push({key:'dbConnection',label:'Database connection',ok:false,detail:e.message});}
     checks.push({key:'node',label:'Node.js runtime',ok:parseInt(process.versions.node.split('.')[0],10)>=18,detail:process.version});
-    checks.push({key:'pgDump',label:'pg_dump backup utility',ok:await new Promise(resolve=>execFile(process.env.PG_DUMP_PATH||'pg_dump',['--version'],{env:databaseEnv()},err=>resolve(!err)))});
+    checks.push({key:'pgDump',label:'pg_dump backup utility',ok:await new Promise(resolve=>execFile(/*turbopackIgnore: true*/ process.env.PG_DUMP_PATH||'pg_dump',['--version'],{env:databaseEnv()},err=>resolve(!err)))});
     res.json({checks,env:{NODE_ENV:process.env.NODE_ENV||'development',PORT:PORT,DB_HOST:process.env.DB_HOST||'',DB_NAME:process.env.DB_NAME||''}});
 });
 
@@ -6959,7 +6960,7 @@ async function startServer() {
 
         tenantSystemMode = false;
 
-       if (!process.env.VERCEL && process.env.MIGRATE_ONLY !== 'true') {
+       if (require.main === module && !process.env.VERCEL && process.env.MIGRATE_ONLY !== 'true') {
         app.listen(
             PORT,
             () =>
@@ -6978,7 +6979,11 @@ async function startServer() {
             error
         );
 
-        process.exit(1);
+        if (require.main === module || process.env.MIGRATE_ONLY === 'true') {
+            process.exit(1);
+        }
+
+        throw error;
 
     }
 
@@ -7005,3 +7010,6 @@ if (process.env.VERCEL) {
         return app(req, res);
     };
 }
+
+module.exports.app = app;
+module.exports.startupPromise = startupPromise;
