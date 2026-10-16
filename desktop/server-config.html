@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cafe POS Server Connection</title>
+    <style>
+        :root{font-family:"Segoe UI",Arial,sans-serif;color:#17202a;background:#f5f7f9}*{box-sizing:border-box}body{margin:0;padding:30px}.card{padding:25px;border:1px solid #e4e8eb;border-radius:16px;background:#fff;box-shadow:0 10px 35px #17202a12}h1{margin:0 0 8px;font-size:21px}p{margin:0 0 20px;color:#65717c;font-size:13px;line-height:1.55}label{display:block;margin-bottom:7px;font-size:12px;font-weight:700}input{width:100%;height:44px;padding:0 12px;border:1px solid #ccd4db;border-radius:9px;font:14px "Segoe UI",Arial,sans-serif}input:focus{outline:3px solid #0f766e22;border-color:#0f766e}button{height:42px;margin-top:16px;padding:0 16px;border:0;border-radius:9px;background:#0f766e;color:white;font-size:13px;font-weight:700;cursor:pointer}button:disabled{opacity:.65;cursor:wait}.status{min-height:20px;margin-top:12px;font-size:12px;color:#596773}.status.error{color:#b42318}.hint{margin:13px 0 0;font-size:11px}
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>Connect to your POS server</h1>
+        <p>Enter the HTTPS address where your Cafe POS is hosted. The Windows app keeps this setting on this computer.</p>
+        <form id="serverForm">
+            <label for="serverUrl">POS server address</label>
+            <input id="serverUrl" type="url" placeholder="https://your-pos.example.com" autocomplete="url" required>
+            <button id="saveButton" type="submit">Save and reconnect</button>
+            <div id="status" class="status" role="status" aria-live="polite"></div>
+        </form>
+        <p class="hint">For local development, http://localhost is also supported.</p>
+    </main>
+    <script>
+        const input = document.getElementById("serverUrl");
+        const form = document.getElementById("serverForm");
+        const button = document.getElementById("saveButton");
+        const status = document.getElementById("status");
+        window.cafePOSDesktop.getApiBase().then(value => { input.value = value; });
+        form.addEventListener("submit", async event => {
+            event.preventDefault();
+            button.disabled = true;
+            status.className = "status";
+            status.textContent = "Saving…";
+            const result = await window.cafePOSDesktop.saveApiBase(input.value);
+            button.disabled = false;
+            status.className = result.success ? "status" : "status error";
+            status.textContent = result.success ? "Saved. Cafe POS is reconnecting now." : result.error;
+        });
+    </script>
+</body>
+</html>

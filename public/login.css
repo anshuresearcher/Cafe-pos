@@ -169,3 +169,33 @@
     .login-brand-copy { margin-top: 28px; }
     .login-brand-art { bottom: 8%; width: 34%; }
 }
+
+/* Electron layout matches the split login screen while respecting its custom title bar. */
+body.desktop-mode #loginScreen.login-screen {
+    inset: 38px 0 0;
+    width: auto;
+    height: auto;
+    min-height: 0;
+    max-height: none;
+    grid-template-columns: minmax(0, 1.15fr) minmax(360px, .85fr);
+    align-items: center;
+    gap: clamp(24px, 5vw, 70px);
+    padding: clamp(20px, 4.5vw, 56px);
+    overflow: hidden;
+    overscroll-behavior: none;
+}
+
+body.desktop-mode .login-showcase {
+    display: flex;
+    height: min(700px, calc(100dvh - 160px));
+    min-height: 0;
+}
+
+body.desktop-mode #loginCard.login-card {
+    width: min(460px, 100%);
+    max-height: calc(100% - 8px);
+    margin: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}

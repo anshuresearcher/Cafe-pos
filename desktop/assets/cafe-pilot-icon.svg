@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>Cafe Pilot</title>
+  <defs>
+    <linearGradient id="background" x1="20" y1="18" x2="238" y2="238" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#214b55"/>
+      <stop offset=".52" stop-color="#1b3546"/>
+      <stop offset="1" stop-color="#172334"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="matrix(80 74 -67 72 181 66)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#36b8a5" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#36b8a5" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cup" x1="68" y1="106" x2="171" y2="192" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff8e9"/>
+      <stop offset="1" stop-color="#f0d8b5"/>
+    </linearGradient>
+    <linearGradient id="handle" x1="167" y1="108" x2="199" y2="155" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#58d3bd"/>
+      <stop offset="1" stop-color="#2da99f"/>
+    </linearGradient>
+  </defs>
+  <rect x="14" y="14" width="228" height="228" rx="56" fill="url(#background)"/>
+  <rect x="14.75" y="14.75" width="226.5" height="226.5" rx="55.25" stroke="#fff" stroke-opacity=".13" stroke-width="1.5"/>
+  <rect x="15" y="15" width="226" height="226" rx="55" fill="url(#glow)"/>
+  <ellipse cx="122" cy="205" rx="62" ry="8" fill="#2aa99d" fill-opacity=".86"/>
+  <path d="M169 111h12c14 0 18 8 18 20s-4 20-18 20h-15" fill="none" stroke="url(#handle)" stroke-linecap="round" stroke-width="13"/>
+  <path d="M68 92h109l-8 75c-2 21-17 35-38 35h-18c-21 0-36-14-38-35l-7-75Z" fill="url(#cup)"/>
+  <path d="M78 119 83 165c1 12 6 20 13 25" fill="none" stroke="#fff" stroke-linecap="round" stroke-opacity=".58" stroke-width="5"/>
+  <ellipse cx="122.5" cy="94" rx="55.5" ry="15.5" fill="#d8b68f"/>
+  <ellipse cx="122.5" cy="92.5" rx="48" ry="9.5" fill="#563728"/>
+  <path d="M112 95c2-6 9-10 19-3-3 7-11 11-19 3Zm1 1 12-8" fill="none" stroke="#d8a76a" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8"/>
+  <path d="M91 76c-5-7 5-12 2-20m29 20c7-8-6-14 2-23m27 23c-4-7 5-12 3-20" fill="none" stroke="#f4d28e" stroke-linecap="round" stroke-width="5.5"/>
+</svg>

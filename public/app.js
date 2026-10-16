@@ -7,6 +7,7 @@
 const API = "/api";
 let authToken = sessionStorage.getItem("cafeAuthToken") || "";
 let currentUser = null;
+let currentLicense = null;
 let currentDevice = null;
 const LOGIN_BUSINESS_NAME_KEY = 'cafeLoginBusinessName';
 function settingsLocalStorageKey(){return currentUser&&currentUser.business_id?"cafeAppSettings:"+Number(currentUser.business_id):"cafeAppSettings";}
@@ -53,6 +54,7 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
 
     authToken = "";
     currentUser = null;
+    currentLicense = null;
 
     sessionStorage.removeItem("cafeAuthToken");
 
@@ -357,6 +359,7 @@ function getNumberValue(value, possibleKeys = []) {
 // ==========================================
 // LOGIN / SESSION / PERMISSIONS
 // ==========================================
+function hasLicenseAddon(addon){return String(currentLicense?.add_on||"").split(/[;,]/).map(value=>value.trim().toLowerCase()).includes(String(addon||"").toLowerCase());}
 function hasPermission(moduleKey, action="view") {
     if (!currentUser) return false;
     if (currentUser.profile_name === "Admin" && currentUser.permissions_override === null) return true;
@@ -431,18 +434,19 @@ async function loginUser(event) {
     try{
         const r=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
         const data=await r.json().catch(()=>({})); if(!r.ok) throw new Error(data.error||"Login failed");
-        authToken=data.token; currentUser=data.user; currentDevice=data.device||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.setItem("cafeAuthToken",authToken);
+        authToken=data.token; currentUser=data.user; currentDevice=data.device||null; currentLicense=data.license||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.setItem("cafeAuthToken",authToken);
         const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
         scheduleSessionExpiry(data.expiresAt || (Date.now() + fallbackSessionHours * 60 * 60 * 1000));
         primeKOTAlertAudio(); await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){if(!authToken){document.getElementById("loginScreen")?.style.setProperty("display","flex");return false;}try {
     const r = await api("/auth/me");
 
     currentUser = r.user;
     currentDevice = r.device || null;
+    currentLicense = r.license || null;
     cacheLoginBusinessName(currentUser?.business_name);
 
     const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
@@ -457,6 +461,7 @@ async function checkSession(){if(!authToken){document.getElementById("loginScree
 
     authToken = "";
     currentUser = null;
+    currentLicense = null;
 
     sessionStorage.removeItem("cafeAuthToken");
 
@@ -526,9 +531,11 @@ function applyPermissionsToUI(){
                 ? "new_order"
                 : (page === "kot-groups"
                     ? "kot_groups"
-                    : page);
+                    : (page === "table-qr-menu" ? "menu" : page));
 
         let visible = hasPermission(mod, "view");
+        if (page === "table-qr-menu") visible = visible && hasLicenseAddon("Table QR");
+        if (page === "marketing") visible = visible && hasLicenseAddon("Marketing");
 
         if(
             (page === "kitchen" || page === "kot-groups") &&
@@ -540,6 +547,12 @@ function applyPermissionsToUI(){
 
         btn.style.display = visible ? "" : "none";
     });
+
+    const loyaltySection = document.getElementById("loyalty");
+    const loyaltyCard = document.getElementById("marketingLoyaltyFeatureCard");
+    const canViewLoyalty = hasPermission("loyalty", "view");
+    if (loyaltySection && !canViewLoyalty) loyaltySection.hidden = true;
+    if (loyaltyCard) loyaltyCard.hidden = !canViewLoyalty;
 
     const label = document.getElementById("sessionUserLabel");
 
@@ -692,19 +705,45 @@ function showBusinessProfileDialog() {
     alert(lines.join("\\n"));
 }
 
-async function startAuthenticatedApp(){document.getElementById("loginScreen")?.style.setProperty("display","none");applyPermissionsToUI();await loadSettings();await Promise.all([loadBillingAdjustments(),loadMarketingDeals()]);stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();await Promise.all([hasPermission("dashboard")?updateDashboard():Promise.resolve(),hasPermission("new_order")?loadMenu():Promise.resolve(),hasPermission("menu")?loadMenuManagement():Promise.resolve(),hasPermission("customers")?loadCustomers():Promise.resolve(),hasPermission("tables")?loadTables():Promise.resolve(),hasPermission("access")?loadAccess():Promise.resolve(),hasPermission("printer")?loadPrinters():Promise.resolve(),(appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())]);updateCart();setOrderType("Takeaway");startKOTAlertPolling();}
+async function startAuthenticatedApp(){
+    document.getElementById("loginScreen")?.style.setProperty("display","none");
+    applyPermissionsToUI();
+    await loadSettings();
+    startPOSQrOrderAlerts();
+    await Promise.all([loadBillingAdjustments(),loadMarketingDeals()]);
+    stopKOTAlertPolling();
+    kotAlertInitialized=false;
+    knownPendingKOTIds=new Set();
+    await Promise.all([
+        hasPermission("dashboard")?updateDashboard():Promise.resolve(),
+        hasPermission("new_order")?loadMenu():Promise.resolve(),
+        hasPermission("menu")?loadMenuManagement():Promise.resolve(),
+        hasPermission("customers")?loadCustomers():Promise.resolve(),
+        hasPermission("tables")?loadTables():Promise.resolve(),
+        hasPermission("access")?loadAccess():Promise.resolve(),
+        hasPermission("printer")?loadPrinters():Promise.resolve(),
+        (appSettings.kotEnabled!==false && hasPermission("kot_groups")?loadKOTGroups():Promise.resolve())
+    ]);
+    updateCart();
+    setOrderType("Takeaway");
+    startKOTAlertPolling();
+}
 
 // ==========================================
 // NAVIGATION
 // ==========================================
 
 function showPage(pageName) {
+    if (pageName === "loyalty") pageName = "marketing";
 
     if ((pageName === "kitchen" || pageName === "kot-groups") && appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide") {
         return;
     }
 
-    const permissionModule = pageName === "new-order" ? "new_order" : (pageName === "table-view" ? "tables" : (pageName === "kot-groups" ? "kot_groups" : (pageName === "advanced-reports" ? "advanced_reports" : pageName)));
+    if (pageName === "table-qr-menu" && !hasLicenseAddon("Table QR")) { alert("Table QR is a paid add-on. Contact support to activate it."); return; }
+    if (pageName === "marketing" && !hasLicenseAddon("Marketing")) { alert("Marketing is a paid add-on. Contact support to activate it."); return; }
+
+    const permissionModule = pageName === "new-order" ? "new_order" : (pageName === "table-view" ? "tables" : ((pageName === "table-qr-menu" || pageName === "menu") ? "menu" : (pageName === "kot-groups" ? "kot_groups" : (pageName === "advanced-reports" ? "advanced_reports" : pageName))));
     if (!currentUser || !hasPermission(permissionModule, "view")) {
         if (currentUser) alert("You do not have permission to open this module.");
         return;
@@ -853,6 +892,12 @@ function showPage(pageName) {
     if (pageName === "menu") {
 
         loadMenuManagement();
+
+    }
+
+    if (pageName === "table-qr-menu") {
+
+        loadTableQrMenuModule();
 
     }
 
@@ -2667,8 +2712,25 @@ window.printThermalBill = async function() {
     try {
         // LOCAL = Windows installed printer. Print directly through the local Cafe POS Printer Service.
         if (defaultPrinter.connection_type === "local") {
-            const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
             const receipt = printerReceiptText(data);
+            if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(defaultPrinter.name)) {
+                const result = await window.cafePOSDesktop.saveReceiptPdf({
+                    kind: "invoice",
+                    bill: data,
+                    settings: {
+                        restaurantName: appSettings.restaurantName,
+                        address: appSettings.address,
+                        phone: appSettings.phone,
+                        gstin: appSettings.gstin,
+                        currency: appSettings.currency
+                    }
+                });
+                if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the invoice PDF.");
+                await markBillPrinted();
+                showProfileToast((data.isOpenOrder ? "Proforma PDF saved to " : "Invoice PDF saved to ") + result.outputFile);
+                return;
+            }
+            const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
             const response = await fetch(serviceUrl + "/print", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2681,7 +2743,7 @@ window.printThermalBill = async function() {
             const result = await response.json().catch(function(){ return {}; });
             if (!response.ok) throw new Error(result.error || "Windows print service rejected the job.");
             await markBillPrinted();
-            showProfileToast("Bill sent to " + defaultPrinter.name + ".");
+            showProfileToast(result.outputFile ? "PDF saved to " + result.outputFile : "Bill sent to " + defaultPrinter.name + ".");
             return;
         }
 
@@ -2899,8 +2961,16 @@ async function viewOrder(orderId) {
         window.selectedOrderId = Number(order.id);
 
 
-        const items =
-            data.items || [];
+        const sourceItems = Array.isArray(data.items) ? data.items : [];
+        const items = sourceItems.map(item => {
+            const qty = Math.max(1, Number(item.quantity || 1));
+            const missingLineValues = Number(item.price || 0) === 0 && Number(item.line_total || 0) === 0;
+            if (String(order.order_number || "").startsWith("QR-") && sourceItems.length === 1 && missingLineValues && Number(order.total || 0) > 0) {
+                const gross = Number(order.subtotal || 0) + Number(order.gst || 0);
+                return { ...item, price: gross / qty, line_total: gross };
+            }
+            return item;
+        });
 
         const discountAdjustmentName = order.discount_adjustment_name || order.marketing_deal_name || "";
         const chargeAdjustmentName = order.charge_adjustment_name || "";
@@ -3068,8 +3138,9 @@ async function viewOrder(orderId) {
             const canEdit = closed
                 ? (order.bill_printed_at ? hasPermission("orders", "edit_after_print") || hasPermission("orders", "edit_closed") : hasPermission("orders", "edit_closed"))
                 : !cancelled && (hasPermission("orders", "edit_open") || hasPermission("orders", "edit"));
-            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${!closed && !cancelled ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
+            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderBill(${Number(order.id)})">🧾 View bill</button><button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${!closed && !cancelled ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
             actions.hidden = false;
+            actions.insertAdjacentHTML("afterbegin", '<button type="button" class="table-action-btn" onclick="printOrderKOT('+Number(order.id)+')">🖨️ Print KOT</button>');
         }
         document.querySelectorAll(".order-list-card").forEach(card => card.classList.toggle("selected", Number(card.getAttribute("onclick")?.match(/\d+/)?.[0]) === Number(order.id)));
 
@@ -4333,7 +4404,7 @@ function showKOTArrivalToast(count){
 
 function inspectNewKOTAlerts(items){
     if(!canKitchenReceiveKOTAlerts()) return;
-    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)).map(i=>Number(i.id)));
+    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)&&!/^QR-/i.test(String(i.order_number||""))).map(i=>Number(i.id)));
     if(!kotAlertInitialized){
         knownPendingKOTIds=pendingIds;
         kotAlertInitialized=true;
@@ -4348,10 +4419,12 @@ function inspectNewKOTAlerts(items){
 }
 
 async function pollKOTAlerts(){
-    if(appSettings.kotEnabled === false || !currentUser || !hasPermission("kitchen","view") || appSettings.enableKOTSound === false) return;
+    if(appSettings.kotEnabled === false || !currentUser || !hasPermission("kitchen","view")) return;
     try{
         const items=await api("/kot?range=today");
         inspectNewKOTAlerts(items);
+        if(document.getElementById("kitchen")?.classList.contains("active-page") && kotState.range==="today"){kotState.items=items;renderKOT();}
+        if(document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true);
     }catch(e){
         console.warn("KOT alert polling failed:",e.message);
     }
@@ -4873,6 +4946,48 @@ async function printOpenOrder(orderId){
     }catch(error){alert("Unable to print open order: "+error.message);}
 }
 
+async function viewOrderBill(orderId){
+    try{
+        const [data,paymentSummary]=await Promise.all([
+            api(`/orders/${Number(orderId)}`),
+            api(`/orders/${Number(orderId)}/payment-summary`).catch(()=>null)
+        ]);
+        const order=data.order||{};
+        const collected=Number(paymentSummary?.amountCollected||0);
+        window.openBillPreview({
+            orderId:Number(orderId),
+            isOpenOrder:!["completed","cancelled"].includes(String(order.status||"").toLowerCase()),
+            orderNumber:order.order_number||`#${orderId}`,
+            invoiceNumber:order.invoice_number||"",
+            date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),
+            orderType:order.order_type||"",
+            tableNumber:order.table_number||"",
+            pax:Number(order.pax||0),
+            subtotal:Number(order.subtotal||0),
+            discount:Number(order.discount||0),
+            discountName:order.discount_adjustment_name||order.marketing_deal_name||"",
+            serviceCharge:Number(order.service_charge||0),
+            chargeName:order.charge_adjustment_name||"",
+            gst:Number(order.gst||0),
+            total:Number(order.total||0),
+            paymentMethod:order.payment_method||"Unpaid",
+            paymentAllocations:Array.isArray(paymentSummary?.allocations)?paymentSummary.allocations:[],
+            amountCollected:collected,
+            amountDue:Number(paymentSummary?.amountDue??Math.max(0,Number(order.total||0)-collected)),
+            customerName:order.customer_name||"",
+            customerPhone:order.customer_phone||"",
+            customerEmail:order.customer_email||"",
+            customerGstin:order.customer_gstin||"",
+            customerBirthDate:order.customer_birth_date||"",
+            customerAddress:order.customer_address||"",
+            customerCity:order.customer_city||"",
+            customerState:order.customer_state||"",
+            items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[]})),
+            viewMode:"side-panel"
+        });
+    }catch(error){alert("Unable to view this bill: "+(error.message||"Please try again."));}
+}
+
 async function printKOT(orderId){
     try{
         const all=await api("/kot?range=all");
@@ -4903,7 +5018,14 @@ async function printKOT(orderId){
             }
         }
         showProfileToast("KOT sent to the assigned group printers.");
-    }catch(error){console.error("Print KOT failed:",error);alert("Unable to print KOT: "+error.message);}
+    }catch(error){
+        if(isBluetoothSelectionCancelled(error)){
+            showProfileToast("Bluetooth printer selection was cancelled. Choose a printer to send the KOT.");
+            return;
+        }
+        console.error("Print KOT failed:",error);
+        alert("Unable to print KOT: "+(error?.message||"Windows could not send the print job. Check that the printer is installed and online, then retry."));
+    }
 }
 
 // ==========================================
@@ -4926,8 +5048,152 @@ async function loadMenuManagement(){
         renderMenuCategoryMaster();
     }catch(e){console.error('Menu management failed:',e);}
 }
-function renderMenuManagementCards(){const grid=document.getElementById('menuManagementGrid');if(!grid)return;const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();const nature=String(document.getElementById('menuManagementNature')?.value||'');const items=currentMenu.filter(item=>{const hay=`${item.name} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();return(!q||hay.includes(q))&&(!nature||item.nature===nature);});grid.innerHTML=items.length?items.map(item=>{const ch=item.channel_prices||{};const vs=item.variants||[];return `<article class="menu-admin-card ${item.available?'':'disabled'}"><div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${item.available?'active':'inactive'}">${item.available?'Active':'Disabled'}</span></div><div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div><div><small>KOT</small><strong>${esc(item.kot_group_name||'Not routed')}</strong></div></div><div class="menu-channel-chips"><span>Dine-in ${money(ch.dine_in??item.price)}</span><span>Takeaway ${money(ch.takeaway??item.price)}</span><span>Delivery ${money(ch.delivery??item.price)}</span><span>Online ${money(ch.online??item.price)}</span></div>${vs.length?`<div class="menu-variant-list"><strong>Variants</strong>${vs.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}<div class="menu-admin-actions"><button class="table-action-btn" onclick="editMenuItem(${item.id})">✏️ Edit</button>${item.available?`<button class="table-action-btn" onclick="disableMenuItem(${item.id})">🗑️ Disable</button>`:`<button class="table-action-btn" onclick="enableMenuItem(${item.id})">♻️ Enable</button>`}</div></article>`;}).join(''):'<div class="menu-empty-state">No matching menu items.</div>';}
 function filterMenuManagement(){renderMenuManagementCards();}
+
+function renderMenuManagementCards(){
+    const grid=document.getElementById('menuManagementGrid');
+    if(!grid)return;
+    const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
+    const nature=String(document.getElementById('menuManagementNature')?.value||'');
+    const items=currentMenu.filter(item=>{
+        const hay=`${item.name} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
+        return(!q||hay.includes(q))&&(!nature||item.nature===nature);
+    });
+    grid.innerHTML=items.length?items.map(item=>{
+        const channel=item.channel_prices||{},variants=item.variants||[],available=item.available!==false;
+        return `<article class="menu-admin-card ${available?'':'disabled'}">
+          <div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
+          <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div><div><small>KOT</small><strong>${esc(item.kot_group_name||'Not routed')}</strong></div></div>
+          <div class="menu-channel-chips"><span>Dine-in ${money(channel.dine_in??item.price)}</span><span>Takeaway ${money(channel.takeaway??item.price)}</span><span>Delivery ${money(channel.delivery??item.price)}</span><span>Online ${money(channel.online??item.price)}</span></div>
+          ${variants.length?`<div class="menu-variant-list"><strong>Variants</strong>${variants.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}
+          <div class="menu-admin-actions"><button type="button" class="table-action-btn" onclick="openMenuPriceEditor(${Number(item.id)})">💰 Manage prices</button><button type="button" class="table-action-btn" onclick="editMenuItem(${Number(item.id)})">Edit details</button><label class="menu-availability-toggle"><input type="checkbox" ${available?'checked':''} onchange="setMenuItemAvailability(${Number(item.id)},this.checked)" aria-label="Enable ${esc(item.name)} in the POS"><span>${available?'POS On':'POS Off'}</span></label></div>
+        </article>`;
+    }).join(''):'<div class="menu-empty-state">No matching menu items.</div>';
+}
+
+let menuPriceEditingId=null;
+function openMenuPriceEditor(id){
+    const item=currentMenu.find(row=>Number(row.id)===Number(id));
+    if(!item)return;
+    menuPriceEditingId=Number(item.id);
+    const prices=item.channel_prices||{};
+    document.getElementById('menuPriceModalTitle').textContent=`Manage prices · ${item.name}`;
+    document.getElementById('managedMenuBasePrice').value=item.price??0;
+    document.getElementById('managedMenuPriceOnline').value=prices.online??item.price??0;
+    document.getElementById('managedMenuPriceDineIn').value=prices.dine_in??item.price??0;
+    document.getElementById('managedMenuPriceTakeaway').value=prices.takeaway??item.price??0;
+    document.getElementById('managedMenuPriceDelivery').value=prices.delivery??item.price??0;
+    document.getElementById('menuVariantPriceEditor').innerHTML=(item.variants||[]).map(variant=>`<label class="menu-price-variant-row"><span>${esc(variant.name)}${variant.unit?' · '+esc(variant.unit):''}</span><input class="managed-menu-variant-price" type="number" min="0" step="0.01" data-id="${Number(variant.id)}" value="${Number(variant.price||0)}" aria-label="${esc(variant.name)} price"></label>`).join('')||'<p class="access-muted">This item has no size variants.</p>';
+    document.getElementById('menuPriceModal').style.display='flex';
+}
+function closeMenuPriceEditor(){document.getElementById('menuPriceModal').style.display='none';menuPriceEditingId=null;}
+async function saveMenuPriceEditor(){
+    if(!menuPriceEditingId)return;
+    const fields={price:document.getElementById('managedMenuBasePrice').value,online:document.getElementById('managedMenuPriceOnline').value,dine_in:document.getElementById('managedMenuPriceDineIn').value,takeaway:document.getElementById('managedMenuPriceTakeaway').value,delivery:document.getElementById('managedMenuPriceDelivery').value};
+    if(Object.values(fields).some(value=>value===''||!Number.isFinite(Number(value))||Number(value)<0))return alert('Enter a valid price in every field.');
+    const variantInputs=[...document.querySelectorAll('.managed-menu-variant-price')];
+    if(variantInputs.some(input=>input.value===''||!Number.isFinite(Number(input.value))||Number(input.value)<0))return alert('Enter a valid price for every size variant.');
+    const payload={price:Number(fields.price),channelPrices:{online:Number(fields.online),dine_in:Number(fields.dine_in),takeaway:Number(fields.takeaway),delivery:Number(fields.delivery)},variants:variantInputs.map(input=>({id:Number(input.dataset.id),price:Number(input.value)}))};
+    try{await api(`/menu/${menuPriceEditingId}/prices`,{method:'PATCH',body:JSON.stringify(payload)});closeMenuPriceEditor();await loadMenuManagement();await loadMenu();showProfileToast('Menu prices updated.');}
+    catch(error){alert(error.message||'Could not update menu prices.');}
+}
+
+async function setMenuItemAvailability(id,available){
+    try{
+        await api(available?`/menu/${id}/enable`:`/menu/${id}`,{method:available?'PUT':'DELETE'});
+        await loadMenuManagement();
+        await loadMenu();
+        showProfileToast(available?'Item is back on the menu.':'Item is hidden from the menu.');
+    }catch(error){
+        alert(error.message||'Could not change item availability.');
+        await loadMenuManagement();
+    }
+}
+
+async function setQrMenuStock(id,inStock){
+    try{
+        await api(`/menu/${id}/qr-stock`,{method:'PATCH',body:JSON.stringify({inStock})});
+        await loadMenuManagement();
+        showProfileToast(inStock?'Item marked in stock on the QR menu.':'Item marked sold out on the QR menu.');
+    }catch(error){
+        alert(error.message||'Could not update the QR menu stock status.');
+        await loadMenuManagement();
+    }
+}
+
+let restaurantMenuPublication=null;
+let restaurantMenuQrDataUrl='';
+async function loadRestaurantMenuSettings(){
+    try{
+        restaurantMenuPublication=await api('/menu/public-settings');
+        const enabled=document.getElementById('publicMenuEnabled'),channel=document.getElementById('publicMenuPriceChannel'),url=document.getElementById('publicMenuUrl'),status=document.getElementById('publicMenuStatus');
+        if(enabled)enabled.checked=restaurantMenuPublication.enabled===true;
+        if(channel)channel.value=restaurantMenuPublication.priceChannel||'online';
+        if(url)url.value=`${window.location.origin}/restaurant/${restaurantMenuPublication.token}`;
+        if(status)status.textContent=restaurantMenuPublication.enabled?'Your cafe or restaurant menu is published.':"Your menu is private until you turn publishing on.";
+        await generateRestaurantMenuQr();
+    }catch(error){
+        const status=document.getElementById('publicMenuStatus');
+        if(status)status.textContent='Guest menu settings are unavailable. Apply the latest POS database update, then reopen Menu.';
+        console.warn('Restaurant menu settings unavailable:',error);
+    }
+}
+async function saveRestaurantMenuSettings(){
+    const enabled=document.getElementById('publicMenuEnabled')?.checked===true,priceChannel=document.getElementById('publicMenuPriceChannel')?.value||'online';
+    try{
+        restaurantMenuPublication=await api('/menu/public-settings',{method:'PUT',body:JSON.stringify({enabled,priceChannel})});
+        const url=document.getElementById('publicMenuUrl');
+        if(url)url.value=`${window.location.origin}/restaurant/${restaurantMenuPublication.token}`;
+        document.getElementById('publicMenuStatus').textContent=enabled?'Published. The guest menu now shows available POS items and this price list.':'Publishing is off. Guests cannot open the menu.';
+        await generateRestaurantMenuQr();
+        showProfileToast(enabled?'Guest menu published.':'Guest menu turned off.');
+    }catch(error){
+        document.getElementById('publicMenuStatus').textContent=error.message||'Could not save menu settings.';
+    }
+}
+async function generateRestaurantMenuQr(){
+    const image=document.getElementById('restaurantMenuQrImage'),placeholder=document.getElementById('restaurantMenuQrPlaceholder'),status=document.getElementById('restaurantMenuQrStatus'),downloadButton=document.getElementById('downloadRestaurantMenuQrButton'),printButton=document.getElementById('printRestaurantMenuQrButton'),url=document.getElementById('publicMenuUrl')?.value||'';
+    if(!image||!status)return;
+    restaurantMenuQrDataUrl='';
+    if(downloadButton)downloadButton.disabled=true;
+    if(printButton)printButton.disabled=true;
+    image.hidden=true;
+    if(placeholder)placeholder.hidden=false;
+    if(!url){status.textContent='Save your guest menu settings to create its QR code.';return;}
+    status.textContent='Generating your QR code…';
+    try{
+        const result=await api('/menu/public-settings/qr',{method:'POST',body:JSON.stringify({url})});
+        restaurantMenuQrDataUrl=result.dataUrl||'';
+        if(!restaurantMenuQrDataUrl)throw new Error('QR image was not returned.');
+        image.src=restaurantMenuQrDataUrl;
+        image.hidden=false;
+        if(placeholder)placeholder.hidden=true;
+        if(downloadButton)downloadButton.disabled=false;
+        if(printButton)printButton.disabled=false;
+        const localHost=['localhost','127.0.0.1','::1'].includes(window.location.hostname);
+        status.textContent=localHost?'This local QR link works on this computer; deploy the POS to let customers scan it.':restaurantMenuPublication?.enabled?'Ready. Your published guest menu link is encoded in this QR code.':'QR is ready; publish the guest menu before sharing it.';
+    }catch(error){
+        status.textContent=error.message||'Could not generate the guest menu QR code.';
+    }
+}
+function downloadRestaurantMenuQr(){
+    if(!restaurantMenuQrDataUrl)return;
+    const link=document.createElement('a');link.href=restaurantMenuQrDataUrl;link.download='cafe-restaurant-menu-qr.png';document.body.appendChild(link);link.click();link.remove();
+}
+function printRestaurantMenuQr(){
+    if(!restaurantMenuQrDataUrl)return;
+    const url=document.getElementById('publicMenuUrl')?.value||'';
+    const printWindow=window.open('','_blank','width=760,height=900');
+    if(!printWindow){alert('Allow pop-ups for this POS page to print the menu QR.');return;}
+    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Cafe menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.link{margin-top:20px;font-size:12px;color:#66717d;overflow-wrap:anywhere}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>Scan to view our menu</h1><p>Freshly prepared. Ready to explore.</p><img src="${restaurantMenuQrDataUrl}" alt="Guest menu QR code"><div class="link">${esc(url)}</div></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`);
+    printWindow.document.close();
+}
+async function copyRestaurantMenuUrl(){
+    const value=document.getElementById('publicMenuUrl')?.value||'';
+    if(!value)return;
+    try{await navigator.clipboard.writeText(value);showProfileToast('Guest menu link copied.');}
+    catch(_){const input=document.getElementById('publicMenuUrl');input.select();document.execCommand('copy');showProfileToast('Guest menu link copied.');}
+}
 function openAddMenuModal(item=null){editingMenuItemId=item?.id||null;currentMenuImageData=item?.image_url||item?.imageUrl||null;populateKOTGroupSelect();populateMenuCategorySelect(item?.category||'');document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';document.getElementById('menuName').value=item?.name||'';document.getElementById('menuPrice').value=item?.price??'';document.getElementById('menuCategory').value=item?.category||'';document.getElementById('menuNature').value=item?.nature||'Goods';document.getElementById('menuUnit').value=item?.unit||'ea';document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';const cp=item?.channel_prices||{};for(const k of ['dine_in','takeaway','delivery','online'])document.getElementById('menuPrice_'+k).value=cp[k]??item?.price??'';const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();renderMenuOptionSetPicker(item?.option_set_ids||[]);renderMenuVariantsEditor(item?.variants||[]);document.getElementById('addMenuModal').style.display='flex';}
 function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;currentMenuImageData=null;}
 function menuVariantEditorRow(v={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(v.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(v.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${v.price??''}"><select class="variant-unit"><option value="ea" ${v.unit==='ea'?'selected':''}>ea</option><option value="g" ${v.unit==='g'?'selected':''}>g</option><option value="kg" ${v.unit==='kg'?'selected':''}>kg</option><option value="ml" ${v.unit==='ml'?'selected':''}>ml</option><option value="lt" ${v.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
@@ -5831,6 +6097,50 @@ function renderBillingAdjustmentMaster() {
 async function toggleBillingAdjustment(id){try{await api(`/billing-adjustments/${id}/toggle`,{method:"PUT"});await loadBillingAdjustmentMaster();}catch(e){alert(e.message);}}
 
 async function deleteBillingAdjustment(id){if(!confirm("Delete this discount/charge?"))return;try{await api(`/billing-adjustments/${id}`,{method:"DELETE"});await loadBillingAdjustmentMaster();}catch(e){alert(e.message);}}
+
+
+function showMarketingSection(section) {
+    const promotions = document.getElementById("marketingPromotionsPanel");
+    const loyalty = document.getElementById("loyalty");
+    const prompt = document.getElementById("marketingSectionPrompt");
+    const promotionsCard = document.getElementById("marketingPromotionsFeatureCard");
+    const loyaltyCard = document.getElementById("marketingLoyaltyFeatureCard");
+    if (section === "loyalty" && (!hasPermission("loyalty", "view") || !loyalty || !loyaltyCard || loyaltyCard.hidden)) return;
+    const showPromotions = section === "promotions";
+    if (!showPromotions && section !== "loyalty") return;
+    if (promotions) promotions.hidden = !showPromotions;
+    if (loyalty) loyalty.hidden = showPromotions;
+    if (prompt) prompt.hidden = true;
+    if (promotionsCard) {
+        promotionsCard.classList.toggle("is-active", showPromotions);
+        promotionsCard.setAttribute("aria-expanded", String(showPromotions));
+    }
+    if (loyaltyCard) {
+        loyaltyCard.classList.toggle("is-active", !showPromotions);
+        loyaltyCard.setAttribute("aria-expanded", String(!showPromotions));
+    }
+    const panel = showPromotions ? promotions : loyalty;
+    panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+let marketingPushCampaigns = [];
+let marketingPushConfig = null;
+async function loadMarketingPushCampaigns() {
+    const list=document.getElementById("marketingPushCampaigns"), status=document.getElementById("marketingPushStatus"), create=document.getElementById("marketingPushCreateButton");
+    if(!list||!status)return;
+    try {
+        const [settings,history]=await Promise.all([api("/marketing/push-settings"),api("/marketing/push-campaigns")]);
+        marketingPushConfig=settings||{};marketingPushCampaigns=Array.isArray(history.campaigns)?history.campaigns:[];
+        const subscriberCount=Number(settings.subscriberCount||0);
+        const ready=settings.configured&&settings.menuEnabled;
+        status.textContent=!settings.configured?"Push sending is unavailable because web push delivery is not configured on this POS server.":!settings.menuEnabled?"Publish the Table QR menu before collecting subscribers or sending messages.":subscriberCount===0?"The QR menu is published, but no guests have subscribed yet. Invite guests to tap Get offers on the QR menu.":subscriberCount+" guest device(s) subscribed. You can create a message.";
+        if(create){create.disabled=!ready||subscriberCount===0;create.title=!settings.configured?"Web push delivery is not configured on this POS server.":!settings.menuEnabled?"Publish the Table QR menu first.":subscriberCount===0?"Invite guests to subscribe from the QR menu first.":"";}
+        renderMarketingPushCampaigns();
+    } catch(error) { marketingPushCampaigns=[];status.textContent="Could not load notification setup: "+error.message;if(create)create.disabled=true;list.innerHTML='<div class="marketing-empty-state">Notification setup is unavailable.</div>'; }
+}
+function renderMarketingPushCampaigns(){const list=document.getElementById("marketingPushCampaigns");if(!list)return;if(!marketingPushCampaigns.length){list.innerHTML='<div class="marketing-empty-state">No customer messages have been sent yet.</div>';return;}list.innerHTML=marketingPushCampaigns.map(c=>{const date=c.sent_at||c.created_at;return `<article class="marketing-push-card"><div class="marketing-push-card-top"><span>${esc(String(c.status||"sent").toUpperCase())}</span><span>${date?esc(new Date(date).toLocaleString()):""}</span></div><h4>${esc(c.title||"Promotion")}</h4><p>${esc(c.message||"")}</p><small>Sent ${Number(c.sent_count||0)} - Failed ${Number(c.failed_count||0)} - Audience ${Number(c.subscriber_count||0)}</small></article>`;}).join("");}
+function openMarketingPushForm(){if(!marketingPushConfig?.configured){alert("Web push delivery is not configured on this POS server. Ask your POS administrator to enable it.");return;}if(!marketingPushConfig?.menuEnabled){alert("Publish the Table QR menu before sending a message.");return;}if(!Number(marketingPushConfig?.subscriberCount||0)){alert("No guests have subscribed yet. Invite guests to tap Get offers on the QR menu.");return;}document.getElementById("marketingPushTitle").value="";document.getElementById("marketingPushMessage").value="";document.getElementById("marketingPushFormStatus").textContent="";const button=document.getElementById("marketingPushSendButton");button.disabled=false;button.textContent="Send to subscribers";document.getElementById("marketingPushModal").style.display="flex";}
+function closeMarketingPushForm(){document.getElementById("marketingPushModal")?.style.setProperty("display","none");}
+async function sendMarketingPushCampaign(){const title=document.getElementById("marketingPushTitle").value.trim(),message=document.getElementById("marketingPushMessage").value.trim(),button=document.getElementById("marketingPushSendButton"),status=document.getElementById("marketingPushFormStatus");if(!title||!message){status.textContent="Add a title and message first.";return;}button.disabled=true;button.textContent="Sending...";status.textContent="Sending to subscribed devices...";try{const result=await api("/marketing/push-campaigns",{method:"POST",body:JSON.stringify({title,message})});status.textContent=result.message||"Message sent.";await loadMarketingPushCampaigns();button.textContent="Sent";setTimeout(closeMarketingPushForm,900);}catch(error){status.textContent=error.message||"Could not send this message.";button.disabled=false;button.textContent="Try again";}}
 
 let marketingDeals = [];
 let editingMarketingDealId = null;
@@ -8061,10 +8371,85 @@ function printerReceiptText(data){
     lines.push("Amount collected: "+moneyValue(amountCollected),"Amount due: "+moneyValue(amountDue),"--------------------------------",appSettings.footer||"Thank you!");
     return lines.filter(Boolean).join("\n")+"\n\n\n";
 }
-async function sendBluetoothPrinterText(printer,text){if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable in this browser. Use Chrome or Edge on HTTPS or localhost.");const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";const name=printer.bluetooth_name||printer.bluetoothName||printer.name;const selection=navigator.bluetooth.requestDevice({filters:[{namePrefix:name}],optionalServices:[serviceUuid]});const device=await selection;const server=await device.gatt.connect();try{const service=await server.getPrimaryService(serviceUuid);const characteristic=await service.getCharacteristic(characteristicUuid);const bytes=new TextEncoder().encode(text);const payload=new Uint8Array(bytes.length+11);payload.set([0x1b,0x40,0x1b,0x61,0x01],0);payload.set(bytes,5);payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);for(let i=0;i<payload.length;i+=20)await writeChunk(payload.slice(i,i+20));}finally{if(device.gatt.connected)device.gatt.disconnect()}}
-async function pairBluetoothFromForm(){try{if(!navigator.bluetooth)throw new Error("Bluetooth setup needs Chrome or Edge on HTTPS or localhost.");const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});const name=device.name||"Bluetooth Printer";document.getElementById("printerBluetoothName").value=name;if(!printerFormValue("printerName"))document.getElementById("printerName").value=name;showPrinterMessage("Selected "+name+". Save the printer to finish setup.")}catch(e){showPrinterMessage(e.message,true)}}
+function isBluetoothSelectionCancelled(error){return /user cancell?ed the requestdevice\(\) chooser|bluetooth.*selection.*cancell?ed/i.test(String(error?.message||error||""))}
+function bluetoothSelectionMessage(error){return isBluetoothSelectionCancelled(error)?"Bluetooth selection was cancelled. Try again and choose the powered-on printer from the device list.":String(error?.message||error||"Bluetooth device selection failed.")}
+function renderDesktopBluetoothDevices(payload={}){
+    const picker=document.getElementById("desktopBluetoothPicker");
+    const list=document.getElementById("desktopBluetoothDeviceList");
+    const status=document.getElementById("desktopBluetoothStatus");
+    if(!picker||!list||!status)return;
+    picker.hidden=false;
+    const devices=Array.isArray(payload.devices)?payload.devices:[];
+    status.textContent=devices.length?`Found ${devices.length} nearby device${devices.length===1?"":"s"}. Select your printer.`:"Searching for nearby Bluetooth printers…";
+    list.innerHTML=devices.length?devices.map(device=>`<button type="button" class="desktop-bluetooth-device" data-device-id="${esc(device.deviceId)}"><span class="desktop-bluetooth-device-mark" aria-hidden="true">ᛒ</span><span class="desktop-bluetooth-device-copy"><strong>${esc(device.deviceName||"Unnamed Bluetooth device")}</strong><small>Bluetooth device</small></span></button>`).join(""):'<div class="desktop-bluetooth-empty"><span aria-hidden="true">⌕</span><span>No devices found yet. Keep the printer on and in pairing mode.</span></div>';
+    list.querySelectorAll(".desktop-bluetooth-device").forEach(button=>button.addEventListener("click",()=>{
+        const deviceId=button.getAttribute("data-device-id")||"";
+        if(!deviceId)return;
+        window.cafePOSDesktop?.selectBluetoothDevice(deviceId);
+        picker.hidden=true;
+    }));
+}
+function setupDesktopBluetoothPicker(){
+    const desktop=window.cafePOSDesktop;
+    if(!desktop?.onBluetoothDevices)return;
+    const picker=document.getElementById("desktopBluetoothPicker");
+    const cancel=document.getElementById("desktopBluetoothCancel");
+    const stopDevices=desktop.onBluetoothDevices(renderDesktopBluetoothDevices);
+    const stopFinished=desktop.onBluetoothSelectionFinished(()=>{if(picker)picker.hidden=true;});
+    cancel?.addEventListener("click",()=>{
+        if(picker)picker.hidden=true;
+        desktop.cancelBluetoothSelection();
+    });
+    picker?.addEventListener("keydown",event=>{
+        if(event.key!=="Escape")return;
+        event.preventDefault();
+        if(picker)picker.hidden=true;
+        desktop.cancelBluetoothSelection();
+    });
+    window.addEventListener("beforeunload",()=>{stopDevices?.();stopFinished?.();},{once:true});
+}
+async function sendBluetoothPrinterText(printer,text){
+    if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable. Use a Windows Bluetooth printer or a browser with Bluetooth support.");
+    const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";
+    const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";
+    const name=String(printer.bluetooth_name||printer.bluetoothName||printer.name||"").trim();
+    const requestOptions=name?{filters:[{namePrefix:name}],optionalServices:[serviceUuid]}:{acceptAllDevices:true,optionalServices:[serviceUuid]};
+    const device=await navigator.bluetooth.requestDevice(requestOptions);
+    const server=await device.gatt.connect();
+    try{
+        const service=await server.getPrimaryService(serviceUuid);
+        const characteristic=await service.getCharacteristic(characteristicUuid);
+        const bytes=new TextEncoder().encode(text);
+        const payload=new Uint8Array(bytes.length+11);
+        payload.set([0x1b,0x40,0x1b,0x61,0x01],0);
+        payload.set(bytes,5);
+        payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);
+        const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);
+        for(let i=0;i<payload.length;i+=20)await writeChunk(payload.slice(i,i+20));
+    }finally{if(device.gatt.connected)device.gatt.disconnect();}
+}
+async function pairBluetoothFromForm(){
+    try{
+        if(!navigator.bluetooth)throw new Error("Bluetooth setup is unavailable in this desktop app. Update Cafe Pilot and try again.");
+        const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";
+        const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});
+        const name=device.name||"Bluetooth Printer";
+        document.getElementById("printerBluetoothName").value=name;
+        if(!printerFormValue("printerName"))document.getElementById("printerName").value=name;
+        showPrinterMessage("Selected "+name+". Save the printer to finish setup.");
+    }catch(error){showPrinterMessage(bluetoothSelectionMessage(error),!isBluetoothSelectionCancelled(error));}
+}
 async function printLocalPrinterTest(name){
     try {
+        if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(name)) {
+            const result = await window.cafePOSDesktop.saveReceiptPdf({
+                kind: "test",
+                receipt: "CAFE POS\nPRINTER TEST\n" + name + "\n" + new Date().toLocaleString() + "\n\n\n"
+            });
+            if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the test PDF.");
+            showPrinterMessage("Test PDF saved to " + result.outputFile);
+            return;
+        }
         const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
         const response = await fetch(serviceUrl + "/test", {
             method: "POST",
@@ -8073,7 +8458,7 @@ async function printLocalPrinterTest(name){
         });
         const result = await response.json().catch(function(){ return {}; });
         if (!response.ok) throw new Error(result.error || "Windows print service error.");
-        showPrinterMessage("Test print sent to " + name + ".");
+        showPrinterMessage(result.outputFile ? "Test PDF saved to " + result.outputFile : "Test print sent to " + name + ".");
     } catch(e) {
         const serviceUnavailable = e instanceof TypeError || /failed to fetch|econnrefused/i.test(String(e.message || ""));
         showPrinterMessage(serviceUnavailable
@@ -8081,7 +8466,7 @@ async function printLocalPrinterTest(name){
             : "Windows printer test failed: " + e.message, true);
     }
 }
-async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(e.message,true)}}
+async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
 async function loadAdvancedReports(){
     try{
         const range=document.getElementById('advancedReportRange')?.value||'month';
@@ -8111,7 +8496,43 @@ function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_US
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ baseShowPage(pageName); if(!currentUser)return; switch(pageName){case 'expenses':loadExpenses();break;case 'loyalty':loadLoyaltySettings();break;case 'invoice-designer':renderInvoiceDesignerPreview();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();break;case 'new-order':loadMarketingDeals();break;} };
+showPage = function(pageName){ baseShowPage(pageName); if(!currentUser)return; switch(pageName){case 'expenses':loadExpenses();break;case 'loyalty':loadLoyaltySettings();break;case 'invoice-designer':renderInvoiceDesignerPreview();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();break;} };
+
+function setupDesktopWindowChrome(){
+    const desktop=window.cafePOSDesktop;
+    const titlebar=document.getElementById("desktopTitlebar");
+    if(!desktop||!titlebar)return;
+    document.body.classList.add("desktop-mode");
+    titlebar.hidden=false;
+    const brandMark=document.querySelector(".desktop-titlebar-mark");
+    if(brandMark){
+        const icon=document.createElement("img");
+        icon.className=brandMark.className;
+        icon.src=new URL("desktop/assets/cafe-pilot-icon.png",window.location.href).href;
+        icon.alt="";
+        icon.setAttribute("aria-hidden","true");
+        brandMark.replaceWith(icon);
+    }
+    const maximizeButton=document.getElementById("desktopWindowMaximize");
+    const renderWindowState=maximized=>{
+        if(!maximizeButton)return;
+        maximizeButton.setAttribute("aria-label",maximized?"Restore window":"Maximize window");
+        maximizeButton.title=maximized?"Restore":"Maximize";
+        maximizeButton.innerHTML=maximized
+            ? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5h7.5V11M11 5H4.5v7.5H12V5"/></svg>'
+            : '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx=".5"/></svg>';
+    };
+    const bind=(id,action)=>document.getElementById(id)?.addEventListener("click",()=>Promise.resolve(action()).catch(error=>console.warn("Desktop window action failed:",error)));
+    bind("desktopServerSettings",()=>desktop.openServerSettings());
+    bind("desktopWindowMinimize",()=>desktop.minimizeWindow());
+    bind("desktopWindowMaximize",()=>desktop.toggleMaximizeWindow());
+    bind("desktopWindowClose",()=>desktop.closeWindow());
+    Promise.resolve(desktop.getWindowState()).then(state=>renderWindowState(Boolean(state?.maximized))).catch(()=>{});
+    const unsubscribe=desktop.onWindowStateChanged(renderWindowState);
+    if(typeof unsubscribe==="function")window.addEventListener("beforeunload",unsubscribe,{once:true});
+}
+setupDesktopWindowChrome();
+setupDesktopBluetoothPicker();
 
 // ==========================================
 // START APPLICATION
@@ -8193,3 +8614,348 @@ window.addEventListener(
 
     }
 );
+
+let tableQrMenuTables=[];
+let tableQrMenuItems=[];
+let tableQrMenuQrData=new Map();
+
+function parseQrMenuBaseUrl(value){
+    let parsed;
+    try{parsed=new URL(String(value||"").trim()||window.location.origin);}
+    catch(_){throw new Error("Enter a valid QR website address, for example https://your-cafe-domain.com");}
+    if(!["http:","https:"].includes(parsed.protocol)||parsed.username||parsed.password||parsed.pathname!=="/"||parsed.search||parsed.hash)
+        throw new Error("Enter only the website address, without a page path.");
+    return parsed.origin;
+}
+function getQrMenuBaseUrl(){
+    const input=document.getElementById("publicMenuBaseUrl");
+    const fallback=restaurantMenuPublication?.publicBaseUrl||restaurantMenuPublication?.localNetworkUrl||window.location.origin;
+    return parseQrMenuBaseUrl(input?.value||fallback);
+}
+function updateRestaurantMenuLinkPreview(){
+    const url=document.getElementById("publicMenuUrl"),status=document.getElementById("publicMenuStatus"),hostNote=document.getElementById("publicMenuHostNote");
+    if(!restaurantMenuPublication?.token)return;
+    try{
+        const base=getQrMenuBaseUrl(),parsed=new URL(base);
+        if(url)url.value=base+"/restaurant/"+restaurantMenuPublication.token;
+        if(hostNote){
+            const secure=parsed.protocol==="https:";
+            hostNote.hidden=secure;
+            if(!secure){
+                const loopback=["localhost","127.0.0.1","::1"].includes(parsed.hostname);
+                hostNote.textContent=loopback
+                    ?"This localhost link opens only on this computer. Use the suggested LAN address for phone ordering; Android app installation and push notifications need your live HTTPS website."
+                    :"This address can work for phones on the same Wi-Fi. Android app installation and push notifications need your live HTTPS website.";
+            }
+        }
+    }catch(error){if(status)status.textContent=error.message;}
+}
+
+async function loadTableQrMenuModule(){
+    const grid=document.getElementById("tableQrGrid"),stock=document.getElementById("qrStockGrid");
+    if(grid)grid.innerHTML='<div class="table-qr-empty">Loading your POS tables…</div>';
+    if(stock)stock.innerHTML='<div class="qr-stock-empty">Loading menu items…</div>';
+    try{
+        const [tables,items,publication]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings")]);
+        tableQrMenuTables=Array.isArray(tables)?tables:[];
+        tableQrMenuItems=Array.isArray(items)?items:[];
+        restaurantMenuPublication=publication;
+        const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),status=document.getElementById("publicMenuStatus");
+        if(enabled)enabled.checked=publication.enabled===true;
+        if(channel)channel.value=publication.priceChannel||"online";
+        if(url)url.value=window.location.origin+"/restaurant/"+publication.token;
+        const hostNote=document.getElementById("publicMenuHostNote");
+        if(hostNote)hostNote.hidden=!(["localhost","127.0.0.1","::1"].includes(window.location.hostname));
+        if(status)status.textContent=publication.enabled?"Your QR menu is live. Table codes open the published menu.":"Your QR menu is private until you turn publishing on.";
+        renderQrStockItems();
+        await renderTableQrCards();
+    }catch(error){
+        if(grid)grid.innerHTML='<div class="table-qr-empty">Could not load your table QR setup. '+esc(error.message||"Refresh and try again.")+'</div>';
+        if(stock)stock.innerHTML='<div class="qr-stock-empty">Could not load menu items.</div>';
+        const status=document.getElementById("publicMenuStatus");
+        if(status)status.textContent=error.message||"Guest menu settings are unavailable.";
+    }
+}
+async function saveRestaurantMenuSettings(){
+    const enabled=document.getElementById("publicMenuEnabled")?.checked===true,priceChannel=document.getElementById("publicMenuPriceChannel")?.value||"online";
+    try{
+        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel})});
+        await loadTableQrMenuModule();
+        showProfileToast(enabled?"QR menu published.":"QR menu turned off.");
+    }catch(error){const status=document.getElementById("publicMenuStatus");if(status)status.textContent=error.message||"Could not save menu settings.";}
+}
+async function setQrMenuStock(id,inStock){
+    try{
+        await api("/menu/"+Number(id)+"/qr-stock",{method:"PATCH",body:JSON.stringify({inStock})});
+        tableQrMenuItems=await api("/menu");renderQrStockItems();
+        showProfileToast(inStock?"Item marked in stock on the QR menu.":"Item marked sold out on the QR menu.");
+    }catch(error){alert(error.message||"Could not update the QR menu stock status.");try{tableQrMenuItems=await api("/menu");renderQrStockItems();}catch(_){}}
+}
+function qrMenuTableUrl(table){
+    const url=new URL(getQrMenuBaseUrl()+"/restaurant/"+restaurantMenuPublication.token);
+    url.searchParams.set("table",String(table.table_number||""));return url.toString();
+}
+function qrTableDisplayName(value){
+    const label=String(value||"").trim();
+    if(/^t\d+$/i.test(label))return label.toUpperCase();
+    const tableMatch=label.match(/^table\s+(.+)$/i);
+    if(tableMatch&&/^t?\d+$/i.test(tableMatch[1]))return "T"+tableMatch[1].replace(/^t/i,"");
+    if(/^\d+$/.test(label))return "T"+label;
+    return label;
+}
+async function renderTableQrCards(){
+    const grid=document.getElementById("tableQrGrid");if(!grid)return;
+    tableQrMenuQrData=new Map();
+    if(!tableQrMenuTables.length){grid.innerHTML='<div class="table-qr-empty">No POS tables yet. Add tables in <button type="button" class="table-action-btn" onclick="showPage(\'tables\')">Tables</button> to create their QR codes.</div>';return;}
+    grid.innerHTML=tableQrMenuTables.map(table=>{
+        const id=Number(table.id),label="Table "+qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
+        return '<article class="table-qr-card"><div class="table-qr-card-head"><h4>'+esc(label)+'</h4><span>'+esc(table.status||"Available")+'</span></div>'
+            +'<div class="table-qr-preview"><img id="tableQrImage'+id+'" alt="QR code for '+esc(label)+'" hidden><div id="tableQrPlaceholder'+id+'" class="table-qr-placeholder">Generating QR…</div></div>'
+            +'<span class="table-qr-link" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span>'
+            +'<div class="table-qr-actions"><button id="tableQrDownload'+id+'" type="button" class="table-action-btn" onclick="downloadTableMenuQr('+id+')" disabled>↓ Download PNG</button><button id="tableQrPrint'+id+'" type="button" class="big-btn" onclick="printTableMenuQr('+id+')" disabled>Print</button></div></article>';
+    }).join("");
+    await Promise.all(tableQrMenuTables.map(generateTableMenuQr));
+}
+async function generateTableMenuQr(table){
+    const id=Number(table.id),image=document.getElementById("tableQrImage"+id),placeholder=document.getElementById("tableQrPlaceholder"+id);
+    const download=document.getElementById("tableQrDownload"+id),print=document.getElementById("tableQrPrint"+id);
+    try{
+        const result=await api("/menu/public-settings/qr",{method:"POST",body:JSON.stringify({url:qrMenuTableUrl(table)})});
+        if(!result.dataUrl)throw new Error("QR image was not returned.");
+        tableQrMenuQrData.set(String(id),result.dataUrl);image.src=result.dataUrl;image.hidden=false;
+        if(placeholder)placeholder.hidden=true;if(download)download.disabled=false;if(print)print.disabled=false;
+    }catch(error){if(placeholder)placeholder.textContent=error.message||"Could not generate this QR code.";}
+}
+function downloadTableMenuQr(tableId){
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));if(!table||!dataUrl)return;
+    const safeName=qrTableDisplayName(table.table_number||table.id).replace(/[^a-z0-9_-]+/gi,"-");
+    const link=document.createElement("a");link.href=dataUrl;link.download="table-"+safeName+"-menu-qr.png";document.body.appendChild(link);link.click();link.remove();
+}
+function printTableMenuQr(tableId){
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));if(!table||!dataUrl)return;
+    const tableLabel="Table "+String(table.table_number||""),win=window.open("","_blank","width=760,height=900");if(!win)return alert("Allow pop-ups for this POS page to print a table QR.");
+    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>'+esc(tableLabel)+'</h1><p>Scan to view our menu and order</p><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' QR code"></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>');win.document.close();
+}
+function renderQrStockItems(){
+    const grid=document.getElementById("qrStockGrid");if(!grid)return;
+    const term=String(document.getElementById("qrStockSearch")?.value||"").trim().toLowerCase();
+    const items=tableQrMenuItems.filter(item=>!term||String(item.name||"").toLowerCase().includes(term)||String(item.category||"").toLowerCase().includes(term));
+    if(!items.length){grid.innerHTML=tableQrMenuItems.length?'<div class="qr-stock-empty">No menu items match that search.</div>':'<div class="qr-stock-empty">No menu items yet. Add them in the Menu module first.</div>';return;}
+    grid.innerHTML=items.map(item=>{
+        const inStock=item.qr_available!==false;
+        return '<article class="qr-stock-card"><div><strong>'+esc(item.name)+'</strong><small>'+esc(item.category||"Menu item")+' · '+(item.available===false?"POS off":"POS on")+'</small></div><label class="menu-availability-toggle"><input type="checkbox" '+(inStock?"checked":"")+' onchange="setQrMenuStock('+Number(item.id)+',this.checked)" aria-label="Mark '+esc(item.name)+' as in stock for QR"><span>'+(inStock?"In Stock":"Sold Out")+'</span></label></article>';
+    }).join("");
+}
+async function printOrderKOT(orderId){
+    try{await api("/orders/"+Number(orderId)+"/kot",{method:"POST"});await printKOT(orderId);}
+    catch(error){alert("Unable to print KOT: "+(error.message||"Check the order and try again."));}
+}
+
+tableQrMenuTables=[];
+tableQrMenuItems=[];
+tableQrMenuQrData=new Map();
+
+async function loadTableQrMenuModule(){
+    const grid=document.getElementById("tableQrGrid"),stock=document.getElementById("qrStockGrid");
+    if(grid)grid.innerHTML='<div class="table-qr-empty">Loading your POS tables…</div>';
+    if(stock)stock.innerHTML='<div class="qr-stock-empty">Loading menu items…</div>';
+    try{
+        const [tables,items,publication]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings")]);
+        tableQrMenuTables=Array.isArray(tables)?tables:[];
+        tableQrMenuItems=Array.isArray(items)?items:[];
+        restaurantMenuPublication=publication;
+        const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),baseField=document.getElementById("publicMenuBaseUrl"),status=document.getElementById("publicMenuStatus");
+        if(enabled)enabled.checked=publication.enabled===true;
+        if(channel)channel.value=publication.priceChannel||"online";
+        const isLoopback=["localhost","127.0.0.1","::1"].includes(window.location.hostname.toLowerCase());
+        const suggestedBase=publication.publicBaseUrl||(isLoopback&&publication.localNetworkUrl)||window.location.origin;
+        if(baseField)baseField.value=suggestedBase;
+        if(url)url.value=parseQrMenuBaseUrl(suggestedBase)+"/restaurant/"+publication.token;
+        updateRestaurantMenuLinkPreview();
+        if(status)status.textContent=publication.enabled?"Your QR menu is live. Table codes open the published menu.":"Your QR menu is private until you turn publishing on.";
+        renderQrStockItems();
+        await renderTableQrCards();
+    }catch(error){
+        if(grid)grid.innerHTML='<div class="table-qr-empty">Could not load your table QR setup. '+esc(error.message||"Refresh and try again.")+'</div>';
+        if(stock)stock.innerHTML='<div class="qr-stock-empty">Could not load menu items.</div>';
+        const status=document.getElementById("publicMenuStatus");
+        if(status)status.textContent=error.message||"Guest menu settings are unavailable.";
+    }
+}
+async function saveRestaurantMenuSettings(){
+    const enabled=document.getElementById("publicMenuEnabled")?.checked===true;
+    const priceChannel=document.getElementById("publicMenuPriceChannel")?.value||"online";
+    const status=document.getElementById("publicMenuStatus");
+    let publicBaseUrl;
+    try{publicBaseUrl=parseQrMenuBaseUrl(document.getElementById("publicMenuBaseUrl")?.value||getQrMenuBaseUrl());}
+    catch(error){if(status)status.textContent=error.message||"Enter a valid QR website address.";return;}
+    try{
+        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel,publicBaseUrl})});
+        await loadTableQrMenuModule();
+        showProfileToast(enabled?"QR menu settings saved.":"QR menu turned off.");
+    }catch(error){
+        if(status)status.textContent=error.message||"Could not save the QR menu settings.";
+    }
+}
+async function setQrMenuStock(id,inStock){
+    try{
+        await api("/menu/"+Number(id)+"/qr-stock",{method:"PATCH",body:JSON.stringify({inStock})});
+        tableQrMenuItems=await api("/menu");
+        renderQrStockItems();
+        showProfileToast(inStock?"Item marked in stock on the QR menu.":"Item marked sold out on the QR menu.");
+    }catch(error){
+        alert(error.message||"Could not update the QR menu stock status.");
+        try{tableQrMenuItems=await api("/menu");renderQrStockItems();}catch(_){}
+    }
+}
+
+function qrMenuTableUrl(table){
+    const url=new URL(getQrMenuBaseUrl()+"/restaurant/"+restaurantMenuPublication.token);
+    url.searchParams.set("table",String(table.table_number||""));
+    return url.toString();
+}
+
+async function renderTableQrCards(){
+    const grid=document.getElementById("tableQrGrid");
+    if(!grid)return;
+    tableQrMenuQrData=new Map();
+    if(!tableQrMenuTables.length){
+        grid.innerHTML='<div class="table-qr-empty">No POS tables yet. Add tables in <button type="button" class="table-action-btn" onclick="showPage(\'tables\')">Tables</button> to create their QR codes.</div>';
+        return;
+    }
+    grid.innerHTML=tableQrMenuTables.map(table=>{
+        const id=Number(table.id),label="Table "+qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
+        return '<article class="table-qr-card"><div class="table-qr-card-head"><h4>'+esc(label)+'</h4><span>'+esc(table.status||"Available")+'</span></div>'
+            +'<div class="table-qr-preview"><img id="tableQrImage'+id+'" alt="QR code for '+esc(label)+'" hidden><div id="tableQrPlaceholder'+id+'" class="table-qr-placeholder">Generating QR…</div></div>'
+            +'<span class="table-qr-link" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span>'
+            +'<div class="table-qr-actions"><button id="tableQrDownload'+id+'" type="button" class="table-action-btn" onclick="downloadTableMenuQr('+id+')" disabled>↓ Download PNG</button><button id="tableQrPrint'+id+'" type="button" class="big-btn" onclick="printTableMenuQr('+id+')" disabled>Print</button></div></article>';
+    }).join("");
+    await Promise.all(tableQrMenuTables.map(generateTableMenuQr));
+}
+
+async function generateTableMenuQr(table){
+    const id=Number(table.id),image=document.getElementById("tableQrImage"+id),placeholder=document.getElementById("tableQrPlaceholder"+id);
+    const download=document.getElementById("tableQrDownload"+id),print=document.getElementById("tableQrPrint"+id);
+    try{
+        const result=await api("/menu/public-settings/qr",{method:"POST",body:JSON.stringify({url:qrMenuTableUrl(table)})});
+        if(!result.dataUrl)throw new Error("QR image was not returned.");
+        tableQrMenuQrData.set(String(id),result.dataUrl);
+        image.src=result.dataUrl;image.hidden=false;
+        if(placeholder)placeholder.hidden=true;
+        if(download)download.disabled=false;
+        if(print)print.disabled=false;
+    }catch(error){if(placeholder)placeholder.textContent=error.message||"Could not generate this QR code.";}
+}
+
+function downloadTableMenuQr(tableId){
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));
+    if(!table||!dataUrl)return;
+    const safeName=qrTableDisplayName(table.table_number||table.id).replace(/[^a-z0-9_-]+/gi,"-");
+    const link=document.createElement("a");link.href=dataUrl;link.download="table-"+safeName+"-menu-qr.png";document.body.appendChild(link);link.click();link.remove();
+}
+
+function printTableMenuQr(tableId){
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));
+    if(!table||!dataUrl)return;
+    const tableLabel="Table "+qrTableDisplayName(table.table_number);
+    const printWindow=window.open("","_blank","width=760,height=900");
+    if(!printWindow){alert("Allow pop-ups for this POS page to print a table QR.");return;}
+    printWindow.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>'+esc(tableLabel)+'</h1><p>Scan to view our menu and order</p><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' QR code"></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>');
+    printWindow.document.close();
+}
+
+function renderQrStockItems(){
+    const grid=document.getElementById("qrStockGrid");
+    if(!grid)return;
+    const term=String(document.getElementById("qrStockSearch")?.value||"").trim().toLowerCase();
+    const items=tableQrMenuItems.filter(item=>!term||String(item.name||"").toLowerCase().includes(term)||String(item.category||"").toLowerCase().includes(term));
+    if(!items.length){
+        grid.innerHTML=tableQrMenuItems.length?'<div class="qr-stock-empty">No menu items match that search.</div>':'<div class="qr-stock-empty">No menu items yet. Add them in the Menu module first.</div>';
+        return;
+    }
+    grid.innerHTML=items.map(item=>{
+        const inStock=item.qr_available!==false;
+        return '<article class="qr-stock-card"><div><strong>'+esc(item.name)+'</strong><small>'+esc(item.category||"Menu item")+' · '+(item.available===false?"POS off":"POS on")+'</small></div><label class="menu-availability-toggle"><input type="checkbox" '+(inStock?"checked":"")+' onchange="setQrMenuStock('+Number(item.id)+',this.checked)" aria-label="Mark '+esc(item.name)+' as in stock for QR"><span>'+(inStock?"In Stock":"Sold Out")+'</span></label></article>';
+    }).join("");
+}
+
+async function printOrderKOT(orderId){
+    try{
+        await api("/orders/"+Number(orderId)+"/kot",{method:"POST"});
+        await printKOT(orderId);
+    }catch(error){alert("Unable to print KOT: "+(error.message||"Check the order and try again."));}
+}
+let posQrOrderAlertCursor=null;
+let posQrOrderAlertTimer=null;
+let posQrOrderAlertBusy=false;
+function playPOSQrOrderAlertSound(){
+    if(appSettings.enableNotifications===false)return;
+    try{
+        ensureKOTAlertAudio();
+        const context=kotAlertAudioContext;
+        if(!context)return;
+        if(context.state==="suspended"){
+            context.resume().then(()=>{
+                if(context.state==="running")playPOSQrOrderAlertSound();
+            }).catch(()=>{});
+            return;
+        }
+        if(context.state!=="running")return;
+        const now=context.currentTime;
+        [740,988,740,1174].forEach((frequency,index)=>{
+            const at=now+index*0.2;
+            const oscillator=context.createOscillator();
+            const gain=context.createGain();
+            oscillator.type="sine";
+            oscillator.frequency.value=frequency;
+            gain.gain.setValueAtTime(0.0001,at);
+            gain.gain.exponentialRampToValueAtTime(0.2,at+0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001,at+0.16);
+            oscillator.connect(gain);
+            gain.connect(context.destination);
+            oscillator.start(at);
+            oscillator.stop(at+0.18);
+        });
+    }catch(error){console.warn("QR order alert sound failed:",error.message);}
+}
+async function pollPOSQrOrderAlerts(){
+    if(!currentUser){stopPOSQrOrderAlerts();return;}
+    if(!hasPermission("orders","view")||posQrOrderAlertBusy)return;
+    posQrOrderAlertBusy=true;
+    try{
+        const url=posQrOrderAlertCursor===null?"/orders/qr-notifications":"/orders/qr-notifications?afterId="+encodeURIComponent(posQrOrderAlertCursor);
+        const result=await api(url);
+        const latest=Number(result.latestOrderId||0);
+        const arrivals=Array.isArray(result.orders)?result.orders:[];
+        if(posQrOrderAlertCursor===null){posQrOrderAlertCursor=latest;return;}
+        posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
+        if(!arrivals.length)return;
+        if(appSettings.enableNotifications!==false){
+            playPOSQrOrderAlertSound();
+            const first=arrivals[0];
+            const table=first.table_number?" · Table "+first.table_number:"";
+            const message=arrivals.length===1?`New QR order ${first.order_number||""}${table}`:`${arrivals.length} new QR orders`;
+            showProfileToast("🔔 "+message);
+        }
+        if(document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true);
+    }catch(error){console.warn("QR order notification check failed:",error.message);}
+    finally{posQrOrderAlertBusy=false;}
+}
+function startPOSQrOrderAlerts(){
+    if(posQrOrderAlertTimer){clearInterval(posQrOrderAlertTimer);posQrOrderAlertTimer=null;}
+    posQrOrderAlertCursor=null;
+    if(!currentUser||!hasPermission("orders","view"))return;
+    document.addEventListener("pointerdown",primeKOTAlertAudio,{once:true,capture:true});
+    document.addEventListener("keydown",primeKOTAlertAudio,{once:true,capture:true});
+    pollPOSQrOrderAlerts();
+    posQrOrderAlertTimer=setInterval(pollPOSQrOrderAlerts,5000);
+}
+function stopPOSQrOrderAlerts(){
+    if(posQrOrderAlertTimer){clearInterval(posQrOrderAlertTimer);posQrOrderAlertTimer=null;}
+    posQrOrderAlertCursor=null;
+}
+if(!window.__qrOrderRefreshTimer){
+    window.__qrOrderRefreshTimer=setInterval(()=>{
+        if(document.visibilityState==="visible"&&currentUser&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))updateOrdersTable(true);
+    },15000);
+}

@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#25222f">
+  <link rel="manifest" id="guestMenuManifest">
+  <title>Cafe &amp; Restaurant · Menu</title>
+  <style>
+    :root{color-scheme:light;--ink:#1c1a24;--muted:#716e79;--paper:#f5f3ec;--card:#fff;--line:#e8e5df;--lime:#d9fb55;--pink:#ff6cad;--purple:#9d83ff;--red:#c73d53}
+    *{box-sizing:border-box}
+    body{margin:0;background:radial-gradient(circle at 12% 14%,#ffe4ee70,transparent 22rem),radial-gradient(circle at 94% 38%,#d9fb5530,transparent 26rem),var(--paper);color:var(--ink);font:15px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+    button,input{font:inherit}
+    .wrap{width:min(1180px,100% - 38px);margin:auto}
+    .top{padding:22px 0 17px;display:flex;justify-content:space-between;align-items:center;gap:14px}
+    .brand{display:flex;align-items:center;gap:11px;min-width:0}
+    .brand-mark{width:46px;height:46px;object-fit:cover;border-radius:16px;background:#e5e1ff;display:grid;place-items:center;font-size:24px}
+    .brand-copy{min-width:0}
+    .brand-name{font-size:18px;font-weight:900;letter-spacing:-.04em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .brand-caption{font-size:10px;text-transform:uppercase;letter-spacing:.16em;color:var(--muted);font-weight:850}
+    .channel{padding:8px 12px;border:1px solid #dfdce8;background:#fff;border-radius:999px;color:#514b5d;font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+    .hero{position:relative;isolation:isolate;overflow:hidden;min-height:330px;border-radius:32px;background:#1d1a27;color:#fff;padding:clamp(26px,5vw,58px);display:grid;grid-template-columns:minmax(0,1.25fr) minmax(220px,.75fr);align-items:center;box-shadow:0 22px 55px #241d331c}
+    .hero:before,.hero:after{content:"";position:absolute;z-index:-1;border-radius:50%;pointer-events:none}
+    .hero:before{width:470px;height:470px;right:-105px;top:-230px;background:radial-gradient(circle at 35% 60%,#ff6cad80,transparent 67%);filter:blur(3px)}
+    .hero:after{width:330px;height:330px;right:40px;bottom:-265px;background:radial-gradient(circle,#d9fb55a0,transparent 70%);filter:blur(5px)}
+    .hero-copy{position:relative;z-index:1;max-width:650px}
+    .hero-kicker{display:inline-flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid #ffffff31;border-radius:999px;color:#e9e6ef;font-size:10px;font-weight:900;letter-spacing:.14em;text-transform:uppercase;background:#ffffff0b}
+    .hero-kicker span{width:7px;height:7px;border-radius:50%;background:var(--lime);box-shadow:0 0 12px var(--lime)}
+    .hero h1{font-size:clamp(48px,8vw,88px);line-height:.88;letter-spacing:-.085em;margin:23px 0 15px;font-weight:950}
+    .hero h1 em{font-style:normal;color:var(--lime)}
+    .hero p{max-width:430px;margin:0;color:#d3d0dc;font-size:15px}
+    .hero-pills{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}
+    .hero-pills span{padding:7px 10px;border-radius:999px;background:#ffffff12;border:1px solid #ffffff20;color:#f7f4fc;font-size:11px;font-weight:750}
+    [hidden]{display:none!important}
+    .qr-add-button,.qr-variant-add{border:0;border-radius:999px;background:var(--lime);color:#29291f;padding:9px 12px;font-size:10px;font-weight:950;cursor:pointer}
+    .qr-add-button{width:100%;margin-top:13px}.qr-add-button:disabled,.qr-variant-add:disabled{background:#e6e3e8;color:#777;cursor:not-allowed}
+    .variant-list{display:flex;flex-wrap:wrap;gap:7px;margin-top:12px}.qr-variant-add{background:#f0edff;color:#5f4aa1}
+    .qr-cart-bar{position:fixed;z-index:8;left:50%;bottom:16px;transform:translateX(-50%);width:min(600px,calc(100% - 28px));display:flex;justify-content:space-between;align-items:center;gap:16px;padding:12px 14px 12px 18px;border:1px solid #ffffff40;border-radius:20px;background:#25222ff2;color:#fff;box-shadow:0 12px 40px #211c2b55;backdrop-filter:blur(16px)}
+    .qr-cart-bar-copy strong{display:block;font-size:14px}.qr-cart-bar-copy small{display:block;margin-top:3px;color:#d2cfdb;font-size:10px}
+    .qr-cart-bar button,.qr-cart-submit{border:0;border-radius:999px;background:var(--lime);color:#29291f;padding:12px 16px;font-size:11px;font-weight:1000;white-space:nowrap;cursor:pointer}
+    .qr-cart-overlay{position:fixed;z-index:10;inset:0;display:grid;place-items:center;padding:16px;background:#1916219c;backdrop-filter:blur(7px)}
+    .qr-cart-dialog{width:min(520px,100%);max-height:min(84vh,760px);overflow:auto;border:1px solid #ffffff70;border-radius:25px;background:#faf9f6;padding:22px;box-shadow:0 25px 80px #17132055}
+    .qr-cart-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.qr-cart-dialog h2{margin:0;font-size:27px;letter-spacing:-.06em}.qr-cart-dialog p{margin:5px 0 0;color:#77717f;font-size:12px}
+    .qr-cart-close{width:36px;height:36px;border:0;border-radius:50%;background:#eeeaf2;color:#373342;font-size:20px;cursor:pointer}
+    .qr-cart-lines{display:grid;gap:8px;margin:18px 0}.qr-cart-line{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;padding:12px;border:1px solid #e9e5ed;border-radius:15px;background:#fff}
+    .qr-cart-line strong{display:block;font-size:13px}.qr-cart-line small{display:block;margin-top:3px;color:#77717f;font-size:10px}
+    .qr-cart-quantity{display:flex;align-items:center;gap:8px}.qr-cart-quantity button{width:29px;height:29px;border:0;border-radius:50%;background:#f0edff;color:#4f3c90;font-weight:900;cursor:pointer}
+    .qr-cart-total{display:flex;justify-content:space-between;align-items:center;padding:14px 0;border-top:1px solid #e5e1e8;font-size:12px}.qr-cart-total strong{font-size:18px}
+    .qr-order-note{width:100%;min-height:74px;resize:vertical;margin-bottom:12px;padding:11px 12px;border:1px solid #dedbe4;border-radius:13px;font:inherit;font-size:12px}
+    .qr-cart-submit{width:100%;padding:14px}.qr-order-status{min-height:18px;margin-top:10px;color:#706a78;font-size:11px;text-align:center}.qr-order-status.success{color:#168653;font-weight:850}
+     .qr-public-table-picker{display:flex;align-items:center;gap:12px;margin:0 0 18px;padding:13px 16px;border:1px solid #e5e1e8;border-radius:15px;background:#fff;box-shadow:0 6px 18px #302a3908}
+     .qr-public-table-picker[hidden]{display:none!important}.qr-public-table-picker label{display:flex;align-items:center;gap:10px;color:#514b5d;font-size:12px;font-weight:900}.qr-public-table-picker select{min-height:38px;min-width:145px;padding:8px 11px;border:1px solid #dedbe4;border-radius:10px;background:#fff;color:#292533;font:inherit}.qr-public-table-picker small{color:#77717f;font-size:11px}
+    .hero-art{position:relative;min-height:220px;display:grid;place-items:center}
+    .hero-plate{width:min(230px,25vw);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;background:radial-gradient(circle at 45% 40%,#fff 0 45%,#e4e0e8 46% 51%,#ffffff20 52% 57%,transparent 58%);font-size:94px;filter:drop-shadow(0 22px 22px #0005);transform:rotate(-9deg)}
+    .hero-sticker{position:absolute;right:2%;top:14%;padding:11px 15px;background:var(--lime);color:#25231d;border-radius:12px 12px 12px 3px;transform:rotate(8deg);font-size:12px;font-weight:1000;letter-spacing:.02em;box-shadow:0 7px 0 #9db839}
+    .hero-spark{position:absolute;left:7%;bottom:13%;font-size:37px;color:var(--pink);transform:rotate(-13deg)}
+    .ticker{overflow:hidden;margin:16px 0 29px;border-radius:12px;background:var(--lime);color:#29291f}
+    .ticker-track{display:flex;justify-content:center;gap:20px;padding:10px 16px;white-space:nowrap;font-size:10px;font-weight:1000;letter-spacing:.15em;text-transform:uppercase}
+    .ticker-track span:nth-child(even){color:#7564c9}
+    .section-head{display:flex;justify-content:space-between;align-items:end;gap:18px;margin-bottom:13px}
+    .section-kicker{display:block;color:#8b68dd;font-size:10px;font-weight:1000;letter-spacing:.17em;text-transform:uppercase}
+    .section-head h2{margin:3px 0 0;font-size:clamp(24px,4vw,34px);line-height:1.05;letter-spacing:-.06em}
+    .update-note{color:var(--muted);font-size:11px;font-weight:650;margin-top:5px}
+    .search-wrap{position:relative;width:min(330px,48vw);flex:none}
+    .search-icon{position:absolute;left:15px;top:50%;transform:translateY(-50%);font-size:15px;color:#787381}
+    .search{width:100%;border:1px solid #dedbe4;background:#fff;border-radius:15px;padding:13px 15px 13px 42px;color:var(--ink);outline:none;box-shadow:0 5px 14px #302a3908}
+    .search:focus{border-color:#9d83ff;box-shadow:0 0 0 4px #9d83ff22}
+    .categories{display:flex;gap:8px;overflow:auto;padding:4px 1px 17px;scrollbar-width:thin}
+    .category-chip{display:inline-flex;align-items:center;gap:7px;border:1px solid #e4e0e8;background:#fff;color:#585361;border-radius:999px;padding:9px 13px;white-space:nowrap;font-size:11px;font-weight:850;cursor:pointer;transition:transform .16s ease,background .16s ease,border-color .16s ease}
+    .category-chip:hover{transform:translateY(-2px)}
+    .category-chip.active{background:#25222f;border-color:#25222f;color:#fff;box-shadow:0 5px 0 #cfc8e0}
+    .category-chip-icon{font-size:13px}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:17px;padding-bottom:38px}
+    .item{overflow:hidden;min-width:0;border:1px solid #e9e5e0;border-radius:23px;background:var(--card);box-shadow:0 9px 24px #302a3909;transition:transform .2s ease,box-shadow .2s ease}
+    .item:hover{transform:translateY(-4px);box-shadow:0 17px 35px #302a3918}
+    .item-visual{position:relative;overflow:hidden;aspect-ratio:1.65;background:#ece9f2}
+    .item-photo{display:block;width:100%;height:100%;object-fit:cover;transition:transform .35s ease}
+    .item:hover .item-photo{transform:scale(1.04)}
+    .fallback-visual{display:grid;place-items:center;background:radial-gradient(circle at 68% 22%,#fff9 0 4%,transparent 5%),linear-gradient(140deg,hsl(var(--tone) 95% 90%),hsl(calc(var(--tone) + 38) 85% 79%))}
+    .fallback-visual:before{content:"";position:absolute;width:68%;aspect-ratio:1;border:1px solid #ffffffad;border-radius:50%;box-shadow:0 0 0 15px #ffffff42,0 0 0 31px #ffffff24;transform:rotate(14deg)}
+    .visual-emoji{position:relative;z-index:1;font-size:clamp(55px,7vw,82px);filter:drop-shadow(0 12px 9px #41334a30);transform:rotate(-7deg)}
+    .visual-tag{position:absolute;left:13px;top:13px;padding:6px 9px;border:1px solid #ffffff85;border-radius:999px;background:#ffffffc9;color:#35303e;font-size:9px;font-weight:1000;letter-spacing:.1em;text-transform:uppercase;backdrop-filter:blur(8px)}
+    .item.is-sold-out .item-visual:after{content:"SOLD OUT";position:absolute;inset:0;display:grid;place-items:center;background:#211c2bb0;color:#fff;font-size:15px;font-weight:1000;letter-spacing:.16em}
+    .item-copy{padding:15px 16px 17px}
+    .item-meta{display:flex;justify-content:space-between;align-items:center;gap:8px}
+    .item-category{color:#8d68db;font-size:9px;text-transform:uppercase;letter-spacing:.14em;font-weight:1000;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .item-name{font-size:18px;font-weight:950;letter-spacing:-.045em;margin:7px 0 11px;line-height:1.13}
+    .item-bottom{display:flex;justify-content:space-between;align-items:end;gap:10px}
+    .item-price-label{display:block;color:#8b8792;font-size:9px;font-weight:850;letter-spacing:.1em;text-transform:uppercase}
+    .item-price{display:block;margin-top:1px;font-size:21px;line-height:1.15;font-weight:1000;letter-spacing:-.055em;color:#292533}
+    .sold-out{border-radius:999px;background:#ffe8ec;color:var(--red);padding:6px 9px;font-size:9px;font-weight:1000;letter-spacing:.08em;text-transform:uppercase;white-space:nowrap}
+    .variant-list{display:flex;flex-wrap:wrap;gap:5px;margin-top:11px}
+    .variant-pill{padding:5px 8px;border-radius:8px;background:#f2effa;color:#655a7f;font-size:10px;font-weight:800}
+    .state-card{grid-column:1/-1;display:flex;flex-direction:column;align-items:center;text-align:center;padding:48px 24px;border:1px dashed #d8d3e2;border-radius:24px;background:#ffffffc9}
+    .state-icon{display:grid;place-items:center;width:54px;height:54px;margin-bottom:11px;border-radius:18px;background:#f0ebff;font-size:25px}
+    .state-card h3{margin:0;font-size:23px;letter-spacing:-.05em}
+    .state-card p{max-width:510px;margin:8px 0 0;color:#77717f;font-size:13px}
+    .state-card button{margin-top:16px;padding:10px 15px;border:0;border-radius:999px;background:#262330;color:#fff;font-size:11px;font-weight:900;cursor:pointer}
+    .error-state .state-icon{background:#ffe9ee}
+    .footer{display:flex;justify-content:center;align-items:center;gap:9px;flex-wrap:wrap;text-align:center;color:#8a8590;font-size:10px;padding:0 0 25px}
+    .footer span{color:#514a5d;font-weight:900}
+    @media(max-width:900px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.hero{grid-template-columns:minmax(0,1fr) 260px}.hero-plate{width:220px}}
+    @media(max-width:650px){.wrap{width:calc(100% - 24px)}.top{padding:15px 0 13px}.brand-mark{width:41px;height:41px;border-radius:14px}.brand-name{font-size:16px}.brand-caption{font-size:9px}.channel{padding:7px 9px;font-size:9px}.hero{grid-template-columns:1fr;min-height:0;padding:26px 23px 18px;border-radius:25px}.hero h1{font-size:clamp(52px,15vw,76px);margin:20px 0 12px}.hero p{font-size:13px}.hero-art{min-height:145px;margin-top:0}.hero-plate{width:154px;font-size:68px}.hero-sticker{right:16%;top:9%;font-size:10px}.hero-spark{left:17%;bottom:8%;font-size:27px}.ticker{margin:12px 0 23px}.ticker-track{justify-content:flex-start}.section-head{align-items:flex-start;flex-direction:column;gap:12px}.search-wrap{width:100%}.grid{gap:12px}.item{border-radius:19px}.item-copy{padding:12px}.item-name{font-size:16px}.item-price{font-size:19px}}
+     @media(max-width:650px){.qr-public-table-picker{align-items:stretch;flex-direction:column;gap:6px;padding:12px}.qr-public-table-picker label{align-items:stretch;flex-direction:column;gap:6px}.qr-public-table-picker select{width:100%}}
+    @media(max-width:500px){.qr-cart-bar{bottom:10px;padding:10px 11px 10px 14px}.qr-cart-bar button{padding:11px 13px;font-size:10px}.qr-cart-dialog{padding:18px;border-radius:21px}.qr-cart-dialog h2{font-size:23px}}
+    @media(max-width:430px){.grid{grid-template-columns:1fr}.item{display:grid;grid-template-columns:112px minmax(0,1fr);align-items:stretch}.item-visual{height:100%;min-height:142px;aspect-ratio:auto}.item-copy{display:flex;flex-direction:column;justify-content:center;padding:12px}.item-name{margin:6px 0 10px}.item-bottom{align-items:center}.visual-emoji{font-size:52px}.visual-tag{top:8px;left:8px;font-size:7px;padding:5px 7px}.item.is-sold-out .item-visual:after{font-size:10px}.variant-list{margin-top:8px}}
+
+
+    .qr-item-options-dialog{width:min(600px,100%)}.qr-item-options-body{display:grid;gap:13px;margin:18px 0}.qr-option-set{margin:0;padding:13px;border:1px solid #e8e5ed;border-radius:14px;background:#fff}.qr-option-set legend{padding:0 6px;color:#302d39;font-size:13px;font-weight:900}.qr-option-set legend small{display:block;color:#85808b;font-size:10px;font-weight:600}.qr-option-choices{display:grid;gap:7px;margin-top:4px}.qr-option-choice{display:flex;align-items:center;gap:10px;padding:10px 11px;border:1px solid #eeebf0;border-radius:10px;background:#fcfbfd;cursor:pointer}.qr-option-choice:has(input:checked){border-color:#9d83ff;background:#f6f3ff}.qr-option-choice input{accent-color:#7256cf}.qr-option-choice span{flex:1;color:#413d4b;font-size:12px;font-weight:750}.qr-option-choice strong{color:#6552a0;font-size:11px}.qr-item-options-total{display:flex;justify-content:space-between;align-items:center;margin:4px 0 14px;padding:12px 0;border-top:1px solid #e8e5ed;font-size:12px;font-weight:850}.qr-option-empty{color:#736e7b;font-size:12px}
+    .guest-actions{display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:7px;max-width:560px}
+    .guest-action-button{min-height:36px;padding:8px 11px;border:1px solid #dedbe4;border-radius:999px;background:#fff;color:#484354;font-size:10px;font-weight:900;cursor:pointer;white-space:nowrap}
+    .guest-action-button:hover{border-color:#9d83ff;background:#f5f2ff}.guest-offers-button{border-color:#282531;background:#282531;color:#fff}
+    .guest-current-order-button{border-color:#b7d747;background:var(--lime);color:#26251e}.guest-action-status{flex-basis:100%;min-height:0;color:#77717f;font-size:10px;text-align:right}.guest-action-status:empty{display:none}
+    .qr-order-type-dialog>h2{margin:7px 0 4px;font-size:30px;letter-spacing:-.07em}.qr-order-type-dialog>p{margin:0;color:#77717f;font-size:12px}
+    .qr-order-type-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-top:22px}
+    .qr-order-type-options button{display:grid;justify-items:start;gap:6px;padding:18px;border:1px solid #e4e0e8;border-radius:18px;background:#fff;text-align:left;color:var(--ink);cursor:pointer}
+    .qr-order-type-options button:hover{border-color:#9d83ff;box-shadow:0 0 0 3px #9d83ff18}.qr-order-type-options button>span{font-size:26px}.qr-order-type-options strong{font-size:15px}.qr-order-type-options small{color:var(--muted);font-size:11px}
+    .qr-current-order-dialog{width:min(560px,100%)}.qr-current-order-content{display:grid;gap:9px;margin:18px 0}.qr-current-order-meta{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px;border:1px solid #e9e5ed;border-radius:13px;background:#fff}.qr-current-order-meta strong{font-size:13px}.qr-current-order-meta span{color:#706a78;font-size:11px}.qr-current-order-items{display:grid;gap:6px}.qr-current-order-item{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid #eeeaf1;font-size:12px}.qr-current-order-total{display:flex;justify-content:space-between;margin-top:4px;padding:12px 3px;border-top:1px solid #e5e1e8;font-weight:900}.qr-current-order-state{margin:0;color:#716e79;font-size:12px}.qr-order-refresh{width:100%;min-height:42px;border:0;border-radius:999px;background:#282531;color:#fff;font-size:11px;font-weight:900;cursor:pointer}
+    @media(max-width:650px){.top{align-items:flex-start;flex-wrap:wrap}.guest-actions{width:100%;justify-content:flex-start}.guest-action-status{text-align:left}.qr-order-type-options{grid-template-columns:1fr}.qr-order-type-options button{grid-template-columns:34px 1fr;align-items:center;column-gap:10px}.qr-order-type-options button>span{grid-row:span 2}.qr-order-type-options button small{grid-column:2}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
+  </style>
+<style>
+    /* Order check-in: playful, still easy to read at a glance. */
+    .item.is-sold-out .item-meta .sold-out{display:none}
+    .qr-table-link-notice{display:flex;align-items:center;gap:12px;margin:0 0 16px;padding:13px 16px;border:1px solid #f1d89d;border-radius:16px;background:linear-gradient(110deg,#fff8df,#fff);color:#493d29;box-shadow:0 7px 18px #302a3908}.qr-table-link-notice[hidden]{display:none!important}.qr-table-link-notice>span{display:grid;place-items:center;flex:none;width:34px;height:34px;border-radius:12px;background:#ffefb7;color:#765717;font-size:18px}.qr-table-link-notice strong,.qr-table-link-notice small{display:block}.qr-table-link-notice strong{font-size:12px}.qr-table-link-notice small{margin-top:2px;color:#74684f;font-size:11px}
+    .qr-current-order-dialog{border:1px solid #e4ddf2;background:linear-gradient(155deg,#fffefa 0%,#faf8ff 100%);box-shadow:0 28px 90px #17132066}
+    .qr-current-order-dialog .section-kicker{color:#7d60d6}
+    .qr-current-order-meta{border-color:#e6e0f1;background:linear-gradient(110deg,#f8f5ff,#fff)}
+    .qr-current-order-meta strong{font-size:12px;letter-spacing:.01em}
+    .qr-status-pill{display:inline-flex;align-items:center;gap:6px;padding:7px 11px;border:1px solid transparent;border-radius:999px;font-size:11px!important;font-weight:950;white-space:nowrap}
+    .qr-status-pill.is-queued{background:#f0ebff;border-color:#e3dbff;color:#6148b0}
+    .qr-status-pill.is-cooking{background:#fff0e7;border-color:#ffe0ca;color:#a34f20}
+    .qr-status-pill.is-ready{background:#f1fad5;border-color:#e0f2a8;color:#526d12}
+    .qr-status-pill.is-done{background:#e3f7ed;border-color:#c9ebd9;color:#18734c}
+    .qr-status-pill.is-cancelled{background:#ffe9ee;border-color:#f7cbd5;color:#a72d48}
+    .qr-order-steps{position:relative;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;margin:3px 4px 8px;padding-top:1px}
+    .qr-order-steps:before,.qr-order-steps-fill{content:"";position:absolute;z-index:0;top:7px;left:12.5%;height:4px;border-radius:999px}
+    .qr-order-steps:before{right:12.5%;background:#e8e4ef}
+    .qr-order-steps-fill{width:var(--order-progress);background:linear-gradient(90deg,#aa8bff,#d9fb55);transition:width .3s ease}
+    .qr-order-step{position:relative;z-index:1;display:flex;flex-direction:column;align-items:center;gap:6px;color:#9993a2;text-align:center}
+    .qr-order-step i{width:18px;height:18px;border:4px solid #fff;border-radius:50%;background:#e1dce9;box-shadow:0 0 0 1px #e1dce9}
+    .qr-order-step small{font-size:9px;font-weight:800;letter-spacing:.02em}
+    .qr-order-step.is-done,.qr-order-step.is-current{color:#51428b}
+    .qr-order-step.is-done i{background:#a58aff;box-shadow:0 0 0 1px #a58aff}
+    .qr-order-step.is-current i{background:#d9fb55;box-shadow:0 0 0 3px #d9fb5566,0 0 0 1px #b9d64a}
+    .qr-current-order-items{padding:5px 0;border-top:1px dashed #e5dfed;border-bottom:1px dashed #e5dfed}
+    .qr-current-order-total{margin-top:1px;border-color:#e5dfed}
+    .qr-current-order-total strong{font-size:20px;letter-spacing:-.04em}
+    .qr-order-refresh{min-height:46px;background:linear-gradient(110deg,#292633 0%,#4a3b77 100%);box-shadow:0 7px 0 #e5def7;transition:transform .16s ease,box-shadow .16s ease}
+    .qr-order-refresh:hover{transform:translateY(-2px);box-shadow:0 9px 0 #e5def7}
+    .qr-order-refresh:disabled{opacity:.72;cursor:wait;transform:none}
+    .guest-current-order-button{box-shadow:0 3px 0 #b7d747}
+    .guest-current-order-button:hover{transform:translateY(-1px)}
+    .qr-cart-bar button,.qr-cart-submit,.qr-add-button,.qr-variant-add,.guest-action-button{transition:transform .16s ease,box-shadow .16s ease}
+    .qr-cart-bar button:hover,.qr-cart-submit:hover,.qr-add-button:hover,.qr-variant-add:hover,.guest-action-button:hover{transform:translateY(-1px)}
+    .qr-cart-bar button:active,.qr-cart-submit:active,.qr-add-button:active,.qr-variant-add:active,.guest-action-button:active{transform:translateY(1px)}
+    @media(max-width:500px){.qr-order-step small{font-size:8px}.qr-current-order-meta{align-items:flex-start}.qr-status-pill{font-size:10px!important;padding:6px 8px}}
+    @media(prefers-reduced-motion:reduce){.qr-order-steps-fill,.qr-order-refresh,.guest-current-order-button,.qr-cart-bar button,.qr-cart-submit,.qr-add-button,.qr-variant-add,.guest-action-button{transition:none!important;transform:none!important}}
+</style>
+</head>
+<body>
+  <main class="wrap">
+    <header class="top">
+      <div class="brand">
+        <div id="brandMark" class="brand-mark" aria-hidden="true">☕</div>
+        <div class="brand-copy"><div id="restaurantName" class="brand-name">Cafe &amp; Restaurant</div><div class="brand-caption">Cafe · Restaurant · Menu</div></div>
+      </div>
+      <div class="guest-actions">
+        <button id="guestInstallButton" class="guest-action-button" type="button" title="Add this cafe menu to your home screen" onclick="installGuestMenu()">Install menu app</button>
+        <button id="guestOffersButton" class="guest-action-button guest-offers-button" type="button" hidden onclick="subscribeGuestOffers()">Get offers</button>
+        <button id="guestCurrentOrderButton" class="guest-action-button guest-current-order-button" type="button" onclick="openCurrentOrder()" hidden>Track my order ✨</button>
+        <span id="guestActionStatus" class="guest-action-status" role="status" aria-live="polite"></span>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="hero-copy">
+        <div class="hero-kicker"><span></span> Good stuff, made fresh</div>
+        <h1>Good food.<br><em>Big mood.</em></h1>
+        <p>Find your new fave, grab a little treat, and make today taste better.</p>
+        <div class="hero-pills"><span>✨ Made fresh</span><span id="channelBadge">Guest menu</span><span id="tableContext" hidden></span><span id="itemCount">Menu loading…</span></div>
+      </div>
+      <div class="hero-art" aria-hidden="true"><div class="hero-plate">🍜</div><div class="hero-sticker">chef's kiss ✦</div><div class="hero-spark">✳</div></div>
+    </section>
+
+    <div id="qrTablePicker" class="qr-public-table-picker" hidden>
+      <label for="qrTableSelect"><span>Pick your spot</span><select id="qrTableSelect" onchange="selectQrTable(this.value)"><option value="">Choose a table</option></select></label>
+      <small id="qrTableHelp">Pick your table to get started.</small>
+    </div>
+
+    <div id="qrTableLinkNotice" class="qr-table-link-notice" role="status" hidden><span aria-hidden="true">✦</span><div><strong>This table QR needs a refresh</strong><small>Ask the team for a current code. You can still browse the menu.</small></div></div>
+    <div class="ticker" aria-hidden="true"><div class="ticker-track"><span>FRESH DAILY</span><span>✳</span><span>GOOD VIBES ONLY</span><span>✳</span><span>MADE WITH LOVE</span><span>✳</span><span>FRESH DAILY</span></div></div>
+
+    <section aria-labelledby="menuHeading">
+      <div class="section-head">
+        <div><span class="section-kicker">The lineup</span><h2 id="menuHeading">Find your fave</h2><div id="updateNote" class="update-note">The lineup refreshes automatically</div></div>
+        <label class="search-wrap"><span class="search-icon" aria-hidden="true">⌕</span><input class="search" id="menuSearch" type="search" placeholder="Search your next fave…" aria-label="Search menu"></label>
+      </div>
+      <nav id="categoryFilters" class="categories" aria-label="Menu categories"></nav>
+      <div id="menuGrid" class="grid"><div class="state-card"><span class="state-icon">⏳</span><h3>Loading the good stuff</h3><p>One sec, we’re getting the lineup ready.</p></div></div>
+    </section>
+
+    <div id="qrItemOptionsOverlay" class="qr-cart-overlay" hidden onclick="if(event.target===this)closeQrItemOptions()">
+      <section class="qr-cart-dialog qr-item-options-dialog" role="dialog" aria-modal="true" aria-labelledby="qrItemOptionsTitle">
+        <div class="qr-cart-dialog-head"><div><span class="section-kicker">MAKE IT YOURS</span><h2 id="qrItemOptionsTitle">Choose options</h2><p id="qrItemOptionsDescription">Pick the add-ons you want.</p></div><button type="button" class="qr-cart-close" aria-label="Close choices" onclick="closeQrItemOptions()">×</button></div>
+        <div id="qrItemOptionsBody" class="qr-item-options-body"></div>
+        <div class="qr-item-options-total"><span>Item total</span><strong id="qrItemOptionsTotal"></strong></div>
+        <button type="button" class="qr-cart-submit" onclick="confirmQrItemOptions()">Add to order</button>
+      </section>
+    </div>
+    <div id="qrOrderTypeOverlay" class="qr-cart-overlay qr-order-type-overlay" hidden>
+      <section class="qr-cart-dialog qr-order-type-dialog" role="dialog" aria-modal="true" aria-labelledby="qrOrderTypeHeading">
+        <span class="section-kicker">Set the vibe</span><h2 id="qrOrderTypeHeading">How are you dining?</h2>
+        <p id="qrOrderTypeIntro">Choose an option to open the menu.</p>
+        <div class="qr-order-type-options"><button type="button" onclick="chooseQrOrderType('dine-in')"><span>Dine in</span><strong>Dine in</strong><small>Stay for the vibes</small></button><button type="button" onclick="chooseQrOrderType('takeaway')"><span>Takeaway</span><strong>Takeaway</strong><small>All your faves, to go</small></button></div>
+      </section>
+    </div>
+    <div id="qrCurrentOrderOverlay" class="qr-cart-overlay" hidden onclick="if(event.target===this)closeCurrentOrder()">
+      <section class="qr-cart-dialog qr-current-order-dialog" role="dialog" aria-modal="true" aria-labelledby="qrCurrentOrderHeading">
+        <div class="qr-cart-dialog-head"><div><span class="section-kicker">ORDER CHECK-IN ✦</span><h2 id="qrCurrentOrderHeading">Track my order</h2><p id="qrCurrentOrderSubtitle">Your latest food run.</p></div><button type="button" class="qr-cart-close" aria-label="Close current order" onclick="closeCurrentOrder()">x</button></div>
+        <div id="qrCurrentOrderContent" class="qr-current-order-content"><p>Loading your order...</p></div>
+        <button type="button" class="qr-order-refresh" onclick="refreshCurrentOrder()">Check order status ✦</button>
+      </section>
+    </div>
+    <div id="qrCartBar" class="qr-cart-bar" hidden><div class="qr-cart-bar-copy"><strong id="qrCartSummary">Your picks</strong><small id="qrCartTableLabel">Table order</small></div><button type="button" onclick="openQrCart()">Review my picks · <span id="qrCartBarTotal"></span></button></div>
+    <div id="qrCartOverlay" class="qr-cart-overlay" hidden onclick="if(event.target===this)closeQrCart()">
+      <section class="qr-cart-dialog" role="dialog" aria-modal="true" aria-labelledby="qrCartHeading">
+        <div class="qr-cart-dialog-head"><div><span class="section-kicker">THE GOOD STUFF</span><h2 id="qrCartHeading">Your picks</h2><p id="qrCartIntro">Give your order a quick look before it hits the kitchen.</p></div><button type="button" class="qr-cart-close" aria-label="Close cart" onclick="closeQrCart()">×</button></div>
+        <div id="qrCartLines" class="qr-cart-lines"></div>
+        <div class="qr-cart-total"><span>Estimated total incl. item tax</span><strong id="qrCartModalTotal"></strong></div>
+        <textarea id="qrOrderNote" class="qr-order-note" maxlength="300" placeholder="Add a note for the team (optional)"></textarea>
+        <button id="qrCartSubmit" type="button" class="qr-cart-submit" onclick="placeQrOrder()">Send my order ✦</button>
+        <div id="qrOrderStatus" class="qr-order-status" role="status" aria-live="polite"></div>
+      </section>
+    </div>
+
+    <footer class="footer">Good food, good mood · Menu by <span id="footerName">your cafe or restaurant</span> · <span>Always serving fresh updates</span></footer>
+  </main>
+  <script>
+    const esc=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const safeImage=value=>/^https?:\/\//i.test(String(value||''))||/^data:image\/(jpeg|png|webp);base64,/i.test(String(value||''));
+    const money=(value,currency)=>{const amount=Number(value||0);return `${esc(currency||'₹')}${amount.toLocaleString(undefined,{minimumFractionDigits:amount%1?2:0,maximumFractionDigits:2})}`;};
+    const labels={online:'Online prices',dine_in:'Dine-in prices',takeaway:'Takeaway prices',delivery:'Delivery prices'};
+    let menuData=null,selectedCategory='All',menuLoadPending=false,qrCart=[],qrOrderInFlight=false,qrOrderType=null,guestInstallPrompt=null,currentOrderPollTimer=null,guestMarketingEnabled=false,qrPendingItem=null;
+    const qrTableValue=new URLSearchParams(location.search).get('table')||'';
+    let qrTableRaw=qrTableValue.trim().length<=60?qrTableValue.trim():'',tableLabel=normalizeTableLabel(qrTableRaw);
+    const qrTableLocked=!!qrTableRaw;let qrTableLinkInvalid=false;
+    function normalizeTableLabel(value){const raw=String(value||'').trim();if(/^t\d+$/i.test(raw))return raw.toUpperCase();const match=raw.match(/^table\s+(.+)$/i);if(match&&/^t?\d+$/i.test(match[1]))return 'T'+match[1].replace(/^t/i,'');if(/^\d+$/.test(raw))return 'T'+raw;return raw;}
+    function tableIdentity(value){const raw=String(value||'').trim().replace(/^table\s*/i,'').replace(/[\s_-]+/g,'').toUpperCase();return raw.replace(/^T(?=\d+$)/,'');}
+    function menuToken(){return decodeURIComponent(location.pathname.split('/').filter(Boolean).pop()||'');}
+    function currentOrderStorageKey(){return `cafe-pos-current-order:${menuToken()}:${qrTableRaw||'menu'}`;}
+    function getStoredCurrentOrder(){try{return JSON.parse(sessionStorage.getItem(currentOrderStorageKey())||'null');}catch(_){return null;}}
+    function updateCurrentOrderButton(){const button=document.getElementById('guestCurrentOrderButton');if(button)button.hidden=!getStoredCurrentOrder();}
+    function setGuestActionStatus(message){const status=document.getElementById('guestActionStatus');if(status)status.textContent=message||'';}
+    function openQrOrderTypeDialog(){const overlay=document.getElementById('qrOrderTypeOverlay');if(overlay&&tableLabel){document.getElementById('qrOrderTypeIntro').textContent='Table '+tableLabel+' is yours. Dine in or take it to go?';overlay.hidden=false;}}
+    function chooseQrOrderType(value){if(!['dine-in','takeaway'].includes(value))return;const changed=qrOrderType&&qrOrderType!==value;if(changed&&qrCart.length){qrCart=[];document.getElementById('qrOrderNote').value='';closeQrCart();}qrOrderType=value;document.getElementById('qrOrderTypeOverlay').hidden=true;document.getElementById('channelBadge').textContent=(value==='dine-in'?'Dine in':'Takeaway')+' - Table '+tableLabel;document.getElementById('qrCartHeading').textContent=(value==='dine-in'?'Dine in':'Takeaway')+' - Table '+tableLabel;updateQrCartBar();renderItems();}
+    function initGuestPwa(){const manifest=document.getElementById('guestMenuManifest');if(manifest)manifest.href=`/restaurant/${encodeURIComponent(menuToken())}/manifest.webmanifest`;const button=document.getElementById('guestInstallButton');if(button&&/Android/i.test(navigator.userAgent))button.textContent='Add to home screen';if('serviceWorker'in navigator)navigator.serviceWorker.register('/service-worker.js').catch(()=>{});}
+    window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();guestInstallPrompt=event;const button=document.getElementById('guestInstallButton');if(button)button.textContent='Add to home screen';});
+    window.addEventListener('appinstalled',()=>{guestInstallPrompt=null;const button=document.getElementById('guestInstallButton');if(button){button.textContent='Menu app installed';button.disabled=true;}});
+    async function installGuestMenu(){
+      if(guestInstallPrompt){
+        const prompt=guestInstallPrompt;guestInstallPrompt=null;prompt.prompt();
+        const choice=await prompt.userChoice;
+        setGuestActionStatus(choice?.outcome==='accepted'?'Menu added to your home screen.':'You can install it later from Chrome.');
+        return;
+      }
+      if(/Android/i.test(navigator.userAgent)&&!window.isSecureContext){
+        setGuestActionStatus('For Android app installation, open the cafe menu from its HTTPS website. This local network link can still show the menu and take orders.');
+        return;
+      }
+      if(/Android/i.test(navigator.userAgent)){
+        setGuestActionStatus('In Chrome, tap ⋮ and choose Install app or Add to Home screen.');
+        return;
+      }
+      setGuestActionStatus('Open your browser menu and choose Install app or Add to Home Screen.');
+    }
+    function base64UrlToBytes(value){const padded=(String(value||'')+'='.repeat((4-String(value||'').length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'),raw=atob(padded),output=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)output[i]=raw.charCodeAt(i);return output;}
+    async function subscribeGuestOffers(){const button=document.getElementById('guestOffersButton');if(!guestMarketingEnabled){setGuestActionStatus('Customer offers are not enabled for this cafe.');return;}if(!('serviceWorker'in navigator)||!('PushManager'in window)||!('Notification'in window)){setGuestActionStatus('This browser does not support web notifications.');return;}try{button.disabled=true;button.textContent='Setting up...';const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/push-config`,{cache:'no-store'}),config=await response.json();if(!response.ok||!config.configured||!config.publicKey)throw new Error('Offer notifications are not configured for this cafe yet.');if(await Notification.requestPermission()!=='granted')throw new Error('Notifications are turned off in your browser settings.');const registration=await navigator.serviceWorker.register('/service-worker.js');let subscription=await registration.pushManager.getSubscription();if(!subscription)subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:base64UrlToBytes(config.publicKey)});const saved=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/push-subscriptions`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({subscription:subscription.toJSON()})}),result=await saved.json().catch(()=>({}));if(!saved.ok)throw new Error(result.error||'Could not enable offers.');button.textContent='Offers enabled';setGuestActionStatus('You are subscribed to this cafe offers.');}catch(error){button.textContent='Get offers';setGuestActionStatus(error.message||'Could not enable notifications.');}finally{button.disabled=false;}}
+    async function loadGuestMarketingState(){try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/push-config`,{cache:'no-store'});if(!response.ok)return;const data=await response.json();guestMarketingEnabled=data.marketingEnabled===true;const button=document.getElementById('guestOffersButton');if(button)button.hidden=!guestMarketingEnabled;}catch(_){}}
+    function closeCurrentOrder(){document.getElementById('qrCurrentOrderOverlay').hidden=true;if(currentOrderPollTimer){clearInterval(currentOrderPollTimer);currentOrderPollTimer=null;}}
+    async function openCurrentOrder(){const record=getStoredCurrentOrder();if(!record){updateCurrentOrderButton();return;}document.getElementById('qrCurrentOrderOverlay').hidden=false;await refreshCurrentOrder(false);if(currentOrderPollTimer)clearInterval(currentOrderPollTimer);currentOrderPollTimer=setInterval(()=>{if(!document.getElementById('qrCurrentOrderOverlay').hidden)refreshCurrentOrder(true);},15000);}
+    function guestOrderStatus(status){const key=String(status||'Pending').trim().toLowerCase();const states={open:{label:'Still in draft',tone:'queued',step:0,note:'This order has not reached the kitchen yet.'},pending:{label:'Just landed ✨',tone:'queued',step:1,note:'Your order is in line. Payment is due at the counter.'},preparing:{label:'Getting cooked 🔥',tone:'cooking',step:2,note:'The kitchen is on it. We’ll keep this page up to date.'},ready:{label:'Ready to grab 🎉',tone:'ready',step:3,note:'Your order is ready. Swing by the counter to pick it up.'},completed:{label:'All wrapped up ✅',tone:'done',step:4,note:'Order complete. Hope it hit the spot!'},cancelled:{label:'Order canceled',tone:'cancelled',step:0,note:'This order was canceled. Check with the cafe team if you need help.'},canceled:{label:'Order canceled',tone:'cancelled',step:0,note:'This order was canceled. Check with the cafe team if you need help.'}};return states[key]||{label:'The kitchen is on it ✨',tone:'cooking',step:1,note:'The team is working on your order.'};}
+    async function refreshCurrentOrder(quiet=false){const record=getStoredCurrentOrder();if(!record)return;const content=document.getElementById('qrCurrentOrderContent'),button=document.querySelector('.qr-order-refresh');if(!quiet){if(button){button.disabled=true;button.textContent='Checking in…';}content.innerHTML='<p class="qr-current-order-state">Checking in with the kitchen…</p>';}try{const response=await fetch('/public-menu/'+encodeURIComponent(menuToken())+'/orders/'+encodeURIComponent(record.orderId)+'?tracking='+encodeURIComponent(record.trackingToken),{cache:'no-store'}),result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||'Could not load this order.');const order=result.order,state=guestOrderStatus(order.status),labels=['Queued','Cooking','Ready','Done'],progress=Math.round(Math.max(0,Math.min(3,state.step-1))*25),steps=labels.map((label,index)=>'<span class="qr-order-step '+(state.step>index+1?'is-done':state.step===index+1?'is-current':'')+'"><i></i><small>'+label+'</small></span>').join(''),progressMarkup=state.tone==='cancelled'?'<p class="qr-current-order-state">Order updates are paused for this one.</p>':'<div class="qr-order-steps" style="--order-progress:'+progress+'%" role="img" aria-label="Order progress: '+esc(state.label)+'"><span class="qr-order-steps-fill"></span>'+steps+'</div>';document.getElementById('qrCurrentOrderHeading').textContent=order.order_number||'Track my order';document.getElementById('qrCurrentOrderSubtitle').textContent=(order.order_type||record.orderType||'QR order')+(record.sourceTableNumber?' · Table '+normalizeTableLabel(record.sourceTableNumber):'')+' · '+new Date(order.created_at).toLocaleString();content.innerHTML='<div class="qr-current-order-meta"><strong>Kitchen check-in</strong><span class="qr-status-pill is-'+state.tone+'">'+esc(state.label)+'</span></div>'+progressMarkup+'<div class="qr-current-order-items">'+(order.items||[]).map(item=>'<div class="qr-current-order-item"><span>'+esc(item.item_name)+' x '+Number(item.quantity||0)+(formatGuestOptions(item.options)?'<small>'+esc(formatGuestOptions(item.options))+'</small>':'')+'</span><strong>'+money(item.line_total,menuData?.currency)+'</strong></div>').join('')+'</div><div class="qr-current-order-total"><span>Total so far</span><strong>'+money(order.total,menuData?.currency)+'</strong></div><p class="qr-current-order-state">'+esc(state.note)+'</p>';content.dataset.loaded='true';}catch(error){if(!quiet||content.dataset.loaded!=='true')content.innerHTML='<p class="qr-current-order-state">We couldn’t get the latest update. '+esc(error.message||'Try again in a moment.')+'</p>';}finally{if(!quiet&&button){button.disabled=false;button.textContent='Check order status ✦';}}}
+    function categoryEmoji(category){const value=String(category||'').toLowerCase();if(/coffee|tea|drink|beverage|juice|shake/.test(value))return '🥤';if(/dessert|sweet|cake|bakery|pastry|ice cream/.test(value))return '🍰';if(/burger|sandwich|wrap/.test(value))return '🍔';if(/pizza|pasta|italian/.test(value))return '🍕';if(/salad|healthy|vegan|veg/.test(value))return '🥗';if(/rice|bowl|indian|curry/.test(value))return '🍛';if(/breakfast|brunch/.test(value))return '🥐';return '🍽️';}
+    function categoryTone(category){return 25+[...String(category||'menu')].reduce((sum,char)=>sum+char.charCodeAt(0),0)%300;}
+    function fallbackVisual(category){return `<div class="item-visual fallback-visual" style="--tone:${categoryTone(category)}"><span class="visual-tag">Fresh pick</span><span class="visual-emoji" aria-hidden="true">${categoryEmoji(category)}</span></div>`;}
+    function setCategory(category){selectedCategory=category;renderCategories();renderItems();}
+    function selectQrTable(value){if(qrTableLocked)return;const next=String(value||'').trim(),changed=!!qrTableRaw&&qrTableRaw!==next;if(changed&&qrCart.length){qrCart=[];document.getElementById('qrOrderNote').value='';closeQrCart();}if(changed)qrOrderType=null;qrTableRaw=next;tableLabel=normalizeTableLabel(next);const context=document.getElementById('tableContext');if(context){context.textContent=tableLabel?'Table '+tableLabel:'';context.hidden=!tableLabel;}const help=document.getElementById('qrTableHelp');if(help)help.textContent=tableLabel?'Table '+tableLabel+' is yours. You can switch it here anytime.':'Pick your table to get started.';updateQrCartBar();renderItems();if(tableLabel&&!qrOrderType)openQrOrderTypeDialog();}
+    function requestQrAdd(itemId,variantId=null){if(qrTableLinkInvalid){setGuestActionStatus('This table QR needs a refresh. Ask the team for a current code.');return;}if(!tableLabel){const picker=document.getElementById('qrTablePicker'),select=document.getElementById('qrTableSelect');if(picker)picker.hidden=false;document.getElementById('qrTableHelp').textContent='Choose your table above, then add your items.';picker?.scrollIntoView({behavior:'smooth',block:'center'});select?.focus({preventScroll:true});return;}if(!qrOrderType){openQrOrderTypeDialog();return;}openQrItemOptions(itemId,variantId);}
+    function renderCategories(){const box=document.getElementById('categoryFilters'),categories=['All',...new Set([...(menuData?.categories||[]),...(menuData?.items||[]).map(item=>item.category)].filter(Boolean))];if(!categories.includes(selectedCategory))selectedCategory='All';box.innerHTML=categories.map(category=>`<button type="button" class="category-chip ${selectedCategory===category?'active':''}" data-category="${esc(category)}"><span class="category-chip-icon">${category==='All'?'✦':categoryEmoji(category)}</span><span>${esc(category)}</span></button>`).join('');box.querySelectorAll('[data-category]').forEach(button=>button.addEventListener('click',()=>setCategory(button.dataset.category)));}
+    function renderItems(){const grid=document.getElementById('menuGrid'),term=String(document.getElementById('menuSearch').value||'').trim().toLowerCase(),all=menuData?.items||[],items=all.filter(item=>(selectedCategory==='All'||item.category===selectedCategory)&&(!term||`${item.name} ${item.category} ${(item.variants||[]).map(v=>v.name).join(' ')} ${(item.optionSets||[]).map(s=>s.name+' '+(s.options||[]).map(o=>o.name).join(' ')).join(' ')}`.toLowerCase().includes(term)));if(!all.length){grid.innerHTML='<div class="state-card"><span class="state-icon">✦</span><h3>The menu is getting ready</h3><p>There are no available items on the guest menu yet. Ask the team to switch menu items on in POS.</p></div>';return;}if(!items.length){grid.innerHTML='<div class="state-card"><span class="state-icon">⌕</span><h3>No matches found</h3><p>Try another search or choose a different category.</p><button type="button" onclick="document.getElementById(\'menuSearch\').value=\'\';setCategory(\'All\')">Show everything</button></div>';return;}grid.innerHTML=items.map(item=>{const sold=item.inStock===false,variants=item.variants||[],visual=safeImage(item.imageUrl)?`<div class="item-visual"><img class="item-photo" src="${esc(item.imageUrl)}" alt="" loading="lazy" data-category="${esc(item.category)}"></div>`:fallbackVisual(item.category);const variantMarkup=variants.length?'<div class="variant-list">'+variants.map(variant=>`<button type="button" class="qr-variant-add" ${sold?'disabled':''} onclick="requestQrAdd(${Number(item.id)},${Number(variant.id)})">${sold?'Sold out - ':''}${esc(variant.name)} - ${money(variant.price,menuData.currency)}${sold?'':' +'}</button>`).join('')+'</div>':'';const addButton=!variants.length?`<button type="button" class="qr-add-button" ${sold?'disabled':''} onclick="requestQrAdd(${Number(item.id)},null)">${sold?'Sold out for now':(item.optionSets||[]).length?'Pick your add-ons - '+money(item.price,menuData.currency):'Add my pick - '+money(item.price,menuData.currency)}</button>`:'';return `<article class="item ${sold?'is-sold-out':''}">${visual}<div class="item-copy"><div class="item-meta"><span class="item-category">${esc(item.category||'Menu')}</span>${sold?'<span class="sold-out">Sold out rn</span>':''}</div><h3 class="item-name">${esc(item.name)}</h3><div class="item-bottom"><div><span class="item-price-label">${variants.length?'Starting at':'Your price'}</span><span class="item-price">${money(item.price,menuData.currency)}</span></div></div>${variantMarkup}${addButton}</div></article>`;}).join('');grid.querySelectorAll('.item-photo').forEach(image=>image.addEventListener('error',()=>{const visual=image.closest('.item-visual');if(visual)visual.outerHTML=fallbackVisual(image.dataset.category);},{once:true}));}
+    function selectedGuestOptions(item,body){const result=[];for(const set of item.optionSets||[]){const checked=[...body.querySelectorAll(`input[data-set-id="${CSS.escape(String(set.id))}"]:checked`)];if(checked.length<Number(set.minSelections||0)||checked.length>Number(set.maxSelections||1))throw new Error(`Choose ${Number(set.minSelections||0)===Number(set.maxSelections||1)?Number(set.minSelections||0):`${Number(set.minSelections||0)} to ${Number(set.maxSelections||1)}`} option(s) for ${set.name}.`);if(checked.length)result.push({setId:String(set.id),setName:String(set.name),options:checked.map(input=>{const option=(set.options||[]).find(o=>String(o.id)===input.value);return{id:String(option.id),name:String(option.name),price:Number(option.price||0)};})});}return result;}
+    function openQrItemOptions(itemId,variantId=null){const item=(menuData?.items||[]).find(row=>Number(row.id)===Number(itemId));if(!item||item.inStock===false)return;const variant=variantId?(item.variants||[]).find(row=>Number(row.id)===Number(variantId)):null;if(variantId&&!variant)return;const sets=item.optionSets||[];if(!sets.length){addToQrCart(item,variant,[],Number(variant?.price??item.price));return;}qrPendingItem={item,variant,basePrice:Number(variant?.price??item.price)};document.getElementById('qrItemOptionsTitle').textContent=item.name+(variant?' - '+variant.name:'');document.getElementById('qrItemOptionsDescription').textContent='Make it yours: pick your add-ons. Required choices are marked.';const body=document.getElementById('qrItemOptionsBody');body.innerHTML=sets.map(set=>`<fieldset class="qr-option-set"><legend>${esc(set.name)}<small>${Number(set.minSelections||0)>0?'Required - choose at least '+Number(set.minSelections):'Optional'}${Number(set.maxSelections||1)>1?' - up to '+Number(set.maxSelections):''}</small></legend><div class="qr-option-choices">${(set.options||[]).map(option=>`<label class="qr-option-choice"><input type="${Number(set.maxSelections||1)===1?'radio':'checkbox'}" name="guest-option-${esc(set.id)}" data-set-id="${esc(set.id)}" value="${esc(option.id)}"><span>${esc(option.name)}</span><strong>${Number(option.price||0)>0?'+ '+money(option.price,menuData.currency):'Included'}</strong></label>`).join('')}</div></fieldset>`).join('');body.querySelectorAll('input').forEach(input=>input.addEventListener('change',updateQrItemOptionsTotal));updateQrItemOptionsTotal();document.getElementById('qrItemOptionsOverlay').hidden=false;}
+    function updateQrItemOptionsTotal(){if(!qrPendingItem)return;const extra=[...document.querySelectorAll('#qrItemOptionsBody input:checked')].reduce((sum,input)=>{const set=qrPendingItem.item.optionSets.find(value=>String(value.id)===input.dataset.setId),option=set?.options.find(value=>String(value.id)===input.value);return sum+Number(option?.price||0);},0);document.getElementById('qrItemOptionsTotal').textContent=money(qrPendingItem.basePrice+extra,menuData.currency);}
+    function closeQrItemOptions(){document.getElementById('qrItemOptionsOverlay').hidden=true;qrPendingItem=null;}
+    function confirmQrItemOptions(){if(!qrPendingItem)return;try{const options=selectedGuestOptions(qrPendingItem.item,document.getElementById('qrItemOptionsBody')),extra=options.flatMap(set=>set.options).reduce((sum,option)=>sum+Number(option.price||0),0);addToQrCart(qrPendingItem.item,qrPendingItem.variant,options,qrPendingItem.basePrice+extra);closeQrItemOptions();}catch(error){document.getElementById('qrItemOptionsDescription').textContent=error.message;}}
+    function formatGuestOptions(options){return(Array.isArray(options)?options:[]).flatMap(set=>(set.options||[]).map(option=>option.name)).join(', ');}
+    function addToQrCart(item,variant,options,price){const optionKey=JSON.stringify(options.map(set=>[set.setId,set.options.map(option=>option.id).sort()]).sort((a,b)=>a[0].localeCompare(b[0]))),key=String(item.id)+':'+String(variant?.id||0)+':'+optionKey,existing=qrCart.find(line=>line.key===key);if(existing)existing.quantity++;else qrCart.push({key,itemId:Number(item.id),variantId:Number(variant?.id)||null,name:item.name+(variant?' - '+variant.name:''),price:Number(price),basePrice:Number(variant?.price??item.price),options,taxRate:Number(item.taxRate||0),taxMode:item.taxMode||'exclusive',quantity:1});updateQrCartBar();}
+    function changeQrCartQty(key,delta){let decoded;try{decoded=decodeURIComponent(key);}catch(_){decoded=key;}const line=qrCart.find(row=>row.key===decoded);if(!line)return;line.quantity+=Number(delta);if(line.quantity<=0)qrCart=qrCart.filter(row=>row.key!==decoded);updateQrCartBar();if(!qrCart.length)closeQrCart();else renderQrCartLines();}
+    function qrCartLineTotal(line){const gross=Number(line.price||0)*Number(line.quantity||0),rate=Math.max(0,Number(line.taxRate||0));return line.taxMode==='inclusive'?gross:gross*(1+rate/100);}
+    function updateQrCartBar(){const bar=document.getElementById('qrCartBar');if(!bar)return;const count=qrCart.reduce((sum,line)=>sum+line.quantity,0),total=qrCart.reduce((sum,line)=>sum+qrCartLineTotal(line),0);bar.hidden=!tableLabel||!qrOrderType||count===0;document.getElementById('qrCartSummary').textContent=count+' '+(count===1?'pick':'picks')+' in your order';document.getElementById('qrCartBarTotal').textContent=money(total,menuData?.currency);document.getElementById('qrCartTableLabel').textContent=(qrOrderType==='takeaway'?'Takeaway':'Dine in')+' - Table '+tableLabel+' - pay at the counter';}
+    function openQrCart(){if(!qrCart.length)return;const button=document.getElementById('qrCartSubmit'),status=document.getElementById('qrOrderStatus');document.getElementById('qrCartHeading').textContent=(qrOrderType==='takeaway'?'Takeaway':'Dine in')+' - Table '+tableLabel;document.getElementById('qrCartIntro').textContent='Your picks are ready. Give them a quick look before they hit the kitchen.';if(status&&!status.classList.contains('success'))status.textContent='';if(button){button.disabled=false;button.textContent='Send my order ✦';}document.getElementById('qrCartOverlay').hidden=false;renderQrCartLines();}
+    function closeQrCart(){document.getElementById('qrCartOverlay').hidden=true;}
+    function renderQrCartLines(){const lines=document.getElementById('qrCartLines');lines.innerHTML=qrCart.map(line=>'<article class="qr-cart-line"><div><strong>'+esc(line.name)+'</strong>'+(formatGuestOptions(line.options)?'<small>'+esc(formatGuestOptions(line.options))+'</small>':'')+'<small>'+money(line.price,menuData?.currency)+' each</small></div><div class="qr-cart-quantity"><button type="button" aria-label="Remove one" onclick="changeQrCartQty(\''+encodeURIComponent(line.key)+'\',-1)">-</button><span>'+line.quantity+'</span><button type="button" aria-label="Add one" onclick="changeQrCartQty(\''+encodeURIComponent(line.key)+'\',1)">+</button></div></article>').join('');document.getElementById('qrCartModalTotal').textContent=money(qrCart.reduce((sum,line)=>sum+qrCartLineTotal(line),0),menuData?.currency);}
+    async function placeQrOrder(){if(qrOrderInFlight||!qrCart.length||!tableLabel||!qrOrderType)return;qrOrderInFlight=true;const button=document.getElementById('qrCartSubmit'),status=document.getElementById('qrOrderStatus');button.disabled=true;button.textContent='Sending it over…';status.classList.remove('success');status.textContent='Sending your picks to the kitchen…';try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/orders?table=${encodeURIComponent(qrTableRaw)}`,{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({tableNumber:qrTableRaw,orderType:qrOrderType,items:qrCart.map(line=>({itemId:line.itemId,variantId:line.variantId,quantity:line.quantity,basePrice:line.basePrice,price:line.price,options:line.options})),notes:document.getElementById('qrOrderNote').value.trim()})}),result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||'Could not place the order.');sessionStorage.setItem(currentOrderStorageKey(),JSON.stringify({orderId:result.orderId,trackingToken:result.trackingToken,orderNumber:result.orderNumber,orderType:result.orderType,sourceTableNumber:result.sourceTableNumber}));updateCurrentOrderButton();qrCart=[];document.getElementById('qrOrderNote').value='';updateQrCartBar();button.textContent='Order sent';status.classList.add('success');status.textContent='Sent! Order '+result.orderNumber+' is with the kitchen. Tap Track my order to follow along.';document.getElementById('qrCartLines').innerHTML='';}catch(error){status.textContent=error.message||'Could not place the order.';button.disabled=false;button.textContent='Try again ✦';}finally{qrOrderInFlight=false;}}
+    function showMenuError(notPublished){document.getElementById('categoryFilters').innerHTML='';document.getElementById('itemCount').textContent='Menu link';document.getElementById('menuGrid').innerHTML=notPublished?'<div class="state-card error-state"><span class="state-icon">🔒</span><h3>This menu is off the grid</h3><p>Ask the cafe team to activate the Table QR add-on and publish the menu from POS.</p><button type="button" onclick="loadMenu()">Try again</button></div>':'<div class="state-card error-state"><span class="state-icon">!</span><h3>The menu is taking a breather</h3><p>Check your connection and give it another go.</p><button type="button" onclick="loadMenu()">Try again</button></div>';}
+    async function loadMenu(options={}){if(menuLoadPending)return;menuLoadPending=true;const silent=options.silent===true;try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}`,{cache:'no-store',headers:{Accept:'application/json'}});if(response.status===404){menuData=null;showMenuError(true);return;}if(!response.ok)throw new Error('Could not load this menu right now.');menuData=await response.json();const picker=document.getElementById('qrTablePicker'),notice=document.getElementById('qrTableLinkNotice'),select=document.getElementById('qrTableSelect'),help=document.getElementById('qrTableHelp'),tables=Array.isArray(menuData.tables)?menuData.tables.map(String).filter(Boolean):[],matchedQrTable=qrTableLocked?(tables.find(table=>table===qrTableRaw)||tables.find(table=>tableIdentity(table)===tableIdentity(qrTableRaw))):null,stale=qrTableLocked?!matchedQrTable:(!!qrTableRaw&&!tables.includes(qrTableRaw));if(qrTableLocked&&matchedQrTable){qrTableRaw=matchedQrTable;tableLabel=normalizeTableLabel(matchedQrTable);}qrTableLinkInvalid=qrTableLocked&&stale;if(stale||!tables.length){qrTableRaw='';tableLabel='';qrCart=[];qrOrderType=null;document.getElementById('qrOrderNote').value='';closeQrCart();}if(select){select.innerHTML='<option value="">Choose a table</option>'+tables.map(table=>'<option value="'+esc(table)+'">Table '+esc(normalizeTableLabel(table))+'</option>').join('');select.disabled=!tables.length;select.value=qrTableRaw;}if(picker)picker.hidden=qrTableLocked||!!qrTableRaw;if(notice)notice.hidden=!qrTableLinkInvalid;if(help)help.textContent=stale?(qrTableLocked?'This table QR is no longer active. Ask the team for a fresh code.':'This table link changed. Pick a current table to keep the order going.'):tables.length?(qrTableRaw?'Ordering for Table '+tableLabel+'.':'Pick your table to get started.'):'No tables are live yet. Ask the cafe team to set them up in POS.';document.title=(menuData.restaurantName||'Cafe & Restaurant')+' - Menu';document.getElementById('restaurantName').textContent=menuData.restaurantName||'Cafe & Restaurant';document.getElementById('footerName').textContent=menuData.restaurantName||'your cafe or restaurant';document.getElementById('channelBadge').textContent=labels[menuData.priceChannel]||'Guest menu';const context=document.getElementById('tableContext');if(context){context.textContent=tableLabel?'Table '+tableLabel:'';context.hidden=!tableLabel;}document.getElementById('itemCount').textContent=menuData.items.length+' menu '+(menuData.items.length===1?'item':'items');document.getElementById('updateNote').textContent='Menu refreshed just now - '+(labels[menuData.priceChannel]||'Guest menu');const brand=document.getElementById('brandMark');if(safeImage(menuData.logoUrl)){const image=document.createElement('img');image.id='brandMark';image.className='brand-mark';image.src=menuData.logoUrl;image.alt='';brand.replaceWith(image);}else if(brand)brand.textContent='Cafe';renderCategories();renderItems();initGuestPwa();loadGuestMarketingState();updateCurrentOrderButton();if(tableLabel&&!qrOrderType)openQrOrderTypeDialog();updateQrCartBar();}catch(error){if(!silent||!menuData)showMenuError(false);}finally{menuLoadPending=false;}}
+    document.getElementById('menuSearch').addEventListener('input',renderItems);updateCurrentOrderButton();loadMenu();setInterval(()=>{if(document.visibilityState==='visible')loadMenu({silent:true});},60000);
+  </script>
+</body>
+</html>

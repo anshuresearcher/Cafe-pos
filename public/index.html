@@ -104,10 +104,74 @@
 }
 </style>
 
+<style>
+.restaurant-menu-publisher{margin:0 0 18px;padding:20px;background:#fff;border:1px solid #e5eaf0;border-radius:18px;box-shadow:0 8px 24px rgba(24,39,75,.05)}
+.restaurant-menu-host-note{margin:12px 0 0;padding:10px 12px;border:1px solid #f1d8a7;border-radius:10px;background:#fff9eb;color:#795b19;font-size:12px;line-height:1.5}.restaurant-menu-host-note[hidden]{display:none}
+.restaurant-menu-publisher-head{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}
+.restaurant-menu-publisher h3{margin:0 0 5px;font-size:17px}.restaurant-menu-publisher p{margin:0;color:#697586;font-size:13px}
+.restaurant-menu-publisher-controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px}
+.restaurant-menu-publisher-controls select,.restaurant-menu-url input{border:1px solid #d8e0e8;border-radius:10px;background:#fff;padding:10px 12px;color:#263244}
+.restaurant-menu-publish-toggle{display:flex;align-items:center;gap:8px;font-weight:700;font-size:13px}
+.restaurant-menu-url{display:flex;gap:8px;flex:1;min-width:260px}.restaurant-menu-url input{flex:1;min-width:0}
+.restaurant-menu-state{font-size:12px;color:#657386;margin-top:10px}
+.menu-availability-toggle{display:inline-flex;align-items:center;gap:8px;font-size:12px;font-weight:700;cursor:pointer}
+.menu-availability-toggle input{appearance:none;position:relative;width:34px;height:20px;margin:0;border-radius:999px;background:#cbd2cd;cursor:pointer;transition:background .18s}
+.menu-availability-toggle input:after{content:"";position:absolute;width:14px;height:14px;left:3px;top:3px;background:#fff;border-radius:50%;box-shadow:0 1px 4px #0002;transition:transform .18s}
+.menu-availability-toggle input:checked{background:#208657}.menu-availability-toggle input:checked:after{transform:translateX(14px)}
+.menu-availability-toggle input:focus-visible{outline:3px solid #a5d6b4;outline-offset:2px}
+.menu-admin-actions{align-items:center;flex-wrap:wrap}.menu-admin-actions .menu-availability-toggle{margin-left:auto}
+.menu-price-modal-content{width:min(680px,94vw);max-height:90vh;overflow:auto}
+.menu-price-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.menu-price-variant-row{display:grid;grid-template-columns:1fr 150px;gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid #edf0f3}
+.menu-price-variant-row span{font-size:13px;font-weight:650}.menu-price-variant-row input{width:100%;padding:10px;border:1px solid #dfe3e8;border-radius:9px}
+.table-qr-module-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}.table-qr-module-header h2{margin:3px 0 5px}.table-qr-module-header p{margin:0;color:#697586;font-size:13px}
+.table-qr-section{margin:18px 0;padding:20px;background:#fff;border:1px solid #e5eaf0;border-radius:18px;box-shadow:0 8px 24px rgba(24,39,75,.05)}.table-qr-section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;margin-bottom:14px}.table-qr-section-head h3{margin:0 0 4px}.table-qr-section-head p{margin:0;color:#697586;font-size:13px}.table-qr-search{max-width:300px;min-width:190px;padding:10px 12px;border:1px solid #d8e0e8;border-radius:10px}
+.table-qr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}.table-qr-card{min-width:0;padding:16px;border:1px solid #e6eaf0;border-radius:16px;background:#fff}.table-qr-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.table-qr-card-head h4{margin:0;font-size:16px}.table-qr-card-head span{color:#697586;font-size:11px}.table-qr-preview{display:grid;place-items:center;min-height:190px;margin:12px 0;padding:12px;border-radius:14px;background:#f7f8fa}.table-qr-preview img{width:170px;height:170px;object-fit:contain;image-rendering:pixelated}.table-qr-placeholder{color:#87909d;font-size:12px;text-align:center}.table-qr-actions{display:flex;gap:8px}.table-qr-actions button{flex:1}.table-qr-link{display:block;overflow:hidden;margin:9px 0 12px;color:#667386;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.qr-stock-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}.qr-stock-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px;border:1px solid #e6eaf0;border-radius:13px}.qr-stock-card strong{display:block;font-size:13px}.qr-stock-card small{display:block;margin-top:3px;color:#798394;font-size:11px}.qr-stock-card .menu-availability-toggle{flex:0 0 auto}.qr-stock-empty,.table-qr-empty{grid-column:1/-1;padding:28px;border:1px dashed #d9dee6;border-radius:14px;color:#788392;text-align:center}
+@media(max-width:650px){.restaurant-menu-publisher-head{display:block}.restaurant-menu-publisher-controls{align-items:stretch}.menu-price-fields{grid-template-columns:1fr}.menu-admin-actions .menu-availability-toggle{margin-left:0}.menu-price-variant-row{grid-template-columns:1fr 120px}}
+@media(max-width:650px){.table-qr-module-header,.table-qr-section-head{display:block}.table-qr-search{max-width:none;width:100%;margin-top:12px}.table-qr-actions{flex-direction:column}.table-qr-preview{min-height:160px}.table-qr-preview img{width:145px;height:145px}}
+</style>
 </head>
 
 
 <body>
+<div id="desktopTitlebar" class="desktop-titlebar" hidden aria-label="Cafe Pilot desktop window controls">
+    <div class="desktop-titlebar-brand" aria-label="Drag to move the window">
+        <span class="desktop-titlebar-mark" aria-hidden="true">☕</span>
+        <span>Cafe Pilot</span>
+    </div>
+    <div class="desktop-titlebar-controls">
+        <button type="button" id="desktopServerSettings" class="desktop-titlebar-button desktop-settings-button" aria-label="Connect to POS server" title="Connect to POS server">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8.2a3.8 3.8 0 1 0 0 7.6 3.8 3.8 0 0 0 0-7.6Z"/><path d="m19.4 13.5 1.1.9-1.2 2.1-1.4-.5a7.7 7.7 0 0 1-1.5.9l-.2 1.5h-2.4l-.4-1.4a7.4 7.4 0 0 1-1.8 0l-.8 1.2-2.1-1.2.5-1.4a7.7 7.7 0 0 1-.9-1.5l-1.5-.2v-2.4l1.4-.4a7.4 7.4 0 0 1 0-1.8l-1.2-.8 1.2-2.1 1.4.5a7.7 7.7 0 0 1 1.5-.9l.2-1.5h2.4l.4 1.4a7.4 7.4 0 0 1 1.8 0l.8-1.2 2.1 1.2-.5 1.4a7.7 7.7 0 0 1 .9 1.5l1.5.2v2.4l-1.4.4c.1.6.1 1.2.1 1.7Z"/></svg>
+        </button>
+        <button type="button" id="desktopWindowMinimize" class="desktop-titlebar-button" aria-label="Minimize window" title="Minimize">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10"/></svg>
+        </button>
+        <button type="button" id="desktopWindowMaximize" class="desktop-titlebar-button" aria-label="Maximize window" title="Maximize">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx=".5"/></svg>
+        </button>
+        <button type="button" id="desktopWindowClose" class="desktop-titlebar-button desktop-close-button" aria-label="Close window" title="Close">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8"/></svg>
+        </button>
+    </div>
+</div>
+<div id="desktopBluetoothPicker" class="desktop-bluetooth-picker" hidden>
+    <section class="desktop-bluetooth-dialog" role="dialog" aria-modal="true" aria-labelledby="desktopBluetoothTitle">
+        <div class="desktop-bluetooth-heading">
+            <span class="desktop-bluetooth-icon" aria-hidden="true">ᛒ</span>
+            <div>
+                <p class="desktop-bluetooth-eyebrow">PRINTER SETUP</p>
+                <h2 id="desktopBluetoothTitle">Choose a Bluetooth printer</h2>
+            </div>
+        </div>
+        <p id="desktopBluetoothStatus" class="desktop-bluetooth-status" role="status" aria-live="polite">Searching for nearby devices…</p>
+        <div id="desktopBluetoothDeviceList" class="desktop-bluetooth-device-list"></div>
+        <p class="desktop-bluetooth-help">Turn on your printer and make sure it is discoverable, then select it from the list.</p>
+        <div class="desktop-bluetooth-actions">
+            <button id="desktopBluetoothCancel" type="button" class="cancel-btn">Cancel</button>
+        </div>
+    </section>
+</div>
 <div id="loginScreen" class="login-screen">
     <aside class="login-showcase" aria-label="Cafe Pilot point of sale">
         <div class="login-brand-top">
@@ -329,6 +393,10 @@
 
         </button>
 
+        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('table-qr-menu')">
+            ▦ Table QR Menu
+        </button>
+
 
         <button
             class="nav-btn"
@@ -355,7 +423,6 @@
 
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('access')">🔐 Access</button>
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')">💸 Expenses</button>
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('loyalty')">⭐ Loyalty</button>
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')">📣 Marketing</button>
 
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('invoice-designer')">🎨 Invoice Designer</button>
@@ -1031,6 +1098,32 @@
           <div id="menuOptionsPanel" hidden><div class="menu-management-header menu-option-sets-header"><div><span class="menu-eyebrow">MENU OPTIONS</span><h3>Item option sets</h3><p>Create choices such as sizes, add-ons or preferences, then attach them to menu items.</p></div><div class="menu-management-actions"><button type="button" class="big-btn" onclick="openOptionSetsModal()">⚙️ Manage option sets</button></div></div><div id="menuOptionSetOverviewList" class="menu-option-set-overview-grid"></div></div>
         </section>
 
+        <section id="table-qr-menu" class="page">
+          <div class="table-qr-module-header"><div><span class="menu-eyebrow">GUEST QR MENU</span><h2>Table QR Menu</h2><p>Create a separate scan code for every POS table, control guest publishing, and update sold-out status.</p></div></div>
+          <section class="restaurant-menu-publisher">
+            <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for the tables configured in your POS. Guests can scan them to view this menu.</p></div></div>
+            <div class="restaurant-menu-publisher-controls">
+              <label class="restaurant-menu-publish-toggle"><input id="publicMenuEnabled" type="checkbox"> Publish QR menu</label>
+              <label for="publicMenuPriceChannel">Guest price list</label>
+              <select id="publicMenuPriceChannel"><option value="online">Online</option><option value="dine_in">Dine-in</option><option value="takeaway">Takeaway</option><option value="delivery">Delivery</option></select>
+              <button type="button" class="big-btn" onclick="saveRestaurantMenuSettings()">Save menu settings</button>
+            </div>
+            <div class="restaurant-menu-publisher-controls restaurant-menu-host-controls"><label for="publicMenuBaseUrl">QR address for phones</label><input id="publicMenuBaseUrl" type="url" placeholder="https://your-cafe-domain.com" oninput="updateRestaurantMenuLinkPreview()"><button type="button" class="table-action-btn" onclick="saveRestaurantMenuSettings()">Save QR address</button></div><div class="restaurant-menu-publisher-controls restaurant-menu-url"><input id="publicMenuUrl" type="url" readonly placeholder="Your guest menu link will appear here"><button type="button" class="table-action-btn" onclick="copyRestaurantMenuUrl()">Copy base link</button></div>
+            <div id="publicMenuStatus" class="restaurant-menu-state" aria-live="polite">Loading guest menu settings…</div>
+            <p id="publicMenuHostNote" class="restaurant-menu-host-note" hidden></p>
+          </section>
+
+          <section class="table-qr-section">
+            <div class="table-qr-section-head"><div><h3>QR codes for your tables</h3><p>Each code opens the menu with its table name attached. Download PNGs or print table cards.</p></div><button type="button" class="table-action-btn" onclick="loadTableQrMenuModule()">↻ Refresh tables</button></div>
+            <div id="tableQrGrid" class="table-qr-grid"><div class="table-qr-empty">Loading your POS tables…</div></div>
+          </section>
+
+          <section class="table-qr-section">
+            <div class="table-qr-section-head"><div><h3>QR menu item availability</h3><p>Sold-out status only affects the guest QR menu. POS availability stays in Menu Items.</p></div><input id="qrStockSearch" class="table-qr-search" type="search" placeholder="Search menu items…" oninput="renderQrStockItems()"></div>
+            <div id="qrStockGrid" class="qr-stock-grid"><div class="qr-stock-empty">Loading menu items…</div></div>
+          </section>
+        </section>
+
         <!-- =================================================
              CUSTOMERS
              ================================================= -->
@@ -1353,31 +1446,67 @@
 <div id="expenseModal" class="modal"><div class="modal-content"><div class="modal-header"><h2>Add Expense</h2><button class="close-btn" onclick="closeExpenseModal()">✕</button></div><div class="form-group"><label>Category</label><select id="expenseCategory"></select></div><div class="form-group"><label>Amount</label><input id="expenseAmount" type="number" min="0" step="0.01"></div><div class="form-group"><label>Payment Method</label><select id="expensePayment"></select></div><div class="form-group"><label>Date</label><input id="expenseDate" type="date"></div><div class="form-group"><label>Note</label><textarea id="expenseNote" rows="3"></textarea></div><div class="modal-actions"><button class="big-btn" onclick="saveExpense()">Save Expense</button><button class="cancel-btn" onclick="closeExpenseModal()">Cancel</button></div></div></div>
 
 <!-- =================================================
-     LOYALTY
+     MARKETING AND CUSTOMER LOYALTY
      ================================================= -->
 <section id="marketing" class="page marketing-page">
     <div class="page-header marketing-page-header">
         <div><span class="eyebrow">GROW YOUR BUSINESS</span><h2>📣 Marketing</h2><p>Create and manage offers for your current business.</p></div>
         <button type="button" class="big-btn" onclick="openMarketingDealForm()">＋ Create Deal</button>
     </div>
-    <div class="marketing-overview-grid">
-        <article class="marketing-overview-card"><span>Active deals</span><strong id="marketingActiveCount">0</strong></article>
-        <article class="marketing-overview-card"><span>Deal types</span><strong>8</strong></article>
-        <article class="marketing-overview-card"><span>Channels</span><strong id="marketingChannelCount">4</strong></article>
+    <div class="marketing-feature-grid" aria-label="Marketing tools">
+        <button type="button" id="marketingPromotionsFeatureCard" class="marketing-feature-card marketing-promo-feature" aria-controls="marketingPromotionsPanel" aria-expanded="false" onclick="showMarketingSection('promotions')">
+            <span class="marketing-feature-icon" aria-hidden="true">✦</span>
+            <span class="marketing-feature-copy"><span class="eyebrow">PROMOTIONAL</span><strong>Promotions and deals</strong><span>Create discounts, bundles, vouchers, and guest offers for your sales channels.</span></span>
+            <span class="marketing-feature-action">Explore promotions <span aria-hidden="true">→</span></span>
+        </button>
+        <button type="button" id="marketingLoyaltyFeatureCard" class="marketing-feature-card marketing-loyalty-feature" aria-controls="loyalty" aria-expanded="false" onclick="showMarketingSection('loyalty')">
+            <span class="marketing-feature-icon" aria-hidden="true">★</span>
+            <span class="marketing-feature-copy"><span class="eyebrow">LOYALTY</span><strong>Reward regular guests</strong><span>Set points, welcome rewards, and review customer balances from one place.</span></span>
+            <span class="marketing-feature-action">Manage loyalty <span aria-hidden="true">→</span></span>
+        </button>
     </div>
-    <div class="marketing-deal-toolbar">
-        <div><h3>Deals</h3><p>Discounts, Buy X Get X, Buy X Get Y, vouchers, and more.</p></div>
-        <div class="marketing-deal-filters">
-            <input id="marketingDealSearch" type="search" placeholder="Search deals…" oninput="renderMarketingDeals()">
-            <select id="marketingDealTypeFilter" onchange="renderMarketingDeals()">
-                <option value="">All deal types</option>
-                <option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option>
-                <option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option>
-            </select>
+    <div id="marketingSectionPrompt" class="marketing-section-prompt" role="status">Choose a marketing tool above to open its details.</div>
+    <section id="marketingPromotionsPanel" class="marketing-promotions-panel" aria-label="Promotions and customer notifications" hidden>
+        <div class="marketing-overview-grid">
+            <article class="marketing-overview-card"><span>Active deals</span><strong id="marketingActiveCount">0</strong></article>
+            <article class="marketing-overview-card"><span>Deal types</span><strong>8</strong></article>
+            <article class="marketing-overview-card"><span>Channels</span><strong id="marketingChannelCount">4</strong></article>
         </div>
-    </div>
-    <div id="marketingDealsGrid" class="marketing-deals-grid"><div class="marketing-empty-state">Loading deals…</div></div>
+        <div class="marketing-deal-toolbar">
+            <div><h3>Deals</h3><p>Discounts, Buy X Get X, Buy X Get Y, vouchers, and more.</p></div>
+            <div class="marketing-deal-filters">
+                <input id="marketingDealSearch" type="search" placeholder="Search deals…" oninput="renderMarketingDeals()">
+                <select id="marketingDealTypeFilter" onchange="renderMarketingDeals()">
+                    <option value="">All deal types</option>
+                    <option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option>
+                    <option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option>
+                </select>
+            </div>
+        </div>
+        <div id="marketingDealsGrid" class="marketing-deals-grid"><div class="marketing-empty-state">Loading deals...</div></div>
+        <section class="marketing-push-section" aria-labelledby="marketingPushHeading">
+            <div class="marketing-push-heading"><div><span class="eyebrow">QR MENU AUDIENCE</span><h3 id="marketingPushHeading">Customer notifications</h3><p>Send updates to guests who opted in from your QR menu.</p></div><button type="button" id="marketingPushCreateButton" class="big-btn" onclick="openMarketingPushForm()">Create message</button></div>
+            <div id="marketingPushStatus" class="marketing-push-status" aria-live="polite">Loading notification setup...</div>
+            <div id="marketingPushCampaigns" class="marketing-push-campaigns"><div class="marketing-empty-state">Loading messages...</div></div>
+        </section>
+    </section>
+    <section id="loyalty" class="marketing-loyalty-section" hidden>
+        <div class="marketing-loyalty-divider"><span>REPEAT GUESTS</span><h3>Customer loyalty</h3><p>Reward repeat guests and manage their points from the cafe counter.</p></div>
+        <div class="page-header"><div><h2>⭐ Customer Loyalty</h2><p>Reward repeat guests and manage points from the cafe counter.</p></div><button class="big-btn" onclick="loadLoyaltySettings()">Refresh</button></div>
+        <div class="dashboard-box"><h3>Loyalty Rules</h3><div class="billing-inline-grid"><input id="loyaltyPointsPerCurrency" type="number" min="0" step="0.01" placeholder="Points per ₹"><input id="loyaltyCurrencyPerPoint" type="number" min="0" step="0.01" placeholder="₹ value per point"></div><div class="billing-inline-grid"><input id="loyaltyMinRedeem" type="number" min="0" placeholder="Minimum redeem points"><input id="loyaltyWelcome" type="number" min="0" placeholder="Welcome points"></div><label><input id="loyaltyEnabled" type="checkbox"> Loyalty enabled</label><br><button class="big-btn" onclick="saveLoyaltySettings()">Save Loyalty Settings</button></div>
+        <div class="dashboard-box"><h3>Customer Points</h3><div class="billing-inline-grid"><select id="loyaltyCustomerSelect"></select><button class="big-btn" onclick="loadSelectedLoyaltyCustomer()">View</button></div><div class="cards"><div class="card"><span>Current Points</span><strong id="loyaltyBalance">0</strong></div></div><div class="table-container"><table><thead><tr><th>Date</th><th>Type</th><th>Points</th><th>Note</th></tr></thead><tbody id="loyaltyHistoryBody"></tbody></table></div></div>
+    </section>
 </section>
+<div id="marketingPushModal" class="modal">
+    <div class="modal-content marketing-push-modal">
+        <div class="modal-header"><div><span class="eyebrow">CUSTOMER NOTIFICATION</span><h2>Create message</h2></div><button type="button" onclick="closeMarketingPushForm()" aria-label="Close">×</button></div>
+        <div class="form-group"><label for="marketingPushTitle">Notification title</label><input id="marketingPushTitle" maxlength="120" placeholder="e.g. Friday special is here"></div>
+        <div class="form-group"><label for="marketingPushMessage">Message</label><textarea id="marketingPushMessage" maxlength="500" rows="4" placeholder="Tell guests what is new or what offer is waiting for them."></textarea></div>
+        <p class="marketing-push-note">Messages go only to guests who chose Get offers. Tapping one opens your cafe menu.</p>
+        <div id="marketingPushFormStatus" class="marketing-push-status" aria-live="polite"></div>
+        <div class="modal-actions"><button type="button" id="marketingPushSendButton" class="big-btn" onclick="sendMarketingPushCampaign()">Send to subscribers</button><button type="button" class="cancel-btn" onclick="closeMarketingPushForm()">Cancel</button></div>
+    </div>
+</div>
 
 <div id="marketingDealModal" class="modal">
     <div class="modal-content marketing-deal-modal">
@@ -1408,11 +1537,7 @@
         <div class="modal-actions"><button type="button" class="big-btn" onclick="saveMarketingDeal()">Save Deal</button><button type="button" class="cancel-btn" onclick="closeMarketingDealForm()">Cancel</button></div>
     </div>
 </div>
-<section id="loyalty" class="page">
-  <div class="page-header"><div><h2>⭐ Customer Loyalty</h2><p>Reward repeat guests and manage points from the cafe counter.</p></div><button class="big-btn" onclick="loadLoyaltySettings()">Refresh</button></div>
-  <div class="dashboard-box"><h3>Loyalty Rules</h3><div class="billing-inline-grid"><input id="loyaltyPointsPerCurrency" type="number" min="0" step="0.01" placeholder="Points per ₹"><input id="loyaltyCurrencyPerPoint" type="number" min="0" step="0.01" placeholder="₹ value per point"></div><div class="billing-inline-grid"><input id="loyaltyMinRedeem" type="number" min="0" placeholder="Minimum redeem points"><input id="loyaltyWelcome" type="number" min="0" placeholder="Welcome points"></div><label><input id="loyaltyEnabled" type="checkbox"> Loyalty enabled</label><br><button class="big-btn" onclick="saveLoyaltySettings()">Save Loyalty Settings</button></div>
-  <div class="dashboard-box"><h3>Customer Points</h3><div class="billing-inline-grid"><select id="loyaltyCustomerSelect"></select><button class="big-btn" onclick="loadSelectedLoyaltyCustomer()">View</button></div><div class="cards"><div class="card"><span>Current Points</span><strong id="loyaltyBalance">0</strong></div></div><div class="table-container"><table><thead><tr><th>Date</th><th>Type</th><th>Points</th><th>Note</th></tr></thead><tbody id="loyaltyHistoryBody"></tbody></table></div></div>
-</section>
+
 <!-- =================================================
      INVOICE DESIGNER
      ================================================= -->
@@ -2294,6 +2419,21 @@
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach saved option sets such as milk choice, add-ons or spice level.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></div>
       <div class="modal-actions"><button class="big-btn" onclick="saveMenuItemV2()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
+    <div id="menuPriceModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="menuPriceModalTitle">
+      <div class="modal-content menu-price-modal-content">
+        <div class="modal-header"><h2 id="menuPriceModalTitle">Manage item prices</h2><button type="button" class="close-btn" onclick="closeMenuPriceEditor()" aria-label="Close">✕</button></div>
+        <p class="access-muted">These POS prices also feed the published cafe and restaurant menu.</p>
+        <div class="menu-price-fields">
+          <div class="form-group"><label for="managedMenuBasePrice">Base price</label><input id="managedMenuBasePrice" type="number" min="0" step="0.01"></div>
+          <div class="form-group"><label for="managedMenuPriceOnline">Online price</label><input id="managedMenuPriceOnline" type="number" min="0" step="0.01"></div>
+          <div class="form-group"><label for="managedMenuPriceDineIn">Dine-in price</label><input id="managedMenuPriceDineIn" type="number" min="0" step="0.01"></div>
+          <div class="form-group"><label for="managedMenuPriceTakeaway">Takeaway price</label><input id="managedMenuPriceTakeaway" type="number" min="0" step="0.01"></div>
+          <div class="form-group"><label for="managedMenuPriceDelivery">Delivery price</label><input id="managedMenuPriceDelivery" type="number" min="0" step="0.01"></div>
+        </div>
+        <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variant prices</h3><p>Update sizes such as Small, Regular or Large.</p></div></div><div id="menuVariantPriceEditor"></div></div>
+        <div class="modal-actions"><button type="button" class="big-btn" onclick="saveMenuPriceEditor()">Save prices</button><button type="button" class="cancel-btn" onclick="closeMenuPriceEditor()">Cancel</button></div>
+      </div>
+    </div>
     <div id="variantPickerModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Select Variant</h2><button class="close-btn" onclick="closeVariantPicker()">✕</button></div><div id="variantPickerBody"></div></div></div>
     <div id="itemOptionsModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Choose Item Options</h2><button class="close-btn" onclick="closeItemOptions()">✕</button></div><div id="itemOptionsBody"></div><div class="modal-actions"><button type="button" class="big-btn" onclick="confirmItemOptions()">Add to Order</button><button type="button" class="cancel-btn" onclick="closeItemOptions()">Cancel</button></div></div></div>
     <div id="menuOptionSetsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="optionSetModalTitle">

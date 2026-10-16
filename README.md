@@ -15,3 +15,12 @@ Run with the existing project setup:
 1. `npm install`
 2. `node server.js`
 3. Open the Cafe POS and hard refresh with `Ctrl + Shift + R`.
+
+
+## QR menu app installs and customer notifications
+
+- Serve the POS and guest QR menu over HTTPS in production. Browser app installation and Web Push require a secure origin; localhost is allowed for local development.
+- Install server dependencies with `npm install`.
+- Generate a VAPID key pair with `npx web-push generate-vapid-keys --json`, then set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in the server environment. Keep the private key server-side and reuse the same pair after deployment.
+- Guests can install the cafe menu app or opt in to Get offers from the QR menu. POS users can compose and send messages from Marketing > Customer notifications.
+- The existing startup migration creates tenant-scoped subscription and campaign tables.

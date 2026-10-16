@@ -4,6 +4,7 @@ const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const crypto = require("crypto");
+const QRCode = require("qrcode");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -13,6 +14,28 @@ const net = require("net");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
+
+function getLocalNetworkMenuUrl() {
+    const candidates = [];
+    const interfaces = os.networkInterfaces() || {};
+    for (const [name, addresses] of Object.entries(interfaces)) {
+        if (/(virtual|vEthernet|docker|wsl|vmware|virtualbox|loopback|vpn)/i.test(name)) continue;
+        for (const item of addresses || []) {
+            if (item.internal || (item.family !== "IPv4" && item.family !== 4)) continue;
+            const parts = String(item.address || "").split(".").map(Number);
+            if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) continue;
+            const [a, b] = parts;
+            const isPrivate = a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31);
+            if (!isPrivate) continue;
+            const priority = /(wi-?fi|wireless|wlan|ethernet)/i.test(name) ? 0 : 1;
+            candidates.push({ address: item.address, priority });
+        }
+    }
+    candidates.sort((left, right) => left.priority - right.priority);
+    return candidates.length ? `http://${candidates[0].address}:${PORT}` : null;
+}
+
+
 
 
 // =====================================================
@@ -474,23 +497,44 @@ async function getEffectiveLicense(businessId) {
 
 const SUPPORT_LICENSE_TYPES = ['Trial', 'Sales'];
 
-function normalizeSupportLicenseSelection(licenseTypeInput, addOnInput, fallbackType = 'Sales', fallbackAddOn = null) {
-    const rawType = String(licenseTypeInput === undefined ? fallbackType : licenseTypeInput || fallbackType).trim();
-    const legacyMarketing = rawType.toLowerCase() === 'marketing';
-    const licenseType = legacyMarketing ? 'Sales' : rawType;
-    const rawAddOn = addOnInput === undefined
-        ? (legacyMarketing ? 'Marketing' : fallbackAddOn)
-        : addOnInput;
-    const normalizedAddOn = String(rawAddOn || '').trim().toLowerCase();
-    const addOn = normalizedAddOn === '' || normalizedAddOn === 'none'
-        ? null
-        : normalizedAddOn === 'marketing'
-            ? 'Marketing'
-            : null;
-    if (normalizedAddOn && normalizedAddOn !== 'none' && !addOn) {
-        throw Object.assign(new Error('Add-on must be None or Marketing'), { status: 400 });
+const SUPPORT_LICENSE_ADDONS = ["Marketing", "Table QR"];
+
+function parseSupportLicenseAddons(value) {
+    const source = Array.isArray(value) ? value : String(value || "").split(/[;,]/);
+    const selected = new Set();
+    for (const entry of source) {
+        const normalized = String(entry || "").trim().toLowerCase();
+        const canonical = SUPPORT_LICENSE_ADDONS.find(addOn => addOn.toLowerCase() === normalized);
+        if (canonical) selected.add(canonical);
+        else if (normalized && normalized !== "none") {
+            throw Object.assign(new Error(`Unknown license add-on: ${String(entry).slice(0, 60)}`), { status: 400 });
+        }
     }
-    return { licenseType, addOn };
+    return SUPPORT_LICENSE_ADDONS.filter(addOn => selected.has(addOn));
+}
+
+function normalizeSupportLicenseSelection(licenseTypeInput, addOnInput, fallbackType = "Sales", fallbackAddOn = null) {
+    const rawType = String(licenseTypeInput === undefined ? fallbackType : licenseTypeInput || fallbackType).trim();
+    const legacyMarketing = rawType.toLowerCase() === "marketing";
+    const licenseType = legacyMarketing ? "Sales" : rawType;
+    const rawAddons = addOnInput === undefined ? (legacyMarketing ? ["Marketing"] : fallbackAddOn) : addOnInput;
+    const addOns = parseSupportLicenseAddons(rawAddons);
+    return { licenseType, addOn: addOns.length ? addOns.join(", ") : null };
+}
+
+function licenseHasAddon(license, addon) {
+    try { return parseSupportLicenseAddons(license?.add_on).includes(addon); }
+    catch (_) { return false; }
+}
+
+async function businessHasLicenseAddon(businessId, addon) {
+    const result = await runSystemContext(() => pool.query(
+        `SELECT add_on FROM business_licenses WHERE business_id=$1 AND status='active'
+            AND starts_at<=CURRENT_TIMESTAMP AND expires_at>=CURRENT_TIMESTAMP
+         ORDER BY created_at DESC, id DESC LIMIT 1`,
+        [Number(businessId)]
+    ));
+    return licenseHasAddon(result.rows[0], addon);
 }
 
 function normalizeSupportLicenseTerm(licenseTypeInput, durationInput, fallbackPlan = 'Sales', fallbackDuration = null) {
@@ -586,6 +630,7 @@ function permissionForRequest(req) {
         if (path === `/${prefix}` || path.startsWith(`/${prefix}/`)) {
             if (module === "kitchen") {
                 if (req.query?.print === "1") return "kitchen.print";
+                if (method === "GET" && req.query?.range === "all" && req.user?.permissions?.["orders.print_open"] === true) return "orders.print_open";
                 return method === "GET" ? "kitchen.view" : "kitchen.edit";
             }
             if (method === "GET") return `${module}.view`;
@@ -597,6 +642,7 @@ function permissionForRequest(req) {
     if (path.endsWith("/payment-summary")) return "payments.view";
     if (path === "/orders" || path.startsWith("/orders/")) {
         if (/^\/orders\/\d+\/printed$/.test(path)) return "orders.print_open";
+        if (/^\/orders\/\d+\/kot$/.test(path)) return "orders.print_open";
         if (method === "GET") return "orders.view";
         if (method === "POST") return "new_order.create";
         if (["PUT","PATCH"].includes(method)) return /^\/orders\/\d+$/.test(path) ? "orders.edit_open" : "orders.edit";
@@ -641,6 +687,14 @@ async function requireAuth(req, res, next) {
         req.sessionToken = session.token;
         req.device = deviceLicense.device;
         req.license = deviceLicense.license;
+
+        const restrictedAddon = req.path.startsWith("/marketing") || req.path.startsWith("/loyalty")
+            ? "Marketing"
+            : (req.path === "/menu/public-settings" || req.path.startsWith("/menu/public-settings/") || /^\/menu\/\d+\/qr-stock$/.test(req.path)
+                ? "Table QR" : null);
+        if (restrictedAddon && !licenseHasAddon(req.license, restrictedAddon)) {
+            return res.status(403).json({ error: `${restrictedAddon} is a paid add-on that is not active for this business`, code: "LICENSE_ADDON_REQUIRED", addon: restrictedAddon });
+        }
 
         return tenantContext.run({ businessId: Number(user.business_id) }, () => {
             const required = permissionForRequest(req);
@@ -751,6 +805,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS channel_prices JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS image_url TEXT`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS option_set_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS qr_available BOOLEAN NOT NULL DEFAULT TRUE`);
     await pool.query(`CREATE TABLE IF NOT EXISTS menu_variants (
         id SERIAL PRIMARY KEY,
         menu_id INTEGER NOT NULL REFERENCES menu(id) ON DELETE CASCADE,
@@ -764,6 +819,41 @@ async function ensureBusinessTables() {
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_menu_variants_menu ON menu_variants(menu_id)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS public_menu_settings (
+        business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+        token VARCHAR(64) NOT NULL UNIQUE,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        price_channel VARCHAR(20) NOT NULL DEFAULT 'online',
+        public_base_url TEXT,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS public_base_url TEXT");
+    await pool.query(`CREATE TABLE IF NOT EXISTS public_menu_push_subscriptions (
+        id SERIAL PRIMARY KEY,
+        business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+        endpoint TEXT NOT NULL,
+        subscription JSONB NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (business_id, endpoint)
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_public_menu_push_subscriptions_business ON public_menu_push_subscriptions(business_id, created_at DESC)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS marketing_push_campaigns (
+        id SERIAL PRIMARY KEY,
+        business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+        title VARCHAR(120) NOT NULL,
+        message VARCHAR(500) NOT NULL,
+        target_url TEXT NOT NULL,
+        status VARCHAR(24) NOT NULL DEFAULT 'sending',
+        subscriber_count INTEGER NOT NULL DEFAULT 0,
+        sent_count INTEGER NOT NULL DEFAULT 0,
+        failed_count INTEGER NOT NULL DEFAULT 0,
+        created_by INTEGER REFERENCES app_users(id) ON DELETE SET NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        sent_at TIMESTAMP
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketing_push_campaigns_business ON marketing_push_campaigns(business_id, created_at DESC)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS public_tracking_token VARCHAR(64)`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id INTEGER REFERENCES menu_variants(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit VARCHAR(20)`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(6,2) NOT NULL DEFAULT 5`);
@@ -1151,6 +1241,346 @@ app.post("/api/auth/logout", async (req, res) => {
     }
 });
 
+// The opaque URL exposes only a published guest menu. POS controls remain behind authentication.
+app.get("/restaurant/:token", (req, res) => {
+    if (!/^[a-f0-9]{48}$/i.test(String(req.params.token || ""))) return res.status(404).send("Menu not found");
+    res.sendFile(path.join(__dirname, "public", "restaurant-menu.html"));
+});
+
+app.get("/restaurant/:token/manifest.webmanifest", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const result = await runSystemContext(() => pool.query(
+            "SELECT s.business_id, s.enabled, b.business_name FROM public_menu_settings s JOIN businesses b ON b.id=s.business_id WHERE s.token=$1 LIMIT 1",
+            [token]
+        ));
+        const publication = result.rows[0];
+        if (!publication?.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
+        const name = String(publication.business_name || "Cafe & Restaurant").slice(0, 80);
+        res.set("Cache-Control", "public, max-age=0, must-revalidate").type("application/manifest+json").json({
+            id: `/restaurant/${token}`,
+            name: `${name}  -  Menu`,
+            short_name: name.slice(0, 30),
+            description: `Browse the menu at ${name}`,
+            start_url: `/restaurant/${token}`,
+            scope: "/",
+            display: "standalone",
+            background_color: "#f5f3ec",
+            theme_color: "#25222f",
+            icons: [
+                { src: "/qr-menu-icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+                { src: "/qr-menu-icon-512.png", sizes: "512x512", type: "image/png", purpose: "any maskable" },
+                { src: "/qr-menu-icon.svg", sizes: "any", type: "image/svg+xml", purpose: "any" }
+            ]
+        });
+    } catch (error) {
+        console.error("Guest menu manifest error:", error);
+        res.status(500).json({ error: "Could not load menu app details" });
+    }
+});
+
+app.get("/public-menu/:token/push-config", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const result = await runSystemContext(() => pool.query("SELECT business_id, enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+        const publication = result.rows[0];
+        if (!publication?.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
+        const marketingEnabled = await businessHasLicenseAddon(publication.business_id, "Marketing");
+        const configured = marketingEnabled && Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
+        res.set("Cache-Control", "no-store").json({ configured, marketingEnabled, publicKey: configured ? process.env.VAPID_PUBLIC_KEY : null });
+    } catch (error) {
+        console.error("Guest push configuration error:", error);
+        res.status(500).json({ error: "Could not load notification settings" });
+    }
+});
+
+app.post("/public-menu/:token/push-subscriptions", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    const subscription = req.body?.subscription;
+    const endpoint = String(subscription?.endpoint || "");
+    let endpointUrl;
+    try { endpointUrl = new URL(endpoint); } catch (_) { return res.status(400).json({ error: "Invalid push subscription" }); }
+    const host = endpointUrl.hostname.toLowerCase();
+    const allowedPushHost = host === "fcm.googleapis.com" || host.endsWith(".fcm.googleapis.com") ||
+        host === "updates.push.services.mozilla.com" || host.endsWith(".push.services.mozilla.com") ||
+        host === "web.push.apple.com" || host.endsWith(".web.push.apple.com") || host.endsWith(".notify.windows.com");
+    if (endpointUrl.protocol !== "https:" || !allowedPushHost || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+        return res.status(400).json({ error: "Invalid push subscription" });
+    }
+    try {
+        const access = await runSystemContext(() => pool.query("SELECT business_id, enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+        const publication = access.rows[0];
+        if (!publication?.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
+        if (!(await businessHasLicenseAddon(publication.business_id, "Marketing"))) return res.status(403).json({ error: "Promotional messages are not enabled for this cafe" });
+        const businessId = Number(publication.business_id);
+        await tenantContext.run({ businessId }, () => pool.query(`
+            INSERT INTO public_menu_push_subscriptions(business_id, endpoint, subscription)
+            VALUES($1,$2,$3::jsonb)
+            ON CONFLICT(business_id, endpoint) DO UPDATE SET subscription=EXCLUDED.subscription, updated_at=CURRENT_TIMESTAMP
+        `, [businessId, endpoint, JSON.stringify(subscription)]));
+        res.status(201).json({ success: true });
+    } catch (error) {
+        console.error("Guest push subscription save error:", error);
+        res.status(500).json({ error: "Could not save notification preference" });
+    }
+});
+app.get("/public-menu/:token", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const access = await runSystemContext(() => pool.query(
+            "SELECT business_id, enabled, price_channel FROM public_menu_settings WHERE token=$1 LIMIT 1",
+            [token]
+        ));
+        const publication = access.rows[0];
+        if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
+        const businessId = Number(publication.business_id);
+        const priceChannel = ["dine_in", "takeaway", "delivery", "online"].includes(publication.price_channel)
+            ? publication.price_channel : "online";
+        const data = await tenantContext.run({ businessId }, async () => {
+            const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult] = await Promise.all([
+                pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
+                pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
+                pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
+                pool.query("SELECT id, name, category, price, channel_prices, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
+                pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
+                pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId])
+            ]);
+            const business = businessResult.rows[0] || {};
+            const settings = settingsResult.rows[0]?.settings || {};
+            const configuredOptionSets = Array.isArray(settings.menuOptionSets) ? settings.menuOptionSets : [];
+            const optionSetsById = new Map(configuredOptionSets.map(set => [String(set.id), set]));
+            const itemsById = new Map();
+            const items = menuResult.rows.map(item => {
+                const prices = item.channel_prices && typeof item.channel_prices === "object" ? item.channel_prices : {};
+                const entry = {
+                    id: String(item.id),
+                    name: item.name,
+                    category: item.category || "Menu",
+                    price: Number(prices[priceChannel] ?? item.price ?? 0),
+                    imageUrl: item.image_url || "",
+                    inStock: item.qr_available !== false,
+                    taxRate: Number(item.tax_rate || 0),
+                    taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
+                    optionSets: (Array.isArray(item.option_set_ids) ? item.option_set_ids : []).map(id => optionSetsById.get(String(id))).filter(Boolean).map(set => ({
+                        id: String(set.id), name: String(set.name || "Options"), minSelections: Math.max(0, Number(set.minSelections) || 0),
+                        maxSelections: Math.max(1, Number(set.maxSelections) || 1),
+                        options: (Array.isArray(set.options) ? set.options : []).map(option => ({ id: String(option.id), name: String(option.name || "Choice"), price: Math.max(0, Number(option.price) || 0) }))
+                    })),
+                    variants: []
+                };
+                itemsById.set(Number(item.id), entry);
+                return entry;
+            });
+            for (const variant of variantResult.rows) {
+                const item = itemsById.get(Number(variant.menu_id));
+                if (!item) continue;
+                const prices = variant.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
+                item.variants.push({
+                    id: String(variant.id),
+                    name: variant.name,
+                    unit: variant.unit || "",
+                    price: Number(prices[priceChannel] ?? variant.price ?? item.price)
+                });
+            }
+            return {
+                restaurantName: String(settings.restaurantName || business.business_name || "Cafe & Restaurant"),
+                logoUrl: String(settings.logoUrl || business.logo_url || ""),
+                currency: String(settings.currency || business.currency || "₹"),
+                priceChannel,
+                categories: categoryResult.rows.map(row => row.name),
+                items,
+                tables: tableResult.rows.map(row => String(row.table_number))
+            };
+        });
+        res.set("Cache-Control", "no-store");
+        res.json(data);
+    } catch (error) {
+        console.error("Public restaurant menu error:", error);
+        res.status(500).json({ error: "Could not load menu" });
+    }
+});
+
+app.post("/public-menu/:token/orders", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    const linkTableNumber = String(req.query?.table || "").trim();
+    const tableNumber = String(req.body?.tableNumber || req.body?.table_number || "").trim();
+    const requestedOrderType = String(req.body?.orderType || "dine-in").toLowerCase();
+    if (!['dine-in', 'takeaway'].includes(requestedOrderType)) return res.status(400).json({ error: "Choose Dine in or Takeaway" });
+    const orderType = requestedOrderType === "takeaway" ? "Takeaway" : "Dine-in";
+    const assignedTableNumber = orderType === "Dine-in" ? tableNumber : null;
+    const trackingToken = crypto.randomBytes(24).toString("hex");
+    const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    if (!linkTableNumber || tableNumber !== linkTableNumber || !tableNumber || tableNumber.length > 60 || /[\u0000-\u001f\u007f]/.test(tableNumber)) {
+        return res.status(400).json({ error: "This order link does not have a valid table number" });
+    }
+    if (!requestedItems.length || requestedItems.length > 30) {
+        return res.status(400).json({ error: "Choose between 1 and 30 menu items" });
+    }
+    try {
+        const access = await runSystemContext(() => pool.query(
+            "SELECT business_id, enabled, price_channel FROM public_menu_settings WHERE token=$1 LIMIT 1",
+            [token]
+        ));
+        const publication = access.rows[0];
+        if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
+        const businessId = Number(publication.business_id);
+        const priceChannel = ["dine_in", "takeaway", "delivery", "online"].includes(publication.price_channel)
+            ? publication.price_channel : "online";
+        const result = await tenantContext.run({ businessId }, async () => {
+            const client = await rawPoolConnect();
+            try {
+                await applyTenantDbContext(client);
+                await client.query("BEGIN");
+                const tableResult = await client.query(
+                    "SELECT table_number FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 FOR UPDATE",
+                    [businessId, tableNumber]
+                );
+                if (!tableResult.rows.length) throw Object.assign(new Error("This QR link does not match a table in this POS"), { status: 400 });
+
+                const linesByKey = new Map();
+                for (const source of requestedItems) {
+                    const itemId = Number(source?.itemId ?? source?.menuId);
+                    const variantId = Number(source?.variantId) || null;
+                    const quantity = Number(source?.quantity);
+                    if (!Number.isInteger(itemId) || itemId <= 0 || !Number.isInteger(quantity) || quantity < 1 || quantity > 30 ||
+                        (source?.variantId && (!Number.isInteger(variantId) || variantId <= 0))) {
+                        throw Object.assign(new Error("One of the order items is invalid"), { status: 400 });
+                    }
+                    const selectedOptions = cleanOrderOptions(source?.options);
+                    const optionSignature = JSON.stringify(selectedOptions.map(set => [set.setId, set.options.map(option => option.id).sort()]).sort((a, b) => a[0].localeCompare(b[0])));
+                    const key = itemId + ":" + (variantId || 0) + ":" + optionSignature;
+                    const current = linesByKey.get(key) || { itemId, variantId, quantity: 0, options: selectedOptions };
+                    current.quantity += quantity;
+                    if (current.quantity > 30) throw Object.assign(new Error("Choose up to 30 of each menu item"), { status: 400 });
+                    linesByKey.set(key, current);
+                }
+                const requestedLines = [...linesByKey.values()];
+                const itemIds = [...new Set(requestedLines.map(line => line.itemId))];
+                const menuResult = await client.query(
+                    "SELECT id,name,category,price,channel_prices,qr_available,unit,tax_rate,tax_mode,option_set_ids FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE AND qr_available=TRUE",
+                    [businessId, itemIds]
+                );
+                const menuById = new Map(menuResult.rows.map(item => [Number(item.id), item]));
+                if (menuById.size !== itemIds.length) {
+                    throw Object.assign(new Error("A selected menu item is no longer available"), { status: 409 });
+                }
+                const variantIds = requestedLines.map(line => line.variantId).filter(Boolean);
+                const variantResult = variantIds.length ? await client.query(
+                    "SELECT id,menu_id,name,price,unit,channel_prices FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE",
+                    [businessId, variantIds]
+                ) : { rows: [] };
+                const variantById = new Map(variantResult.rows.map(variant => [Number(variant.id), variant]));
+                const orderLines = [];
+                for (const line of requestedLines) {
+                    const item = menuById.get(line.itemId);
+                    const variant = line.variantId ? variantById.get(line.variantId) : null;
+                    if (!item || (line.variantId && (!variant || Number(variant.menu_id) !== line.itemId))) {
+                        throw Object.assign(new Error("A selected size is no longer available"), { status: 409 });
+                    }
+                    const prices = item.channel_prices && typeof item.channel_prices === "object" ? item.channel_prices : {};
+                    const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
+                    const price = Number(variant ? (variantPrices[priceChannel] ?? variant.price) : (prices[priceChannel] ?? item.price));
+                    if (!Number.isFinite(price) || price < 0) throw Object.assign(new Error("A menu price is invalid"), { status: 400 });
+                    const normalizedOptions = await normalizeOrderItemOptions(client, businessId, item, line.options, undefined, undefined);
+                    const finalPrice = price + normalizedOptions.addOnPrice;
+                    orderLines.push({
+                        menuId: line.itemId,
+                        variantId: variant ? line.variantId : null,
+                        itemName: item.name + (variant ? " · " + variant.name : ""),
+                        price: finalPrice,
+                        quantity: line.quantity,
+                        lineTotal: finalPrice * line.quantity,
+                        options: normalizedOptions.options,
+                        unit: variant?.unit || item.unit || "ea",
+                        taxRate: Math.max(0, Number(item.tax_rate || 0)),
+                        taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive"
+                    });
+                }
+                const subtotal = orderLines.reduce((sum, line) => {
+                    const gross = line.price * line.quantity;
+                    return sum + (line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross);
+                }, 0);
+                const gst = orderLines.reduce((sum, line) => {
+                    const gross = line.price * line.quantity;
+                    const net = line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross;
+                    return sum + net * line.taxRate / 100;
+                }, 0);
+                const total = orderLines.reduce((sum, line) => {
+                    const gross = line.price * line.quantity;
+                    const net = line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross;
+                    return sum + net + net * line.taxRate / 100;
+                }, 0);
+                const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
+                const note = String(req.body?.notes || "").trim().slice(0, 300);
+                const orderResult = await client.query(
+                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8) RETURNING id,order_number,table_number,total,status",
+                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken]
+                );
+                const order = orderResult.rows[0];
+                const itemValues = [];
+                const itemRows = orderLines.map((line, index) => {
+                    const offset = index * 11;
+                    itemValues.push(order.id,line.menuId,line.variantId,line.itemName,line.price,line.quantity,line.lineTotal,line.unit,line.taxRate,line.taxMode,JSON.stringify(line.options || []));
+                    return "($" + (offset+1) + ",$" + (offset+2) + ",$" + (offset+3) + ",$" + (offset+4) + ",$" + (offset+5) + ",$" + (offset+6) + ",$" + (offset+7) + ",$" + (offset+8) + ",$" + (offset+9) + ",$" + (offset+10) + ",$" + (offset+11) + "::jsonb)";
+                });
+                await client.query(
+                    "INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options) VALUES " + itemRows.join(","),
+                    itemValues
+                );
+                await createKOTForOrder(client, businessId, order.id);
+                if (orderType === "Dine-in") {
+                    await client.query("UPDATE restaurant_tables SET status='Occupied' WHERE business_id=$1 AND table_number::text=$2", [businessId, tableNumber]);
+                }
+                await client.query("COMMIT");
+                return { success: true, orderId: order.id, orderNumber: order.order_number, tableNumber: order.table_number, sourceTableNumber: tableNumber, orderType, total: Number(order.total), status: order.status, trackingToken };
+            } catch (error) {
+                await client.query("ROLLBACK");
+                throw error;
+            } finally {
+                client.release();
+            }
+        });
+        res.status(201).json(result);
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("Place QR table order error:", error);
+        res.status(500).json({ error: "Could not place the QR order" });
+    }
+});
+
+app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
+    const token = String(req.params.token || "");
+    const orderId = Number(req.params.orderId);
+    const trackingToken = String(req.query?.tracking || "");
+    if (!/^[a-f0-9]{48}$/i.test(token) || !Number.isInteger(orderId) || orderId <= 0 || !/^[a-f0-9]{48}$/i.test(trackingToken)) {
+        return res.status(404).json({ error: "Order not found" });
+    }
+    try {
+        const access = await runSystemContext(() => pool.query("SELECT business_id, enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+        const publication = access.rows[0];
+        if (!publication || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Order not found" });
+        const businessId = Number(publication.business_id);
+        const data = await tenantContext.run({ businessId }, async () => {
+            const orderResult = await pool.query(`SELECT id, order_number, order_type, table_number, status, subtotal, gst, total, created_at
+                FROM orders WHERE business_id=$1 AND id=$2 AND public_tracking_token=$3 AND order_number LIKE 'QR-%' LIMIT 1`,
+                [businessId, orderId, trackingToken]);
+            const order = orderResult.rows[0];
+            if (!order) return null;
+            const lines = await pool.query("SELECT item_name, quantity, price, line_total, options FROM order_items WHERE business_id=$1 AND order_id=$2 ORDER BY id", [businessId, orderId]);
+            return { ...order, items: lines.rows };
+        });
+        if (!data) return res.status(404).json({ error: "Order not found" });
+        res.set("Cache-Control", "no-store").json({ order: { ...data, subtotal: Number(data.subtotal || 0), gst: Number(data.gst || 0), total: Number(data.total || 0), items: data.items.map(item => ({ ...item, quantity: Number(item.quantity || 0), price: Number(item.price || 0), line_total: Number(item.line_total || 0) })) } });
+    } catch (error) {
+        console.error("Public QR order status error:", error);
+        res.status(500).json({ error: "Could not load this order" });
+    }
+});
 app.use("/api", requireAuth);
 
 // =====================================================
@@ -1159,6 +1589,134 @@ app.use("/api", requireAuth);
 // =====================================================
 // MENU CATEGORIES
 // =====================================================
+
+app.get("/api/menu/public-settings", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        await pool.query(
+            "INSERT INTO public_menu_settings(business_id, token) VALUES($1,$2) ON CONFLICT (business_id) DO NOTHING",
+            [businessId, crypto.randomBytes(24).toString("hex")]
+        );
+        const result = await pool.query(
+            "SELECT enabled, price_channel, token, public_base_url FROM public_menu_settings WHERE business_id=$1",
+            [businessId]
+        );
+        const settings = result.rows[0];
+        const requestHost = String(req.hostname || "").toLowerCase();
+        const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
+        res.json({
+            enabled: settings.enabled,
+            priceChannel: settings.price_channel,
+            token: settings.token,
+            publicBaseUrl: settings.public_base_url || "",
+            localNetworkUrl
+        });
+    } catch (error) {
+        console.error("Load public menu settings error:", error);
+        res.status(500).json({ error: "Could not load restaurant menu settings" });
+    }
+});
+
+app.put("/api/menu/public-settings", async (req, res) => {
+    const businessId = Number(req.user.business_id);
+    const enabled = req.body.enabled === true;
+    const priceChannel = String(req.body.priceChannel || "online");
+    const hasPublicBaseUrl = Object.prototype.hasOwnProperty.call(req.body || {}, "publicBaseUrl");
+    let publicBaseUrl = null;
+    if (!["dine_in", "takeaway", "delivery", "online"].includes(priceChannel)) {
+        return res.status(400).json({ error: "Choose a valid menu price channel" });
+    }
+    if (hasPublicBaseUrl) {
+        const rawBaseUrl = String(req.body.publicBaseUrl || "").trim();
+        if (rawBaseUrl) {
+            try {
+                const parsed = new URL(rawBaseUrl);
+                if (!["http:", "https:"].includes(parsed.protocol) ||
+                    parsed.username || parsed.password || parsed.pathname !== "/" ||
+                    parsed.search || parsed.hash) {
+                    return res.status(400).json({ error: "Enter only the website address, such as https://your-cafe-domain.com" });
+                }
+                publicBaseUrl = parsed.origin;
+            } catch (_) {
+                return res.status(400).json({ error: "Enter a valid website address, such as https://your-cafe-domain.com" });
+            }
+        }
+    }
+    try {
+        const result = await pool.query(
+            `INSERT INTO public_menu_settings(business_id, token, enabled, price_channel, public_base_url)
+             VALUES($1,$2,$3,$4,CASE WHEN $5 THEN $6 ELSE NULL END)
+             ON CONFLICT (business_id) DO UPDATE
+             SET enabled=EXCLUDED.enabled,
+                 price_channel=EXCLUDED.price_channel,
+                 public_base_url=CASE WHEN $5 THEN EXCLUDED.public_base_url ELSE public_menu_settings.public_base_url END,
+                 updated_at=CURRENT_TIMESTAMP
+             RETURNING enabled, price_channel, token, public_base_url`,
+            [businessId, crypto.randomBytes(24).toString("hex"), enabled, priceChannel, hasPublicBaseUrl, publicBaseUrl]
+        );
+        const settings = result.rows[0];
+        const requestHost = String(req.hostname || "").toLowerCase();
+        const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
+        res.json({
+            success: true,
+            enabled: settings.enabled,
+            priceChannel: settings.price_channel,
+            token: settings.token,
+            publicBaseUrl: settings.public_base_url || "",
+            localNetworkUrl
+        });
+    } catch (error) {
+        console.error("Save public menu settings error:", error);
+        res.status(500).json({ error: "Could not save restaurant menu settings" });
+    }
+});
+
+app.post("/api/menu/public-settings/qr", async (req, res) => {
+    const businessId = Number(req.user?.business_id);
+    const targetUrlText = String(req.body?.url || "").trim();
+    try {
+        const settings = await pool.query(
+            "SELECT token FROM public_menu_settings WHERE business_id=$1",
+            [businessId]
+        );
+        if (!settings.rows.length) return res.status(404).json({ error: "Guest menu link not found" });
+
+        let targetUrl;
+        try {
+            targetUrl = new URL(targetUrlText);
+        } catch (_) {
+            return res.status(400).json({ error: "The guest menu link is not valid" });
+        }
+        const expectedPath = `/restaurant/${settings.rows[0].token}`;
+        const queryEntries = [...targetUrl.searchParams.entries()];
+        if (!(["http:", "https:"].includes(targetUrl.protocol) &&
+            !targetUrl.username && !targetUrl.password && !targetUrl.hash &&
+            targetUrl.pathname === expectedPath) ||
+            queryEntries.length > 1 ||
+            queryEntries.some(([key, value]) => key !== "table" || !value.trim() || value.length > 60 || /[\u0000-\u001f\u007f]/.test(value))) {
+            return res.status(400).json({ error: "Choose the guest menu link for this POS account" });
+        }
+        if (queryEntries.length) {
+            const tableNumber = queryEntries[0][1].trim();
+            const tableResult = await pool.query(
+                "SELECT id FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1",
+                [businessId, tableNumber]
+            );
+            if (!tableResult.rows.length) return res.status(400).json({ error: "Choose a table configured in this POS account" });
+        }
+
+        const dataUrl = await QRCode.toDataURL(targetUrl.toString(), {
+            errorCorrectionLevel: "M",
+            margin: 3,
+            width: 640,
+            color: { dark: "#111827", light: "#FFFFFF" }
+        });
+        res.json({ dataUrl });
+    } catch (error) {
+        console.error("Generate restaurant menu QR error:", error);
+        res.status(500).json({ error: "Could not generate the guest menu QR code" });
+    }
+});
 
 app.get("/api/menu/categories", async (req, res) => {
     try {
@@ -1381,7 +1939,10 @@ function cleanOrderOptions(value) {
 async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppliedBasePrice, suppliedPrice) {
     const submitted = cleanOrderOptions(value);
     const assignedIds = Array.isArray(menuItem?.option_set_ids) ? menuItem.option_set_ids.map(String) : [];
-    if (!assignedIds.length) return { options: submitted, addOnPrice: submitted.reduce((sum, set) => sum + set.options.reduce((subtotal, option) => subtotal + option.price, 0), 0) };
+    if (!assignedIds.length) {
+        if (submitted.length) throw new Error("This item does not have those options available.");
+        return { options: [], addOnPrice: 0 };
+    }
     const settingsResult = await db.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [businessId]);
     const allSets = Array.isArray(settingsResult.rows[0]?.sets) ? settingsResult.rows[0].sets : [];
     const configured = allSets.filter(set => assignedIds.includes(String(set.id)));
@@ -1405,6 +1966,7 @@ async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppli
         if (authoritative.length) options.push({ setId: String(set.id), setName: String(set.name), options: authoritative });
         selectedBySet.delete(String(set.id));
     }
+    if (selectedBySet.size) throw new Error("One of the selected options is not available for this item.");
     const basePrice = Number(suppliedBasePrice);
     const finalPrice = Number(suppliedPrice);
     if (Number.isFinite(basePrice) && Number.isFinite(finalPrice) && Math.abs((basePrice + addOnPrice) - finalPrice) > 0.02) {
@@ -1628,6 +2190,65 @@ app.put(
 );
 
 
+app.patch("/api/menu/:id/prices", async (req, res) => {
+    const id = Number(req.params.id);
+    const businessId = Number(req.user.business_id);
+    const price = Number(req.body.price);
+    const channelPrices = cleanChannelPrices(req.body.channelPrices);
+    const variantPrices = Array.isArray(req.body.variants) ? req.body.variants : [];
+    if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(price) || price < 0) {
+        return res.status(400).json({ error: "Enter a valid item price" });
+    }
+    if (variantPrices.some(row => !Number.isInteger(Number(row.id)) || !Number.isFinite(Number(row.price)) || Number(row.price) < 0)) {
+        return res.status(400).json({ error: "Enter valid prices for every variant" });
+    }
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        const result = await client.query(
+            "UPDATE menu SET price=$1, channel_prices=$2 WHERE id=$3 AND business_id=$4 RETURNING id, price, channel_prices",
+            [price, JSON.stringify(channelPrices), id, businessId]
+        );
+        if (!result.rows.length) {
+            await client.query("ROLLBACK");
+            return res.status(404).json({ error: "Menu item not found" });
+        }
+        for (const variant of variantPrices) {
+            const updated = await client.query(
+                "UPDATE menu_variants SET price=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND menu_id=$3 AND business_id=$4 RETURNING id",
+                [Number(variant.price), Number(variant.id), id, businessId]
+            );
+            if (!updated.rows.length) throw Object.assign(new Error("A menu variant could not be found"), { status: 400 });
+        }
+        await client.query("COMMIT");
+        res.json({ success: true, menu: result.rows[0] });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        res.status(error.status || 500).json({ error: error.status ? error.message : "Could not update menu prices" });
+    } finally {
+        client.release();
+    }
+});
+
+app.patch("/api/menu/:id/qr-stock", async (req, res) => {
+    const id = Number(req.params.id);
+    const businessId = Number(req.user.business_id);
+    if (!Number.isInteger(id) || id <= 0 || typeof req.body.inStock !== "boolean") {
+        return res.status(400).json({ error: "Choose whether this item is in stock for the QR menu" });
+    }
+    try {
+        const result = await pool.query(
+            "UPDATE menu SET qr_available=$1 WHERE id=$2 AND business_id=$3 RETURNING id, qr_available",
+            [req.body.inStock, id, businessId]
+        );
+        if (!result.rows.length) return res.status(404).json({ error: "Menu item not found" });
+        res.json({ success: true, item: result.rows[0] });
+    } catch (error) {
+        console.error("Update QR menu stock error:", error);
+        res.status(500).json({ error: "Could not update QR menu stock" });
+    }
+});
+
 app.get("/api/menu/:id/variants", async (req,res)=>{
     try {
         const businessId = Number(req.user.business_id);
@@ -1655,6 +2276,7 @@ app.delete(
                     SET available = false
                     WHERE id = $1
                       AND business_id = $2
+                    RETURNING *
                     `,
                     [req.params.id, Number(req.user.business_id)]
                 );
@@ -1698,6 +2320,7 @@ app.put(
                     SET available = true
                     WHERE id = $1
                       AND business_id = $2
+                    RETURNING *
                     `,
                     [req.params.id, Number(req.user.business_id)]
                 );
@@ -2231,6 +2854,64 @@ app.post("/api/orders/:id/printed", async (req,res)=>{
     }
 });
 
+app.post("/api/orders/:id/kot", async (req,res)=>{
+    const businessId=Number(req.user?.business_id),orderId=Number(req.params.id);
+    if(!Number.isInteger(orderId)||orderId<=0)return res.status(400).json({error:"Invalid order"});
+    const client=await rawPoolConnect();
+    try{
+        await applyTenantDbContext(client);
+        await client.query("BEGIN");
+        const order=await client.query("SELECT id FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE",[orderId,businessId]);
+        if(!order.rows.length){await client.query("ROLLBACK");return res.status(404).json({error:"Order not found"});}
+        const created=createKOTForOrder(client,businessId,orderId);
+        await created;
+        await client.query("COMMIT");
+        res.json({success:true});
+    }catch(error){
+        await client.query("ROLLBACK").catch(()=>{});
+        console.error("Ensure order KOT error:",error);
+        res.status(500).json({error:"Could not prepare the KOT for printing"});
+    }finally{client.release();}
+});
+
+
+app.get("/api/orders/qr-notifications", async (req, res) => {
+    const businessId = Number(req.user.business_id);
+    const rawAfterId = req.query.afterId;
+    let afterId = null;
+    if (rawAfterId !== undefined) {
+        afterId = Number(rawAfterId);
+        if (!Number.isSafeInteger(afterId) || afterId < 0) return res.status(400).json({ error: "Invalid order cursor" });
+    }
+    try {
+        const result = await pool.query(`
+            WITH latest AS (
+                SELECT COALESCE(MAX(id),0)::bigint AS latest_order_id
+                FROM orders WHERE business_id=$1
+            ), new_qr_orders AS (
+                SELECT id,order_number,table_number,total,created_at
+                FROM orders
+                WHERE business_id=$1 AND $2::bigint IS NOT NULL AND id>$2 AND order_number LIKE 'QR-%'
+                ORDER BY id
+            )
+            SELECT latest.latest_order_id,
+                   COALESCE(json_agg(json_build_object(
+                       'id',new_qr_orders.id,
+                       'order_number',new_qr_orders.order_number,
+                       'table_number',new_qr_orders.table_number,
+                       'total',new_qr_orders.total,
+                       'created_at',new_qr_orders.created_at
+                   ) ORDER BY new_qr_orders.id) FILTER (WHERE new_qr_orders.id IS NOT NULL),'[]'::json) AS orders
+            FROM latest LEFT JOIN new_qr_orders ON TRUE
+            GROUP BY latest.latest_order_id
+        `, [businessId, afterId]);
+        const row = result.rows[0] || {};
+        res.json({ latestOrderId: Number(row.latest_order_id || 0), orders: row.orders || [] });
+    } catch (error) {
+        console.error("QR order notification poll failed:", error);
+        res.status(500).json({ error: "Failed to check for new QR orders" });
+    }
+});
 
 app.get(
     "/api/orders",
@@ -6396,6 +7077,85 @@ app.put("/api/marketing/deals", async (req,res)=>{
         res.status(500).json({error:"Failed to save marketing deals"});
     }
 });
+app.get("/api/marketing/push-settings", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const [subscriptionResult, menuResult] = await Promise.all([
+            pool.query("SELECT COUNT(*)::INTEGER AS count FROM public_menu_push_subscriptions WHERE business_id=$1", [businessId]),
+            pool.query("SELECT token, enabled FROM public_menu_settings WHERE business_id=$1 LIMIT 1", [businessId])
+        ]);
+        const menu = menuResult.rows[0] || {};
+        res.json({
+            subscriberCount: Number(subscriptionResult.rows[0]?.count || 0),
+            configured: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT),
+            menuEnabled: Boolean(menu.enabled),
+            menuUrl: menu.token ? `/restaurant/${menu.token}` : null
+        });
+    } catch (error) {
+        console.error("Marketing push settings error:", error);
+        res.status(500).json({ error: "Could not load push notification settings" });
+    }
+});
+
+app.get("/api/marketing/push-campaigns", async (req, res) => {
+    try {
+        const result = await pool.query(`SELECT id, title, message, target_url, status, subscriber_count, sent_count, failed_count, created_at, sent_at
+            FROM marketing_push_campaigns WHERE business_id=$1 ORDER BY created_at DESC LIMIT 50`, [Number(req.user.business_id)]);
+        res.json({ campaigns: result.rows });
+    } catch (error) {
+        console.error("Marketing push campaigns load error:", error);
+        res.status(500).json({ error: "Could not load notification campaigns" });
+    }
+});
+
+app.post("/api/marketing/push-campaigns", async (req, res) => {
+    const title = String(req.body?.title || "").trim().slice(0, 120);
+    const message = String(req.body?.message || "").trim().slice(0, 500);
+    if (!title || !message) return res.status(400).json({ error: "Add a title and message" });
+    if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY || !process.env.VAPID_SUBJECT) {
+        return res.status(503).json({ error: "Push notifications need VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT in the server environment" });
+    }
+    let webPush;
+    try { webPush = require("web-push"); }
+    catch (_) { return res.status(503).json({ error: "The web-push package is not installed on this server" }); }
+    try {
+        const businessId = Number(req.user.business_id);
+        const menuResult = await pool.query("SELECT token, enabled FROM public_menu_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const menu = menuResult.rows[0];
+        if (!menu?.enabled || !menu.token) return res.status(400).json({ error: "Publish the Table QR Menu before sending a promotion" });
+        const targetUrl = `/restaurant/${menu.token}`;
+        const subscriptionResult = await pool.query("SELECT id, endpoint, subscription FROM public_menu_push_subscriptions WHERE business_id=$1 ORDER BY id", [businessId]);
+        const subscriptions = subscriptionResult.rows;
+        const campaignResult = await pool.query(`INSERT INTO marketing_push_campaigns(business_id, title, message, target_url, subscriber_count, created_by)
+            VALUES($1,$2,$3,$4,$5,$6) RETURNING id`, [businessId, title, message, targetUrl, subscriptions.length, Number(req.user.id) || null]);
+        const campaignId = Number(campaignResult.rows[0].id);
+        webPush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+        let sentCount = 0, failedCount = 0;
+        const expiredIds = [];
+        const payload = JSON.stringify({ title, body: message, url: targetUrl, tag: `campaign-${campaignId}` });
+        for (let offset = 0; offset < subscriptions.length; offset += 50) {
+            const batch = subscriptions.slice(offset, offset + 50);
+            const results = await Promise.allSettled(batch.map(row => webPush.sendNotification(row.subscription, payload, { TTL: 60 * 60 * 24 })));
+            results.forEach((result, index) => {
+                if (result.status === "fulfilled") sentCount++;
+                else {
+                    failedCount++;
+                    const statusCode = Number(result.reason?.statusCode || 0);
+                    if (statusCode === 404 || statusCode === 410) expiredIds.push(Number(batch[index].id));
+                }
+            });
+        }
+        if (expiredIds.length) await pool.query("DELETE FROM public_menu_push_subscriptions WHERE business_id=$1 AND id=ANY($2::int[])", [businessId, expiredIds]);
+        const status = failedCount === 0 ? "sent" : sentCount === 0 ? "failed" : "partial";
+        const saved = await pool.query(`UPDATE marketing_push_campaigns SET status=$3, sent_count=$4, failed_count=$5, sent_at=CURRENT_TIMESTAMP
+            WHERE business_id=$1 AND id=$2 RETURNING id, title, message, target_url, status, subscriber_count, sent_count, failed_count, created_at, sent_at`,
+            [businessId, campaignId, status, sentCount, failedCount]);
+        res.status(201).json({ success: true, campaign: saved.rows[0], message: `Sent to ${sentCount} of ${subscriptions.length} subscribed device(s).` });
+    } catch (error) {
+        console.error("Marketing push send error:", error);
+        res.status(500).json({ error: "Could not send this promotion" });
+    }
+});
 app.get(
     "/api/settings",
     async (req, res) => {
@@ -6624,7 +7384,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
-    'loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings'
+    'loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns'
 ];
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices

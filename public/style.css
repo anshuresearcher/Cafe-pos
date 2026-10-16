@@ -2491,7 +2491,7 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 @media(max-width:480px){.option-set-builder-modal{padding:14px}.option-set-limits{grid-template-columns:1fr}.option-set-add-row{grid-template-columns:1fr}.option-set-add-button{width:100%}.option-set-item-row{grid-template-columns:minmax(0,1fr) 88px 32px;gap:6px;padding:8px}.option-set-form-actions{flex-wrap:wrap}.option-set-form-actions button{flex:1}.option-set-editor-heading h3,.option-set-choices-heading h3{font-size:15px}}
 
 /* Orders workspace */
-.orders-page{max-width:1600px;margin:0 auto}
+.orders-page{width:min(1900px,calc(100% + 40px));max-width:none;margin:0 auto}
 .orders-header-actions{flex-wrap:wrap}
 .orders-filter-bar{display:flex;align-items:end;gap:10px;flex-wrap:wrap;margin:0 0 16px;padding:12px;background:#fff;border:1px solid #e5e9ed;border-radius:13px}
 .orders-filter-bar label{display:grid;gap:5px;min-width:135px;margin:0;color:#727d87;font-size:11px;font-weight:700}
@@ -2531,6 +2531,7 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .kot-target-picker-card>div:first-child strong{font-size:14px}.kot-target-picker-card>div:first-child>span{font-size:12px}.kot-target-chips{padding-top:2px}
 @media(max-width:900px){.orders-workspace{grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr)}.orders-list-panel,.orders-detail-panel{max-height:calc(100vh - 275px)}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.orders-workspace{grid-template-columns:1fr}.orders-list-panel,.orders-detail-panel{max-height:none;min-height:0}.orders-list-panel{max-height:42vh}.orders-detail-panel{min-height:400px}.orders-filter-bar{align-items:stretch}.orders-filter-bar label{flex:1 1 42%;min-width:130px}.orders-filter-reset{flex:1 1 100%}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.orders-search{width:100%}.kot-target-picker-card{grid-template-columns:1fr;align-items:start}.kot-target-picker-card .table-action-btn{justify-self:start}.kot-target-chips{grid-column:1}}
+@media(max-width:700px){.orders-page{width:calc(100% + 16px)}}
 
 /* Keep module pages focused. The Dashboard keeps its own Create New Order action. */
 .header .header-actions { margin-left: auto; }
@@ -2646,3 +2647,98 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
   #billModal.bill-preview-clean .bill-items { padding-inline: 18px; }
   #billModal.bill-preview-clean .bill-summary { margin-inline: 18px; }
 }
+
+/* Electron-only window chrome. The class is added only when the preload bridge exists. */
+.desktop-titlebar[hidden]{display:none}
+.desktop-titlebar{position:fixed;inset:0 0 auto;height:38px;z-index:100000;display:flex;align-items:center;justify-content:space-between;background:#172231;color:#f7f9fc;font:13px "Segoe UI",Arial,sans-serif;user-select:none;-webkit-app-region:drag}
+.desktop-titlebar-brand{height:100%;display:flex;align-items:center;gap:9px;padding:0 13px;font-weight:650;letter-spacing:.01em}
+.desktop-titlebar-mark{display:block;width:21px;height:21px;border-radius:5px;object-fit:cover;font-size:17px;line-height:1}
+.desktop-titlebar-controls{height:100%;display:flex;align-items:stretch;-webkit-app-region:no-drag}
+.desktop-titlebar-button{width:44px;height:100%;display:grid;place-items:center;padding:0;border:0;border-radius:0;background:transparent;color:#e7edf5;cursor:pointer;-webkit-app-region:no-drag}
+.desktop-titlebar-button:hover{background:#344255}
+.desktop-titlebar-button svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.35;stroke-linecap:round;stroke-linejoin:round}
+.desktop-titlebar-button.desktop-settings-button{width:42px;color:#c9d3df}
+.desktop-titlebar-button.desktop-settings-button svg{width:16px;height:16px;stroke-width:1.2}
+.desktop-titlebar-button.desktop-close-button:hover{background:#d9363e;color:#fff}
+body.desktop-mode #loginScreen{top:38px;bottom:0;min-height:calc(100vh - 38px);max-height:calc(100vh - 38px)}
+body.desktop-mode .sidebar{top:38px!important}
+body.desktop-mode .main{padding-top:122px;min-height:calc(100vh - 38px)}
+body.desktop-mode:has(#new-order.active-page){overflow:hidden}
+body.desktop-mode:has(#new-order.active-page) .main{height:calc(100vh - 38px);padding-top:94px}
+body.desktop-mode:has(#new-order.active-page) .main>.page.billing-page.active-page{height:calc(100vh - 132px)}
+body.desktop-mode:has(#new-order.active-page) .app-module-nav{top:38px}
+body.desktop-mode:not(:has(#new-order.active-page)) .app-module-nav{top:38px}
+body.desktop-mode:has(#table-view.active-page){overflow:hidden}
+body.desktop-mode:has(#table-view.active-page) .main{height:calc(100vh - 38px);padding-top:94px}
+body.desktop-mode:has(#table-view.active-page) .main>.billing-table-view-page.active-page{height:calc(100vh - 132px)}
+
+.desktop-bluetooth-picker[hidden]{display:none!important}
+.desktop-bluetooth-picker{position:fixed;inset:38px 0 0;z-index:99999;display:grid;place-items:center;padding:20px;background:rgba(16,24,39,.46)}
+.desktop-bluetooth-dialog{display:flex;flex-direction:column;width:min(480px,100%);max-height:calc(100% - 24px);padding:24px;border:1px solid #e4e9e5;border-radius:18px;background:#fff;box-shadow:0 24px 70px rgba(15,23,42,.24);color:#26352e}
+.desktop-bluetooth-heading{display:flex;align-items:center;gap:13px}
+.desktop-bluetooth-icon{display:grid;flex:0 0 46px;width:46px;height:46px;place-items:center;border-radius:14px;background:#edf5f0;color:#245b4b;font-size:26px;font-weight:700}
+.desktop-bluetooth-eyebrow{margin:0 0 4px;color:#718078;font-size:10px;font-weight:800;letter-spacing:.12em}
+.desktop-bluetooth-heading h2{margin:0;color:#20352c;font-size:20px;line-height:1.25}
+.desktop-bluetooth-status{margin:20px 0 10px;color:#59665e;font-size:13px}
+.desktop-bluetooth-device-list{display:grid;gap:8px;max-height:300px;overflow:auto}
+.desktop-bluetooth-empty{display:flex;align-items:center;gap:10px;min-height:72px;padding:14px;border:1px dashed #d9e1da;border-radius:11px;background:#f8faf8;color:#6b766f;font-size:13px;line-height:1.45}
+.desktop-bluetooth-device{display:flex;align-items:center;gap:12px;width:100%;min-height:58px;padding:10px 12px;border:1px solid #e1e8e2;border-radius:11px;background:#fff;color:#26352e;text-align:left;cursor:pointer;transition:border-color .15s,background .15s,transform .15s}
+.desktop-bluetooth-device:hover,.desktop-bluetooth-device:focus-visible{border-color:#86ad98;background:#f4f9f5;outline:none}
+.desktop-bluetooth-device:active{transform:scale(.99)}
+.desktop-bluetooth-device-mark{display:grid;flex:0 0 34px;width:34px;height:34px;place-items:center;border-radius:10px;background:#edf5f0;color:#245b4b;font-size:18px}
+.desktop-bluetooth-device-copy{display:grid;gap:3px;min-width:0}
+.desktop-bluetooth-device-copy strong{overflow:hidden;color:#26352e;font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.desktop-bluetooth-device-copy small{color:#78847e;font-size:11px}
+.desktop-bluetooth-help{margin:12px 0 0;color:#78847e;font-size:12px;line-height:1.5}
+.desktop-bluetooth-actions{display:flex;justify-content:flex-end;margin-top:18px;padding-top:14px;border-top:1px solid #edf0ed}
+.desktop-bluetooth-actions button{min-width:90px;min-height:38px;border-radius:9px}
+.restaurant-menu-qr-panel{display:grid;grid-template-columns:180px minmax(0,1fr);gap:22px;align-items:center;margin-top:14px;padding:18px;background:linear-gradient(135deg,#f4faf7,#f7f9fb);border:1px solid #dfeae5;border-radius:16px}.restaurant-menu-qr-preview{display:grid;place-items:center;width:180px;height:180px;padding:10px;background:#fff;border:1px solid #e3e9e6;border-radius:14px;box-shadow:0 8px 22px rgba(25,52,44,.07)}.restaurant-menu-qr-preview img{display:block;width:100%;height:100%;object-fit:contain}.restaurant-menu-qr-placeholder{display:flex;flex-direction:column;align-items:center;gap:6px;color:#87928e}.restaurant-menu-qr-placeholder span{font-size:64px;line-height:1}.restaurant-menu-qr-placeholder small{font-size:11px}.restaurant-menu-qr-copy h4{margin:6px 0;font-size:18px}.restaurant-menu-qr-copy>p{margin:0 0 14px;color:#66716d;font-size:13px}.restaurant-menu-qr-actions{display:flex;gap:9px;flex-wrap:wrap}.restaurant-menu-qr-status{margin-top:10px;color:#65716d;font-size:12px;line-height:1.45}.restaurant-menu-qr-actions button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:620px){.restaurant-menu-qr-panel{grid-template-columns:1fr}.restaurant-menu-qr-preview{margin:0 auto;width:170px;height:170px}.restaurant-menu-qr-copy{text-align:center}.restaurant-menu-qr-actions{justify-content:center}}
+
+
+/* Paid Marketing workspace: guest messages and Loyalty share one place. */
+.marketing-push-section{display:grid;gap:14px;margin:22px 0;padding:20px;border:1px solid #e5e9ed;border-radius:16px;background:#fff;box-shadow:0 7px 24px rgba(23,40,52,.04)}
+.marketing-push-heading{display:flex;align-items:center;justify-content:space-between;gap:16px}.marketing-push-heading h3{margin:4px 0;font-size:19px}.marketing-push-heading p,.marketing-push-note{margin:0;color:#77828a;font-size:12px;line-height:1.5}
+.marketing-push-status{padding:10px 12px;border:1px solid #e4e9ed;border-radius:10px;background:#f8fafb;color:#59666e;font-size:12px}.marketing-push-campaigns{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px}
+.marketing-push-card{display:grid;gap:8px;padding:13px;border:1px solid #e7ebee;border-radius:11px;background:#fff}.marketing-push-card-top{display:flex;justify-content:space-between;gap:8px;color:#7d8990;font-size:10px}.marketing-push-card h4{margin:0;color:#2c3940;font-size:14px}.marketing-push-card p{margin:0;color:#69767d;font-size:12px;line-height:1.5}.marketing-push-card small{color:#879198;font-size:10px}
+ .marketing-push-modal{width:min(580px,calc(100% - 32px))}.marketing-push-modal textarea{width:100%;padding:10px;border:1px solid #dce2e7;border-radius:8px;font:inherit;resize:vertical}.marketing-loyalty-divider{display:flex;flex-direction:column;align-items:flex-start;margin:28px 0 14px;padding:20px;border-radius:16px;background:linear-gradient(125deg,#f5f8f6,#eef5f2)}.marketing-loyalty-divider span{color:#4e8878;font-size:10px;font-weight:900;letter-spacing:.14em}.marketing-loyalty-divider h3{margin:5px 0;color:#263a36;font-size:22px}.marketing-loyalty-divider p{margin:0;color:#71817d;font-size:12px}.marketing-loyalty-section{display:grid;gap:12px}.marketing-loyalty-section .page-header{display:none}.marketing-loyalty-section[hidden]{display:none!important}
+@media(max-width:650px){.marketing-push-heading{align-items:flex-start;flex-direction:column}}
+
+
+/* Orders has a wider workspace; keep the global profile shortcut out of this screen. */
+body:has(#orders.active-page) .profile-widget{display:none!important}
+body:has(#orders.active-page) .orders-page{width:min(1900px,100%);margin:0 auto;max-width:none}
+.orders-detail-panel .table-container{overflow-x:hidden}
+.orders-detail-panel table{width:100%;table-layout:fixed}
+.orders-detail-panel th:nth-child(1),.orders-detail-panel td:nth-child(1){width:46%}
+.orders-detail-panel th:nth-child(2),.orders-detail-panel td:nth-child(2){width:12%}
+.orders-detail-panel th:nth-child(3),.orders-detail-panel td:nth-child(3),.orders-detail-panel th:nth-child(4),.orders-detail-panel td:nth-child(4){width:21%}
+.orders-detail-panel td{overflow-wrap:anywhere;white-space:normal}
+@media(max-width:700px){.orders-page,body:has(#orders.active-page) .orders-page{width:100%;margin:0}}
+
+
+/* Marketing quick cards */
+.marketing-feature-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:0 0 18px}
+.marketing-feature-card{display:grid;grid-template-columns:46px minmax(0,1fr) auto;align-items:center;gap:14px;width:100%;min-width:0;padding:17px;border:1px solid #e2e9e6;border-radius:16px;background:linear-gradient(135deg,#fff,#f7faf8);box-shadow:0 8px 22px rgba(23,40,52,.045);color:inherit;font:inherit;text-align:left;cursor:pointer;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
+.marketing-feature-card:hover,.marketing-feature-card:focus-visible{transform:translateY(-2px);box-shadow:0 12px 26px rgba(23,40,52,.09);outline:none}
+.marketing-feature-card:focus-visible{box-shadow:0 0 0 3px rgba(83,125,107,.2),0 12px 26px rgba(23,40,52,.09)}
+.marketing-promo-feature{border-color:#e8e1f6;background:linear-gradient(135deg,#fff,#faf8ff)}
+.marketing-loyalty-feature{border-color:#dcebe4;background:linear-gradient(135deg,#fff,#f3faf6)}
+.marketing-feature-card.is-active{border-color:#8ba99c;box-shadow:0 0 0 2px rgba(91,143,119,.12),0 10px 24px rgba(23,40,52,.07)}
+.marketing-feature-icon{display:grid;width:44px;height:44px;place-items:center;border-radius:14px;background:#eee9ff;color:#7157ba;font-size:22px;font-weight:900}
+.marketing-loyalty-feature .marketing-feature-icon{background:#e3f3e9;color:#318160}
+.marketing-feature-copy{display:grid;min-width:0;gap:3px}.marketing-feature-copy .eyebrow{color:#79858b;font-size:9px;letter-spacing:.14em}.marketing-feature-copy strong{color:#26343d;font-size:16px}.marketing-feature-copy>span:last-child{color:#748087;font-size:11px;line-height:1.45}
+.marketing-feature-action{display:inline-flex;align-items:center;gap:7px;min-height:36px;padding:8px 12px;border:1px solid #dbe3e0;border-radius:9px;background:#fff;color:#364a44;font-size:11px;font-weight:750;white-space:nowrap}
+.marketing-feature-action>span{font-size:15px;line-height:1}
+.marketing-feature-card:hover .marketing-feature-action,.marketing-feature-card.is-active .marketing-feature-action{border-color:#7eab99;background:#f4faf6}
+.marketing-section-prompt{margin:0 0 18px;padding:18px;border:1px dashed #dce5e1;border-radius:14px;background:#fbfcfb;color:#718078;font-size:13px;text-align:center}
+.marketing-promotions-panel{display:grid;gap:8px;scroll-margin-top:22px}
+.marketing-promotions-panel .marketing-overview-grid{margin-bottom:14px}
+.marketing-loyalty-section{scroll-margin-top:22px}
+.marketing-loyalty-section[hidden]{display:none!important}
+#marketingLoyaltyFeatureCard[hidden]{display:none!important}
+.restaurant-menu-host-controls{display:grid;grid-template-columns:auto minmax(220px,1fr) auto;align-items:center;gap:10px;margin-top:12px}
+.restaurant-menu-host-controls label{color:#697586;font-size:12px;font-weight:700}
+.restaurant-menu-host-controls input{min-width:0;min-height:40px;padding:9px 12px;border:1px solid #d8e0e8;border-radius:10px;background:#fff;color:#263244}
+.restaurant-menu-host-controls input:focus{outline:3px solid rgba(69,132,108,.16);border-color:#4c8a70}
+@media(max-width:760px){.marketing-feature-grid{grid-template-columns:1fr}.marketing-feature-card{grid-template-columns:44px minmax(0,1fr)}.marketing-feature-action{grid-column:2;justify-self:start}.marketing-feature-card{row-gap:10px}}
+@media(max-width:650px){.restaurant-menu-host-controls{grid-template-columns:1fr}.restaurant-menu-host-controls input,.restaurant-menu-host-controls button{width:100%}}

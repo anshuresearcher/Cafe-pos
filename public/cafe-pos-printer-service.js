@@ -30,8 +30,10 @@ function runPowerShell(script) {
   return new Promise((resolve, reject) => {
     // Send one encoded script so trailing data cannot be parsed as extra
     // PowerShell commands by Windows PowerShell.
-    const encodedScript = Buffer.from(script, 'utf16le').toString('base64');
+    const quietScript = "$ProgressPreference = 'SilentlyContinue'\r\n" + script;
+    const encodedScript = Buffer.from(quietScript, 'utf16le').toString('base64');
     execFile('powershell.exe', [
+      '-NoLogo',
       '-NoProfile',
       '-NonInteractive',
       '-ExecutionPolicy', 'Bypass',
@@ -40,9 +42,17 @@ function runPowerShell(script) {
       if (error) {
         const details = `${stderr || ''}\n${error.message || ''}`;
         const winError = details.match(/(?:Windows error|failed):\s*(\d+)/i)?.[1];
+        const diagnostic = String(stderr || '')
+          .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
+          .replace(/#< CLIXML[\s\S]*?<\/Objs>/gi, ' ')
+          .replace(/#< CLIXML[\s\S]*$/gi, ' ')
+          .split(/\r?\n/).map(line => line.trim())
+          .filter(line => line && !line.startsWith('At ') && !line.startsWith('+'))
+          .slice(-2).join(' ').slice(0, 300);
         if (winError === '1801') return reject(new Error('Windows could not find that printer (error 1801). Refresh the printer list, select the installed printer again, then retry.'));
         if (winError === '5') return reject(new Error('Windows denied access to this printer. Check that your Windows account can print to it.'));
-        return reject(new Error('Windows could not send the print job. Check that the selected printer is installed and online, then retry.'));
+        if (!diagnostic && /Preparing modules for first use/i.test(stderr || '')) return reject(new Error('Windows printer support is initializing. Close and reopen the printer helper, then try printing again.'));
+        return reject(new Error(diagnostic || 'Windows could not send the print job. Check that the selected printer is installed and online, then retry.'));
       }
       resolve(stdout.trim());
     });
@@ -143,6 +153,7 @@ public class CafePosDriverPrinter {
         if (!document.PrinterSettings.IsValid) throw new Exception("Windows could not find that printer (error 1801).");
         document.DocumentName = "Cafe POS Print Job";
         document.DefaultPageSettings.Margins = new Margins(35, 35, 35, 35);
+        document.PrintController = new StandardPrintController();
         Font font = new Font("Consolas", 10);
         string[] lines = data.Replace("\\r", "").Split('\\n');
         int index = 0;
