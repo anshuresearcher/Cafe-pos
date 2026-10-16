@@ -195,15 +195,15 @@ async function ensureSessionTable() {
     await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS business_id INTEGER`);
     await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS device_id VARCHAR(128)`);
 
+    await pool.query(`DELETE FROM app_sessions older USING app_sessions newer WHERE older.user_id=newer.user_id AND (older.created_at<newer.created_at OR (older.created_at=newer.created_at AND older.token<newer.token))`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_sessions_one_per_user ON app_sessions(user_id)`);
+
     await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_app_sessions_expires_at
         ON app_sessions(expires_at)
     `);
 
-    await pool.query(`
-        CREATE INDEX IF NOT EXISTS idx_app_sessions_user_id
-        ON app_sessions(user_id)
-    `);
+    await pool.query(`DROP INDEX IF EXISTS idx_app_sessions_user_id`);
 
     await pool.query(`
         CREATE INDEX IF NOT EXISTS idx_app_sessions_device_id
@@ -366,6 +366,7 @@ async function createSession(user, device) {
         `
         INSERT INTO app_sessions (token, user_id, business_id, device_id, expires_at)
         VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (user_id) DO UPDATE SET token=EXCLUDED.token, business_id=EXCLUDED.business_id, device_id=EXCLUDED.device_id, expires_at=EXCLUDED.expires_at, created_at=CURRENT_TIMESTAMP
         `,
         [token, user.id, businessId, deviceId, expiresAt]
     );
@@ -592,7 +593,9 @@ async function assertActiveDeviceAndLicense(deviceId, expectedBusinessId = null)
     if (starts > now) throw Object.assign(new Error("Business license has not started yet"), { code: "LICENSE_NOT_STARTED" });
     if (expires < now) throw Object.assign(new Error("Business license has expired"), { code: "LICENSE_EXPIRED" });
 
-    await runSystemContext(() => pool.query(`UPDATE registered_devices SET last_seen_at=CURRENT_TIMESTAMP WHERE id=$1`, [device.id]));
+    if (!device.last_seen_at || Date.now() - new Date(device.last_seen_at).getTime() > 60000) {
+        await runSystemContext(() => pool.query(`UPDATE registered_devices SET last_seen_at=CURRENT_TIMESTAMP WHERE id=$1`, [device.id]));
+    }
     delete device.license_data;
     return { device, license };
 }
@@ -653,64 +656,100 @@ function permissionForRequest(req) {
 
 async function requireAuth(req, res, next) {
     try {
-        // These endpoints implement their own authentication layers and are intentionally public to the normal API gate.
         if (req.path === "/public/device/register" || req.path.startsWith("/support/")) return next();
+        const authHeader = String(req.headers.authorization || "");
+        const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : (getCookie(req, "cafe_session") || "");
+        if (!token) return res.status(401).json({ error: "Authentication required" });
 
-        const session = await getSessionUser(req);
-        if (!session) return res.status(401).json({ error: "Authentication required" });
-
-        const user = await loadSessionUser(session);
-        if (!user) return res.status(401).json({ error: "Session is invalid or user is inactive" });
-
-        if (!user.business_id || user.business_active === false) {
-            return res.status(403).json({ error: "Business account is inactive or not assigned" });
+        // Resolve authentication context in one indexed query instead of three serial lookups.
+        const result = await runSystemContext(() => pool.query(`
+            WITH device_activity AS (
+                UPDATE registered_devices
+                SET last_seen_at=CURRENT_TIMESTAMP
+                WHERE device_id=(SELECT device_id FROM app_sessions WHERE token=$1 AND expires_at>CURRENT_TIMESTAMP LIMIT 1)
+                  AND (last_seen_at IS NULL OR last_seen_at < CURRENT_TIMESTAMP - INTERVAL '1 minute')
+                RETURNING id
+            )
+            SELECT s.token, s.user_id, s.business_id, s.device_id, s.expires_at,
+                   u.id, u.display_name, u.username, u.profile_id, u.business_id AS user_business_id,
+                   u.active, u.permissions_override,
+                   b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
+                   b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
+                   b.logo_url, b.currency, b.active AS business_active,
+                   p.name AS profile_name, COALESCE(u.permissions_override, p.permissions, '{}'::jsonb) AS permissions,
+                   row_to_json(d) AS device_data, row_to_json(l) AS license_data
+            FROM app_sessions s
+            JOIN app_users u ON u.id=s.user_id AND u.business_id=s.business_id
+            LEFT JOIN businesses b ON b.id=u.business_id
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+            LEFT JOIN registered_devices d ON d.device_id=s.device_id
+            LEFT JOIN business_licenses l ON l.id=d.license_id
+            CROSS JOIN (SELECT COUNT(*) FROM device_activity) activity_touch
+            WHERE s.token=$1
+            LIMIT 1
+        `, [token]));
+        const row = result.rows[0];
+        if (!row || new Date(row.expires_at).getTime() < Date.now()) {
+            if (row) await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token=$1", [token]));
+            return res.status(401).json({ error: "Authentication required" });
         }
+        const user = {
+            id: row.id, display_name: row.display_name, username: row.username, profile_id: row.profile_id,
+            business_id: row.user_business_id, active: row.active, permissions_override: row.permissions_override,
+            business_name: row.business_name, business_type: row.business_type, owner_name: row.owner_name,
+            business_phone: row.business_phone, business_email: row.business_email, business_address: row.business_address,
+            city: row.city, state: row.state, gstin: row.gstin, logo_url: row.logo_url, currency: row.currency,
+            business_active: row.business_active, profile_name: row.profile_name, permissions: row.permissions
+        };
+        if (!user.active) return res.status(401).json({ error: "Session is invalid or user is inactive" });
+        if (!user.business_id || user.business_active === false) return res.status(403).json({ error: "Business account is inactive or not assigned" });
 
-        let deviceLicense;
-        try {
-            deviceLicense = await assertActiveDeviceAndLicense(session.deviceId, user.business_id);
-        } catch (e) {
+        const device = row.device_data;
+        const license = row.license_data;
+        let invalid = null;
+        if (!device) invalid = { code: "DEVICE_NOT_REGISTERED", message: "Device is not registered" };
+        else if (device.status !== "active") invalid = { code: "DEVICE_REVOKED", message: "Device registration has been revoked" };
+        else if (Number(device.business_id) !== Number(user.business_id)) invalid = { code: "DEVICE_BUSINESS_MISMATCH", message: "Device is registered to a different business" };
+        else if (!license) invalid = { code: "LICENSE_MISSING", message: "No license is assigned to this business" };
+        if (!invalid && license.status === "active" && new Date(license.expires_at).getTime() < Date.now()) {
+            await runSystemContext(() => pool.query("UPDATE business_licenses SET status='expired', updated_at=CURRENT_TIMESTAMP WHERE id=$1", [license.id]));
+            license.status = "expired";
+        }
+        if (!invalid && license.status !== "active") invalid = { code: "LICENSE_INACTIVE", message: "Business license is " + license.status };
+        if (!invalid && new Date(license.starts_at).getTime() > Date.now()) invalid = { code: "LICENSE_NOT_STARTED", message: "Business license has not started yet" };
+        if (!invalid && new Date(license.expires_at).getTime() < Date.now()) invalid = { code: "LICENSE_EXPIRED", message: "Business license has expired" };
+        if (invalid) {
             const map = {
                 DEVICE_NOT_REGISTERED: [403, "This device is not registered. Enter a valid registration key first."],
                 DEVICE_REVOKED: [403, "This device registration has been revoked."],
                 DEVICE_BUSINESS_MISMATCH: [403, "This device belongs to a different business."],
                 LICENSE_MISSING: [403, "No license is assigned to this business."],
-                LICENSE_INACTIVE: [403, `Business license is ${e.message.replace("Business license is ", "")}.`],
+                LICENSE_INACTIVE: [403, "Business license is " + (license?.status || "inactive") + "."],
                 LICENSE_NOT_STARTED: [403, "Business license has not started yet."],
                 LICENSE_EXPIRED: [403, "Business license has expired. Please contact support."]
             };
-            const [status, message] = map[e.code] || [403, e.message || "Device or license validation failed"];
-            return res.status(status).json({ error: message, code: e.code || "AUTH_VALIDATION_FAILED" });
+            const [status, message] = map[invalid.code] || [403, invalid.message];
+            return res.status(status).json({ error: message, code: invalid.code });
         }
-
         req.user = user;
-        req.sessionToken = session.token;
-        req.device = deviceLicense.device;
-        req.license = deviceLicense.license;
-
+        req.sessionToken = row.token;
+        req.device = device;
+        req.license = license;
         const restrictedAddon = req.path.startsWith("/marketing") || req.path.startsWith("/loyalty")
             ? "Marketing"
             : (req.path === "/menu/public-settings" || req.path.startsWith("/menu/public-settings/") || /^\/menu\/\d+\/qr-stock$/.test(req.path)
                 ? "Table QR" : null);
         if (restrictedAddon && !licenseHasAddon(req.license, restrictedAddon)) {
-            return res.status(403).json({ error: `${restrictedAddon} is a paid add-on that is not active for this business`, code: "LICENSE_ADDON_REQUIRED", addon: restrictedAddon });
+            return res.status(403).json({ error: restrictedAddon + " is a paid add-on that is not active for this business", code: "LICENSE_ADDON_REQUIRED", addon: restrictedAddon });
         }
-
         return tenantContext.run({ businessId: Number(user.business_id) }, () => {
             const required = permissionForRequest(req);
             if (!required) return next();
-
-            const permissions = user.permissions && typeof user.permissions === "object"
-                ? user.permissions
-                : {};
-
-            const hasRequestedPermission = permissions[required] === true || (
-                required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true)
-            );
+            const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
+            const hasRequestedPermission = permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
             if ((user.profile_name !== "Admin" || user.permissions_override !== null) && !hasRequestedPermission) {
-                return res.status(403).json({ error: `Permission denied: ${required}` });
+                return res.status(403).json({ error: "Permission denied: " + required });
             }
-
             return next();
         });
     } catch (e) {
@@ -718,7 +757,6 @@ async function requireAuth(req, res, next) {
         res.status(500).json({ error: "Authentication service error" });
     }
 }
-
 // =====================================================
 // INVOICE DATABASE SETUP
 // =====================================================
@@ -871,6 +909,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_printed_at TIMESTAMP`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS non_chargeable_reason VARCHAR(120)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS order_activity (
         id SERIAL PRIMARY KEY,
         order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -1218,6 +1257,16 @@ app.post("/api/auth/login", async (req,res)=>{
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
 });
 
+app.get("/api/auth/heartbeat", async (req, res) => {
+    try {
+        const session = await getSessionUser(req);
+        if (!session) return res.status(401).json({ error: "Session is no longer active" });
+        return res.json({ active: true, expiresAt: session.expiresAt });
+    } catch (error) {
+        console.error("Session heartbeat error:", error);
+        return res.status(500).json({ error: "Could not verify session" });
+    }
+});
 app.get("/api/auth/me",async(req,res)=>{
     try{
         const session = await getSessionUser(req);
@@ -1327,6 +1376,31 @@ app.post("/public-menu/:token/push-subscriptions", async (req, res) => {
         res.status(500).json({ error: "Could not save notification preference" });
     }
 });
+function publicOnlinePromotions(settings, adjustmentRows = []) {
+    const today = new Date().toISOString().slice(0, 10);
+    const marketing = (Array.isArray(settings?.marketingDeals) ? settings.marketingDeals : []).filter(deal => {
+        const channels = Array.isArray(deal.channels) ? deal.channels.map(value => String(value).toLowerCase().replace(/[\s-]+/g, "_")) : [];
+        return deal?.active !== false && String(deal.type || "").toLowerCase() === "discount" &&
+            (!channels.length || channels.includes("online")) && (!deal.startDate || String(deal.startDate) <= today) && (!deal.endDate || String(deal.endDate) >= today) &&
+            Number.isFinite(Number(deal.value)) && Number(deal.value) > 0;
+    }).map(deal => ({
+        id: `marketing:${String(deal.id)}`, source: "marketing", sourceId: String(deal.id), name: String(deal.name || "Online offer").slice(0, 120),
+        description: String(deal.description || "").slice(0, 240), type: "discount", valueType: String(deal.valueType || "amount"), value: Number(deal.value),
+        category: String(deal.category || ""), itemId: deal.itemId || null, itemIds: Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : []
+    }));
+    const adjustments = adjustmentRows.filter(rule => {
+        const kind = String(rule.kind || rule.type || "discount").toLowerCase();
+        const applies = String(rule.applies_to || "all").toLowerCase().replace(/-/g, "_");
+        return rule.active !== false && kind === "discount" && ["all", "online"].includes(applies) && Number(rule.value) > 0;
+    }).map(rule => ({
+        id: `adjustment:${Number(rule.id)}`, source: "adjustment", sourceId: String(rule.id), name: String(rule.name || "Online discount").slice(0, 120),
+        description: String(rule.description || "").slice(0, 240), type: "discount",
+        valueType: ["percent", "percentage"].includes(String(rule.calculation || rule.value_type || "").toLowerCase()) ? "percent" : "amount",
+        value: Number(rule.value), category: "", itemId: null, itemIds: []
+    }));
+    return [...marketing, ...adjustments];
+}
+
 app.get("/public-menu/:token", async (req, res) => {
     const token = String(req.params.token || "");
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
@@ -1341,13 +1415,14 @@ app.get("/public-menu/:token", async (req, res) => {
         const priceChannel = ["dine_in", "takeaway", "delivery", "online"].includes(publication.price_channel)
             ? publication.price_channel : "online";
         const data = await tenantContext.run({ businessId }, async () => {
-            const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult] = await Promise.all([
+            const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult, adjustmentResult] = await Promise.all([
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
                 pool.query("SELECT id, name, category, price, channel_prices, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
                 pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
-                pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId])
+                pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId]),
+                pool.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
             ]);
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
@@ -1391,6 +1466,8 @@ app.get("/public-menu/:token", async (req, res) => {
                 logoUrl: String(settings.logoUrl || business.logo_url || ""),
                 currency: String(settings.currency || business.currency || "₹"),
                 priceChannel,
+                gstCalculationEnabled: settings.gstCalculationEnabled !== false,
+                onlinePromotions: publicOnlinePromotions(settings, adjustmentResult.rows),
                 categories: categoryResult.rows.map(row => row.name),
                 items,
                 tables: tableResult.rows.map(row => String(row.table_number))
@@ -1436,6 +1513,14 @@ app.post("/public-menu/:token/orders", async (req, res) => {
             try {
                 await applyTenantDbContext(client);
                 await client.query("BEGIN");
+                const [businessSettingsResult, adjustmentRowsResult] = await Promise.all([
+                    client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
+                    client.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
+                ]);
+                const businessSettings = businessSettingsResult.rows[0]?.settings || {};
+                const promotions = publicOnlinePromotions(businessSettings, adjustmentRowsResult.rows);
+                const selectedPromotion = req.body?.promotionId ? promotions.find(item => item.id === String(req.body.promotionId)) : null;
+                if (req.body?.promotionId && !selectedPromotion) throw Object.assign(new Error("That online offer is no longer available. Refresh the menu and try again."), { status: 409 });
                 const tableResult = await client.query(
                     "SELECT table_number FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 FOR UPDATE",
                     [businessId, tableNumber]
@@ -1497,29 +1582,34 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                         lineTotal: finalPrice * line.quantity,
                         options: normalizedOptions.options,
                         unit: variant?.unit || item.unit || "ea",
-                        taxRate: Math.max(0, Number(item.tax_rate || 0)),
+                        category: String(item.category || "Menu"),
+                        taxRate: businessSettings.gstCalculationEnabled === false ? 0 : Math.max(0, Number(item.tax_rate || 0)),
                         taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive"
                     });
                 }
-                const subtotal = orderLines.reduce((sum, line) => {
-                    const gross = line.price * line.quantity;
-                    return sum + (line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross);
-                }, 0);
-                const gst = orderLines.reduce((sum, line) => {
-                    const gross = line.price * line.quantity;
-                    const net = line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross;
-                    return sum + net * line.taxRate / 100;
-                }, 0);
-                const total = orderLines.reduce((sum, line) => {
-                    const gross = line.price * line.quantity;
-                    const net = line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross;
-                    return sum + net + net * line.taxRate / 100;
-                }, 0);
+                const lineNets = orderLines.map(line => { const gross = line.price * line.quantity; return line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross; });
+                const subtotal = lineNets.reduce((sum, value) => sum + value, 0);
+                const eligibleIndexes = orderLines.map((line, index) => {
+                    if (!selectedPromotion) return index;
+                    if (selectedPromotion.source !== "marketing") return index;
+                    const ids = selectedPromotion.itemIds || [];
+                    if (ids.length) return ids.includes(String(line.menuId)) ? index : -1;
+                    if (selectedPromotion.itemId && String(selectedPromotion.itemId) !== String(line.menuId)) return -1;
+                    if (selectedPromotion.category && String(selectedPromotion.category).toLowerCase() !== String(line.category || "").toLowerCase()) return -1;
+                    return index;
+                }).filter(index => index >= 0);
+                const discountBase = eligibleIndexes.reduce((sum, index) => sum + lineNets[index], 0);
+                const discount = !selectedPromotion || discountBase <= 0 ? 0 : Math.min(discountBase, ["percent", "percentage"].includes(String(selectedPromotion.valueType).toLowerCase()) ? discountBase * Number(selectedPromotion.value || 0) / 100 : Number(selectedPromotion.value || 0));
+                const discounts = orderLines.map(() => 0);
+                let discountRemaining = discount;
+                eligibleIndexes.forEach((index, position) => { const amount = position === eligibleIndexes.length - 1 ? discountRemaining : discount * lineNets[index] / discountBase; discounts[index] = Math.min(lineNets[index], amount); discountRemaining = Math.max(0, discountRemaining - discounts[index]); });
+                const gst = orderLines.reduce((sum, line, index) => sum + Math.max(0, lineNets[index] - discounts[index]) * line.taxRate / 100, 0);
+                const total = orderLines.reduce((sum, line, index) => { const net = Math.max(0, lineNets[index] - discounts[index]); return sum + net + net * line.taxRate / 100; }, 0);
                 const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
                 const note = String(req.body?.notes || "").trim().slice(0, 300);
                 const orderResult = await client.query(
-                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8) RETURNING id,order_number,table_number,total,status",
-                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken]
+                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13) RETURNING id,order_number,table_number,total,status",
+                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, discount, selectedPromotion?.source === "marketing" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "marketing" ? selectedPromotion.name : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.name : null]
                 );
                 const order = orderResult.rows[0];
                 const itemValues = [];
@@ -1908,13 +1998,15 @@ function cleanVariants(value) {
     })).filter(v => v.name && Number.isFinite(v.price) && v.price >= 0);
 }
 
-function cleanMenuImage(value) {
+function cleanMenuImage(value, existingValue = null) {
     if (value === null || value === undefined || value === "") return null;
     const image = String(value);
     if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
         throw Object.assign(new Error("Choose a JPG, PNG or WebP image."), { status: 400 });
     }
-    if (image.length > 2_100_000) throw Object.assign(new Error("The processed menu image is too large. Choose a smaller image."), { status: 413 });
+    if (image !== existingValue && Buffer.from(image.slice(image.indexOf(",") + 1), "base64").length > 200 * 1024) {
+        throw Object.assign(new Error("Menu item images must be 200 KB or smaller after compression."), { status: 413 });
+    }
     return image;
 }
 
@@ -2162,7 +2254,9 @@ app.put(
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
-            const imageUrl = cleanMenuImage(req.body.imageUrl);
+            const currentImage = await client.query("SELECT image_url FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
+            if (!currentImage.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Menu item not found" }); }
+            const imageUrl = cleanMenuImage(req.body.imageUrl, currentImage.rows[0].image_url);
             const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
@@ -2539,9 +2633,7 @@ app.post(
 
         const b = req.body;
 
-        const orderNumber =
-            b.orderNumber ||
-            b.order_number;
+        let orderNumber = "";
 
         const orderType =
             b.orderType ||
@@ -2555,11 +2647,9 @@ app.post(
         const subtotal =
             Number(b.subtotal);
 
-        const gst =
-            Number(b.gst);
+        let gst = Number(b.gst);
 
-        const total =
-            Number(b.total);
+        let total = Number(b.total);
 
         const paymentMethod =
             b.paymentMethod ||
@@ -2573,14 +2663,11 @@ app.post(
         // Open = saved draft/open order, Pending = KOT workflow,
         // Completed = direct-sale workflow when KOT is disabled.
         const requestedStatus = String(b.initialStatus || b.status || "Pending").trim();
-        const orderStatus = ["Open", "Pending", "Completed"].includes(requestedStatus)
-            ? requestedStatus
-            : "Pending";
-        const createKot = b.createKot !== false && orderStatus !== "Open";
+        const orderStatus = requestedStatus === "Open" ? "Open" : "Pending";
+        const createKot = b.createKot !== false;
 
 
         if (
-            !orderNumber ||
             !orderType ||
             !Number.isFinite(subtotal) ||
             !Number.isFinite(gst) ||
@@ -2617,7 +2704,12 @@ app.post(
         try {
 
             await client.query("BEGIN");
-
+            const businessId = Number(req.user.business_id);
+            const settingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+            const businessSettings = settingsRow.rows[0]?.settings || {};
+            const orderPrefix = String(businessSettings.orderPrefix || "ORD-").slice(0, 24);
+            orderNumber = orderPrefix + Date.now().toString().slice(-8) + crypto.randomBytes(2).toString("hex").toUpperCase();
+            if (businessSettings.gstCalculationEnabled === false) { total = Math.max(0, total - (Number(gst) || 0)); gst = 0; }
 
             if (orderType === "Dine-in") {
 
@@ -2663,7 +2755,6 @@ app.post(
             }
 
 
-            const businessId = Number(req.user.business_id);
             const normalizedItems = items.map(item => {
                 const rawMenuId = item.menuId ?? item.menu_id ?? item.id ?? null;
                 const parsedMenuId = Number(rawMenuId);
@@ -2692,7 +2783,7 @@ app.post(
                 if (item.menuId && !menuMetadataById.has(item.menuId)) throw new Error("One of the menu items is no longer available for this business.");
                 const metadata = item.menuId ? menuMetadataById.get(item.menuId) : null;
                 item.unit = item.source.unit || metadata?.unit || null;
-                item.taxRate = Number(item.source.taxRate ?? item.source.tax_rate ?? metadata?.tax_rate ?? 5);
+                item.taxRate = businessSettings.gstCalculationEnabled === false ? 0 : Number(item.source.taxRate ?? item.source.tax_rate ?? metadata?.tax_rate ?? 5);
                 item.taxMode = item.source.taxMode === "inclusive" || item.source.tax_mode === "inclusive" || (!item.source.taxMode && !item.source.tax_mode && metadata?.tax_mode === "inclusive") ? "inclusive" : "exclusive";
                 item.category = String(metadata?.category || item.source.category || "");
                 const normalizedOptions = await normalizeOrderItemOptions(client, businessId, metadata, item.source.options, item.basePrice, item.price);
@@ -2922,7 +3013,7 @@ app.get(
             const result =
                 await pool.query(
                     `
-                    SELECT o.*,
+                    SELECT o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,
                            c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
                            c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
                            c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
@@ -3009,20 +3100,29 @@ app.post("/api/orders/:id/settle", async (req, res) => {
         if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: "Invalid order ID" });
         await client.query("BEGIN");
         const orderResult = await client.query(
-            `SELECT * FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE`,
+            `SELECT o.*,COALESCE(paid.collected,0) AS collected_before,COALESCE(config.settings,'{}'::jsonb) AS checkout_settings
+             FROM orders o
+             LEFT JOIN LATERAL (
+                 SELECT COALESCE(SUM(amount),0) AS collected FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success'
+             ) paid ON TRUE
+             LEFT JOIN LATERAL (SELECT settings FROM app_settings WHERE business_id=o.business_id LIMIT 1) config ON TRUE
+             WHERE o.id=$1 AND o.business_id=$2 FOR UPDATE OF o`,
             [orderId, businessId]
         );
         const order = orderResult.rows[0];
         if (!order) throw new Error("Order not found");
-
-        const collectedResult = await client.query(
-            `SELECT COALESCE(SUM(amount),0) AS collected FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'`,
-            [orderId, businessId]
-        );
-        const collectedBefore = Number(collectedResult.rows[0]?.collected || 0);
+        const collectedBefore = Number(order.collected_before || 0);
         const billTotal = Math.max(0, Number(order.total || 0));
         const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
         const nonChargeable = req.body?.nonChargeable === true;
+        const checkoutSettings = order.checkout_settings || {};
+        const allowedReasons = Array.isArray(checkoutSettings.nonChargeableReasons)
+            ? checkoutSettings.nonChargeableReasons.map(reason => String(reason || "").trim().slice(0, 100)).filter(Boolean).slice(0, 30)
+            : ["Complimentary", "Staff meal", "Customer recovery", "Promotion"];
+        const nonChargeableReason = String(req.body?.nonChargeableReason || "").trim().slice(0, 100);
+        if (nonChargeable && (!nonChargeableReason || !allowedReasons.includes(nonChargeableReason))) {
+            throw Object.assign(new Error(allowedReasons.length ? "Choose a valid non-chargeable reason." : "Add non-chargeable reasons in Settings before completing this bill."), { status: 400 });
+        }
         const keepOpen = req.body?.keepOpen === true && !nonChargeable;
         const methodLabel = String(req.body?.paymentMethod || "").trim().slice(0, 50) || (nonChargeable ? "Non-chargeable" : "Payment");
         const payments = nonChargeable ? [{ method: "Non-chargeable", amount: 0 }] : (Array.isArray(req.body?.payments) ? req.body.payments : []);
@@ -3059,13 +3159,13 @@ app.post("/api/orders/:id/settle", async (req, res) => {
 
         const nextStatus = keepOpen ? "Open" : "Completed";
         const orderUpdate = await client.query(`
-            UPDATE orders SET payment_method=$1,status=$2,updated_at=CURRENT_TIMESTAMP
-            WHERE id=$3 AND business_id=$4 RETURNING *
-        `, [methodLabel, nextStatus, orderId, businessId]);
+            UPDATE orders SET payment_method=$1,status=$2,non_chargeable_reason=$3,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$4 AND business_id=$5 RETURNING *
+        `, [methodLabel, nextStatus, nonChargeable ? nonChargeableReason : null, orderId, businessId]);
         const savedOrder = orderUpdate.rows[0];
         if (!keepOpen && req.body?.createKot === true) await createKOTForOrder(client,businessId,orderId);
         const paymentDescription = nonChargeable
-            ? "Non-chargeable sale recorded."
+            ? `Non-chargeable sale recorded · ${nonChargeableReason}.`
             : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
         await recordOrderActivity(client, orderId, "Payment recorded", paymentDescription, req);
         if (!keepOpen) await recordOrderActivity(client, orderId, "Order completed", "Sale completed.", req);
@@ -3090,7 +3190,8 @@ app.post("/api/orders/:id/settle", async (req, res) => {
             invoice = updatedInvoice.rows[0];
         } else {
             const sequence = Number((await client.query(`SELECT nextval('invoice_number_seq') AS number`)).rows[0].number);
-            const invoiceNumber = "INV-" + String(sequence).padStart(6, "0");
+            const invoiceSettings = (await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId])).rows[0]?.settings || {};
+            const invoiceNumber = String(invoiceSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequence).padStart(6, "0");
             const createdInvoice = await client.query(`
                 INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
                 VALUES($1,$2,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8) RETURNING *
@@ -3139,7 +3240,7 @@ app.get(
                 await pool.query(
                     `
                     SELECT
-                        o.*,
+                        o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,
                         c.name AS customer_name,
                         c.phone AS customer_phone,
                         c.email AS customer_email,
@@ -3202,6 +3303,7 @@ app.put(
                 marketingDealId,
                 marketingDealName,
                 notes,
+                createKot,
                 items
             } = req.body;
 
@@ -3239,6 +3341,10 @@ app.put(
             const canEditClosed = adminDefaults || permissions["orders.edit_closed"] === true;
             const canEditAfterPrint = adminDefaults || permissions["orders.edit_after_print"] === true;
             const canEditOpen = adminDefaults || permissions["orders.edit_open"] === true || permissions["orders.edit"] === true;
+            const orderSettingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
+            const orderSettings = orderSettingsRow.rows[0]?.settings || {};
+            const appliedGst = orderSettings.gstCalculationEnabled === false ? 0 : Number(gst);
+            const appliedTotal = orderSettings.gstCalculationEnabled === false ? Math.max(0, Number(total) - Number(gst)) : Number(total);
             if (existingOrder.status === "Cancelled") throw new Error("Cancelled orders cannot be edited.");
             if (existingOrder.status === "Completed") {
                 if (existingOrder.bill_printed_at ? !(canEditAfterPrint || canEditClosed) : !canEditClosed) {
@@ -3331,8 +3437,8 @@ app.put(
                     orderType,
                     tableNumber || null,
                     Number(subtotal),
-                    Number(gst),
-                    Number(total),
+                    appliedGst,
+                    appliedTotal,
                     paymentMethod || null,
                     customerId ? Number(customerId) : null,
                     Number(discount || 0),
@@ -3375,7 +3481,7 @@ app.put(
                     menuId: Number.isInteger(parsedMenuId) && parsedMenuId > 0 ? parsedMenuId : null,
                     variantId: Number(item.variantId ?? item.variant_id) || null,
                     unit: item.unit || "ea",
-                    taxRate: Number(item.taxRate ?? item.tax_rate ?? 5),
+                    taxRate: orderSettings.gstCalculationEnabled === false ? 0 : Number(item.taxRate ?? item.tax_rate ?? 5),
                     taxMode: item.taxMode === "inclusive" || item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
                     options: cleanOrderOptions(item.options),
                     basePrice: Number(item.basePrice ?? item.base_price ?? price),
@@ -3401,9 +3507,10 @@ app.put(
                 INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
                 VALUES ${itemRows.join(",")}
             `, itemValues);
+            if (createKot === true && existingOrder.status !== "Completed") await createKOTForOrder(client, Number(req.user.business_id), orderId);
 
             if (existingOrder.status === "Completed") {
-                await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [Number(subtotal), Number(gst), Number(total), orderId]);
+                await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [Number(subtotal), appliedGst, appliedTotal, orderId]);
             }
 
             /*
@@ -3420,7 +3527,7 @@ app.put(
                 );
             }
 
-            await recordOrderActivity(client, updatedOrder.id, existingOrder.status === "Completed" ? "Closed bill edited" : "Order updated", `Order details saved. New total: ${Number(total).toFixed(2)}.`, req);
+            await recordOrderActivity(client, updatedOrder.id, existingOrder.status === "Completed" ? "Closed bill edited" : "Order updated", `Order details saved. New total: ${appliedTotal.toFixed(2)}.`, req);
             if (marketingDealId && marketingDealName && Number(discount || 0) > 0) {
                 await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${Number(discount || 0).toFixed(2)}.`, req);
             }
@@ -3598,25 +3705,13 @@ app.put(
 
 
             if (!order) {
-
-                return res.status(404).json({
-                    error:
-                        "Order not found"
-                });
-
+                return res.status(404).json({ error: "Order not found" });
             }
-
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE orders
-                    SET status = 'Completed'
-                    WHERE id = $1 AND business_id = $2
-                    RETURNING *
-                    `,
-                    [req.params.id, Number(req.user.business_id)]
-                );
+            if (order.payment_method !== "Non-chargeable" || !String(order.non_chargeable_reason || "").trim()) {
+                const paidResult = await pool.query("SELECT COALESCE(SUM(amount),0) AS paid FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'", [Number(req.params.id), Number(req.user.business_id)]);
+                if (Number(paidResult.rows[0]?.paid || 0) + 0.01 < Number(order.total || 0)) return res.status(409).json({ error: "Record the full payment in Orders before closing this order." });
+            }
+            const result = await pool.query(`UPDATE orders SET status='Completed' WHERE id=$1 AND business_id=$2 RETURNING *`, [req.params.id, Number(req.user.business_id)]);
 
             await recordOrderActivity(pool, result.rows[0].id, "Order completed", "Order marked completed.", req);
 
@@ -3677,7 +3772,7 @@ app.get(
                     SELECT
                         i.*,
                         o.order_number,
-                        o.order_type,
+                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
                         o.table_number
                     FROM invoices i
 
@@ -3728,7 +3823,7 @@ app.get(
                         i.*,
 
                         o.order_number,
-                        o.order_type,
+                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
                         o.table_number,
 
                         o.created_at AS order_created_at,
@@ -3817,7 +3912,7 @@ app.get(
                         i.*,
 
                         o.order_number,
-                        o.order_type,
+                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
                         o.table_number,
 
                         o.created_at AS order_created_at
@@ -4058,20 +4153,9 @@ app.post(
                 );
 
 
-            const sequenceNumber =
-                Number(
-                    sequenceResult.rows[0].number
-                );
-
-
-            const invoiceNumber =
-                "INV-" +
-                String(
-                    sequenceNumber
-                ).padStart(
-                    6,
-                    "0"
-                );
+            const sequenceNumber = Number(sequenceResult.rows[0].number);
+            const invoiceSettings = (await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)])).rows[0]?.settings || {};
+            const invoiceNumber = String(invoiceSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequenceNumber).padStart(6, "0");
 
 
             // -----------------------------------------
@@ -5383,7 +5467,7 @@ app.get("/api/reports/sales-audit", async (req, res) => {
         const result = await pool.query(`
             SELECT p.id AS payment_id,p.created_at AS payment_time,p.amount AS transaction_amount,
                    p.payment_method,p.payment_status,p.transaction_id,
-                   o.id AS order_id,o.order_number,o.order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
+                   o.id AS order_id,o.order_number,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
                    i.invoice_number,
                    COALESCE(paid.amount_collected,0) AS amount_collected,
                    CASE WHEN o.payment_method='Non-chargeable' THEN 0
@@ -5940,7 +6024,7 @@ app.get(
                     `
                     SELECT
 
-                        o.order_type,
+                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
 
                         COUNT(
                             DISTINCT o.id
@@ -5971,7 +6055,7 @@ app.get(
                         ${dateRange.end}
 
                     GROUP BY
-                        o.order_type
+                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END
 
                     ORDER BY
                         sales DESC
@@ -6317,7 +6401,7 @@ app.post("/api/billing-adjustments", async (req, res) => {
         const value = Number(req.body.value);
         const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
         const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
-        const appliesTo = ["all", "dine-in", "takeaway", "delivery"].includes(appliesCanonical)
+        const appliesTo = ["all", "dine-in", "takeaway", "delivery", "online"].includes(appliesCanonical)
             ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
             : "all";
         const description = String(req.body.description || "").trim() || null;
@@ -6357,7 +6441,7 @@ app.put("/api/billing-adjustments/:id", async (req, res) => {
         const value = Number(req.body.value);
         const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
         const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
-        const appliesTo = ["all", "dine-in", "takeaway", "delivery"].includes(appliesCanonical)
+        const appliesTo = ["all", "dine-in", "takeaway", "delivery", "online"].includes(appliesCanonical)
             ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
             : "all";
         const description = String(req.body.description || "").trim() || null;
@@ -6698,7 +6782,7 @@ function managerPermissionsServer() {
         "new_order.edit", "reservations.view", "reservations.create", "reservations.edit",
         "tables.view", "tables.edit", "kitchen.view", "kitchen.edit", "kitchen.print", "kot_groups.view", "kot_groups.create", "kot_groups.edit",
         "menu.view", "menu.create", "menu.edit", "customers.view", "customers.create", "customers.edit",
-        "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
+        "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "marketing.delete", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
     ];
     allow.push("orders.edit_open", "orders.print_open", "orders.edit_after_print");
     allow.forEach(k => p[k] = true);
@@ -7108,6 +7192,16 @@ app.get("/api/marketing/push-campaigns", async (req, res) => {
     }
 });
 
+app.delete("/api/marketing/push-campaigns/:id", async (req, res) => {
+    try {
+        const id = Number(req.params.id), businessId = Number(req.user.business_id);
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid message ID" });
+        const result = await pool.query("DELETE FROM marketing_push_campaigns WHERE id=$1 AND business_id=$2 RETURNING id", [id, businessId]);
+        if (!result.rows.length) return res.status(404).json({ error: "Notification message not found" });
+        res.json({ success: true });
+    } catch (error) { console.error("Marketing notification delete error:", error); res.status(500).json({ error: "Could not delete notification message" }); }
+});
+
 app.post("/api/marketing/push-campaigns", async (req, res) => {
     const title = String(req.body?.title || "").trim().slice(0, 120);
     const message = String(req.body?.message || "").trim().slice(0, 500);
@@ -7373,8 +7467,9 @@ app.post('/api/printers/:id/print',async(req,res)=>{
         const bytes=typeof req.body.receipt==='string'
             ? Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),Buffer.from(req.body.receipt,'utf8'),Buffer.from([0x1b,0x64,0x04,0x1d,0x56,0x00])])
             : receiptTextForPrinter(req.body.receipt,settings,printer.paper_width);
-        await sendRawPrinterBytes(printer.host,printer.port,bytes);
-        res.json({success:true});
+        const copies = Math.min(20, Math.max(0, Math.floor(Number(req.body.copies) || 0)));
+        for (let copy = 0; copy < copies; copy++) await sendRawPrinterBytes(printer.host,printer.port,bytes);
+        res.json({success:true,copies});
     }catch(e){res.status(502).json({error:e.message||'Could not print to the network printer'});}
 });
 

@@ -2742,3 +2742,282 @@ body:has(#orders.active-page) .orders-page{width:min(1900px,100%);margin:0 auto;
 .restaurant-menu-host-controls input:focus{outline:3px solid rgba(69,132,108,.16);border-color:#4c8a70}
 @media(max-width:760px){.marketing-feature-grid{grid-template-columns:1fr}.marketing-feature-card{grid-template-columns:44px minmax(0,1fr)}.marketing-feature-action{grid-column:2;justify-self:start}.marketing-feature-card{row-gap:10px}}
 @media(max-width:650px){.restaurant-menu-host-controls{grid-template-columns:1fr}.restaurant-menu-host-controls input,.restaurant-menu-host-controls button{width:100%}}
+
+/* TABLE MANAGEMENT: focused, modular cards */
+#tables {
+    padding: clamp(16px, 2.2vw, 30px);
+    color: #17212f;
+}
+
+#tables > .customer-header {
+    margin-bottom: 20px;
+    padding: 22px 24px;
+    border: 1px solid #e5eaf1;
+    border-radius: 18px;
+    background: linear-gradient(120deg, #ffffff 0%, #f8faff 100%);
+    box-shadow: 0 8px 24px rgba(27, 43, 65, 0.045);
+}
+
+#tables > .customer-header h2 {
+    color: #17212f;
+    font-size: clamp(22px, 2vw, 28px);
+    font-weight: 750;
+    letter-spacing: -0.04em;
+}
+
+#tables > .customer-header p {
+    margin-top: 6px;
+    color: #6b7788;
+    font-size: 13px;
+}
+
+#tables > .customer-header .big-btn {
+    margin: 0;
+    padding: 12px 17px;
+    border: 0;
+    border-radius: 11px;
+    background: #17212f;
+    color: #fff;
+    font-weight: 700;
+    box-shadow: 0 5px 12px rgba(23, 33, 47, 0.14);
+    transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+#tables > .customer-header .big-btn:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 8px 18px rgba(23, 33, 47, 0.2);
+}
+
+#tables > .cards {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+    margin: 0 0 22px;
+}
+
+#tables > .cards > .card {
+    min-width: 0;
+    padding: 16px 18px;
+    border: 1px solid #e6eaf0;
+    border-radius: 15px;
+    background: #fff;
+    box-shadow: 0 4px 15px rgba(27, 43, 65, 0.045);
+}
+
+#tables > .cards > .card span {
+    margin-bottom: 8px;
+    color: #748093;
+    font-size: 11px;
+    font-weight: 750;
+    letter-spacing: 0.075em;
+    text-transform: uppercase;
+}
+
+#tables > .cards > .card strong {
+    color: #17212f;
+    font-size: 25px;
+    letter-spacing: -0.035em;
+}
+
+#tables .tables-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 245px), 1fr));
+    gap: 16px;
+    margin-top: 0;
+}
+
+#tables .table-card {
+    display: flex;
+    min-height: 218px;
+    flex-direction: column;
+    gap: 17px;
+    padding: 19px;
+    overflow: hidden;
+    border: 1px solid #e3e8ef;
+    border-radius: 18px;
+    background: #fff;
+    box-shadow: 0 5px 18px rgba(27, 43, 65, 0.055);
+    transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+#tables .table-card:hover {
+    transform: translateY(-2px);
+    border-color: #cbd5e1;
+    box-shadow: 0 12px 26px rgba(27, 43, 65, 0.1);
+}
+
+#tables .table-card-header {
+    align-items: flex-start;
+}
+
+#tables .table-card-heading {
+    display: grid;
+    gap: 4px;
+}
+
+#tables .table-card-kicker,
+#tables .table-capacity-label {
+    color: #8490a1;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+}
+
+#tables .table-card-heading h3 {
+    color: #17212f;
+    font-size: 21px;
+    font-weight: 750;
+    letter-spacing: -0.03em;
+}
+
+#tables .table-status {
+    padding: 6px 10px;
+    border: 1px solid #e5e9ef;
+    border-radius: 999px;
+    background: #f4f6f9;
+    color: #536174;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+#tables .table-status.available {
+    border-color: #ccebd9;
+    background: #effaf3;
+    color: #16804a;
+}
+
+#tables .table-status.occupied {
+    border-color: #f5d1d1;
+    background: #fff2f1;
+    color: #bd3d3d;
+}
+
+#tables .table-status.reserved {
+    border-color: #f1dfb8;
+    background: #fff8e8;
+    color: #9b690e;
+}
+
+#tables .table-card-visual {
+    display: flex;
+    min-height: 76px;
+    align-items: center;
+    gap: 15px;
+    padding: 13px 14px;
+    border: 1px solid #edf0f4;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #f8fafc 0%, #f3f6fa 100%);
+}
+
+#tables .table-icon {
+    display: grid;
+    width: 48px;
+    height: 48px;
+    flex: 0 0 48px;
+    place-items: center;
+    margin: 0;
+    border: 1px solid #e4eaf1;
+    border-radius: 13px;
+    background: #fff;
+    font-size: 25px;
+}
+
+#tables .table-icon svg {
+    display: block;
+    width: 27px;
+    height: 27px;
+    color: #43546b;
+}
+
+#tables .table-capacity {
+    display: grid;
+    grid-template-columns: auto auto;
+    align-items: baseline;
+    gap: 2px 6px;
+    color: #6d7888;
+    font-size: 12px;
+}
+
+#tables .table-capacity-label {
+    grid-column: 1 / -1;
+    margin-bottom: 3px;
+}
+
+#tables .table-capacity strong {
+    color: #17212f;
+    font-size: 20px;
+    letter-spacing: -0.03em;
+}
+
+#tables .table-card-actions {
+    display: flex;
+    gap: 9px;
+    margin-top: auto;
+}
+
+#tables .table-action-btn {
+    min-height: 39px;
+    padding: 9px 12px;
+    border: 1px solid #dce2e9;
+    border-radius: 10px;
+    background: #fff;
+    color: #354255;
+    font: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 150ms ease, border-color 150ms ease, color 150ms ease;
+}
+
+#tables .table-edit-btn {
+    flex: 1;
+    border-color: #d6e0ed;
+    background: #f7faff;
+    color: #264e7b;
+}
+
+#tables .table-edit-btn:hover {
+    border-color: #9eb8d6;
+    background: #eef5ff;
+}
+
+#tables .table-delete-btn:hover {
+    border-color: #efc2c2;
+    background: #fff5f5;
+    color: #b53838;
+}
+
+@media (max-width: 900px) {
+    #tables > .cards {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 560px) {
+    #tables {
+        padding: 14px;
+    }
+
+    #tables > .customer-header {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        padding: 18px;
+    }
+
+    #tables > .customer-header .big-btn {
+        width: 100%;
+    }
+
+    #tables > .cards {
+        gap: 10px;
+    }
+
+    #tables > .cards > .card {
+        padding: 14px;
+    }
+
+    #tables .tables-grid {
+        grid-template-columns: 1fr;
+        gap: 12px;
+    }
+}

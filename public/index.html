@@ -1713,11 +1713,16 @@
                 <h3>🖨️ Thermal Printer</h3>
                 <div class="form-group"><label>Paper Width</label><select id="settingPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
                 <div class="settings-options">
-                    <label><input type="checkbox" id="settingAutoPrint"> Auto Print Bill</label>
+                    <label><input type="checkbox" id="settingAutoPrint"> Print bill on checkout</label>
                     <label><input type="checkbox" id="settingAutoClose"> Close Print Window Automatically</label>
                 </div>
             </div>
 
+            <div class="settings-card" data-settings-feature="gst" hidden>
+                <h3>GST</h3>
+                <div class="settings-options"><label><input type="checkbox" id="settingGstCalculationEnabled"> Calculate GST on orders</label></div>
+                <p class="access-muted">Turn this off to stop adding GST to POS and QR orders. Existing menu tax rates stay saved and apply again when GST is enabled.</p>
+            </div>
             <div class="settings-card" data-settings-feature="general-currency" hidden>
                 <h3>💱 General / Currency</h3>
                 <div class="form-group"><label>Currency</label><input id="settingCurrency" type="text" maxlength="5" value="₹"></div>
@@ -1739,6 +1744,11 @@
             </div>
         </div>
 <div class="settings-grid advanced-settings-grid">
+            <div class="settings-card" data-settings-feature="non-chargeable" hidden>
+                <h3>Non-chargeable Reasons</h3>
+                <p class="access-muted">Add one reason per line. Staff must choose a saved reason before a no-charge bill can be completed.</p>
+                <div class="form-group"><label for="settingNonChargeableReasons">Available reasons</label><textarea id="settingNonChargeableReasons" rows="6" maxlength="3200" placeholder="Complimentary&#10;Staff meal&#10;Customer recovery&#10;Promotion"></textarea></div>
+            </div>
             <div class="settings-card" data-settings-feature="billing-rules" hidden>
                 <h3>🧮 Billing Rules</h3>
                 <div class="form-group"><label>Default Payment</label><select id="settingDefaultPayment"></select></div>
@@ -1752,7 +1762,9 @@
                 <div class="form-group"><label>Receipt Logo URL</label><input id="settingLogoUrl" placeholder="https://…/logo.png"></div>
                 <div class="form-group"><label>UPI ID</label><input id="settingUpiId" placeholder="cafe@upi"></div>
                 <div class="form-group"><label>Receipt Font</label><select id="settingReceiptFont"><option value="Arial">Arial</option><option value="Inter">Inter</option><option value="system-ui">System UI</option></select></div>
-                <div class="settings-options"><label><input type="checkbox" id="settingPrintKitchenOnOrder"> Print KOT on successful order</label><label><input type="checkbox" id="settingEnableReceiptSound"> Receipt sound</label></div>
+                <div class="form-group"><label for="settingKotPrintMode">KOT printing</label><select id="settingKotPrintMode"><option value="never">Do not auto-print</option><option value="save">Print when order is saved</option><option value="checkout">Print on checkout</option></select></div>
+                <div class="form-group"><label for="settingBillCopies">Bill copies on checkout</label><input id="settingBillCopies" type="number" min="0" max="20" step="1" value="1"><small class="access-muted">Choose 0 to 20 copies. Set 0 to skip bill printing.</small></div>
+                <div class="settings-options"><label><input type="checkbox" id="settingEnableReceiptSound"> Receipt sound</label></div>
             </div>
             <div class="settings-card" data-settings-feature="operations" hidden>
                 <h3>🏪 Operations</h3>
@@ -2407,7 +2419,7 @@
       <div class="menu-form-grid">
         <div class="form-group"><label>Item Name</label><input id="menuName" type="text" placeholder="e.g. Cappuccino"></div>
         <div class="form-group menu-category-field"><label>Category</label><div class="menu-category-input-row"><select id="menuCategory"><option value="">Select category</option></select><button type="button" class="table-action-btn" onclick="openMenuCategoryModal()">＋ New</button></div></div>
-        <div class="form-group menu-image-field"><label for="menuImageFile">Item Image</label><input id="menuImageFile" type="file" accept="image/jpeg,image/png,image/webp" onchange="previewMenuItemImage(this.files?.[0])"><small class="access-muted">Choose a JPG, PNG or WebP image (up to 8 MB).</small><div id="menuImagePreview" class="menu-image-preview"></div><button type="button" class="table-action-btn" onclick="clearMenuItemImage()">Remove image</button></div>
+        <div class="form-group menu-image-field"><label for="menuImageFile">Item Image</label><input id="menuImageFile" type="file" accept="image/jpeg,image/png,image/webp" onchange="previewMenuItemImage(this.files?.[0])"><small class="access-muted">Choose a JPG, PNG or WebP image. The saved, compressed image must be 200 KB or smaller.</small><div id="menuImagePreview" class="menu-image-preview"></div><button type="button" class="table-action-btn" onclick="clearMenuItemImage()">Remove image</button></div>
         <div class="form-group"><label>Base Price</label><input id="menuPrice" type="number" min="0" step="0.01"></div>
         <div class="form-group"><label>Nature</label><select id="menuNature"><option>Goods</option><option>Service</option></select></div>
         <div class="form-group"><label>Measuring Unit</label><select id="menuUnit"><option>ea</option><option>pcs</option><option>g</option><option>kg</option><option>ml</option><option>lt</option><option>plate</option><option>cup</option><option>glass</option><option>box</option></select></div>
@@ -2500,7 +2512,7 @@
                     <label><input type="radio" name="paymentCategory" value="partial" onchange="setPaymentCategory('partial')"><span>Partial Payment</span></label>
                     <label><input type="radio" name="paymentCategory" value="split" onchange="setPaymentCategory('split')"><span>Split Payment</span></label>
                 </div>
-                <div id="nonChargeableNotice" class="non-chargeable-notice" hidden>This bill will be marked non-chargeable. No payment will be collected.</div>
+                <div id="nonChargeableNotice" class="non-chargeable-notice" hidden><div>This bill will be marked non-chargeable. No payment will be collected.</div><div class="form-group"><label for="paymentNonChargeableReason">Reason</label><select id="paymentNonChargeableReason"><option value="">Choose a reason</option></select><small id="nonChargeableReasonHint" class="access-muted"></small></div></div>
                 <div id="singlePaymentEntry" class="pos-payment-entry">
                     <div class="form-group"><label id="paymentReceivedLabel" for="cashReceived">Received amount</label><div class="payment-amount-input"><span id="paymentCurrencySymbol">₹</span><input id="cashReceived" type="number" min="0" step="0.01" oninput="updatePaymentSummary()" placeholder="Enter amount"></div></div>
                     <div id="changeLine" class="payment-change-line">Change <strong id="changeAmount">₹0.00</strong></div>
@@ -3122,7 +3134,7 @@
             <div class="form-group"><label>Rule Type</label><select id="billingAdjustmentKind"><option value="discount">Discount</option><option value="charge">Charge</option></select></div>
             <div class="form-group"><label>Calculation</label><select id="billingAdjustmentCalculation"><option value="percent">Percentage (%)</option><option value="fixed">Fixed Amount</option></select></div>
             <div class="form-group"><label>Value</label><input id="billingAdjustmentValue" type="number" min="0" step="0.01" placeholder="0"></div>
-            <div class="form-group"><label>Applies To</label><select id="billingAdjustmentApplies"><option value="all">All Channels</option><option value="dine-in">Dine-in</option><option value="takeaway">Takeaway</option></select></div>
+            <div class="form-group"><label>Applies To</label><select id="billingAdjustmentApplies"><option value="all">All Channels</option><option value="dine-in">Dine-in</option><option value="takeaway">Takeaway</option><option value="online">Online</option></select></div>
             <div class="form-group full"><label>Description</label><textarea id="billingAdjustmentDescription" rows="3" placeholder="Describe when this rule should be used"></textarea></div>
         </div>
         <div class="modal-actions">
