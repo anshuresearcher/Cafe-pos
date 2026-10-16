@@ -3015,11 +3015,19 @@ app.post("/api/orders/:id/settle", async (req, res) => {
         const order = orderResult.rows[0];
         if (!order) throw new Error("Order not found");
 
-        const collectedResult = await client.query(
-            `SELECT COALESCE(SUM(amount),0) AS collected FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'`,
+        // Read the existing successful-payment totals once. The same grouped data
+        // can be used to build the response summary after this transaction inserts
+        // any new payments, avoiding a second aggregate query at the end.
+        const existingPaymentSummary = await client.query(
+            `SELECT payment_method, SUM(amount) AS amount
+             FROM payments
+             WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
+             GROUP BY payment_method
+             ORDER BY payment_method`,
             [orderId, businessId]
         );
-        const collectedBefore = Number(collectedResult.rows[0]?.collected || 0);
+        const existingAllocations = existingPaymentSummary.rows;
+        const collectedBefore = existingAllocations.reduce((sum, row) => sum + Number(row.amount || 0), 0);
         const billTotal = Math.max(0, Number(order.total || 0));
         const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
         const nonChargeable = req.body?.nonChargeable === true;
@@ -3098,12 +3106,21 @@ app.post("/api/orders/:id/settle", async (req, res) => {
             invoice = createdInvoice.rows[0];
         }
 
-        const summaryResult = await client.query(`
-            SELECT payment_method,SUM(amount) AS amount
-            FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
-            GROUP BY payment_method ORDER BY payment_method
-        `, [orderId, businessId]);
-        const amountCollected = summaryResult.rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+        // Merge the existing grouped totals with payments inserted in this
+        // transaction instead of issuing another database aggregate query.
+        const allocationTotals = new Map();
+        for (const row of existingAllocations) {
+            allocationTotals.set(row.payment_method, Number(row.amount || 0));
+        }
+        for (const payment of normalizedPayments) {
+            allocationTotals.set(
+                payment.method,
+                Math.round(((allocationTotals.get(payment.method) || 0) + payment.amount) * 100) / 100
+            );
+        }
+        const allocations = Array.from(allocationTotals, ([method, amount]) => ({ method, amount }))
+            .sort((a, b) => a.method.localeCompare(b.method));
+        const amountCollected = allocations.reduce((sum, row) => sum + row.amount, 0);
         const amountDue = nonChargeable ? 0 : Math.max(0, Math.round((billTotal - amountCollected) * 100) / 100);
         await client.query("COMMIT");
 
@@ -3118,7 +3135,7 @@ app.post("/api/orders/:id/settle", async (req, res) => {
                 total: billTotal,
                 amountCollected,
                 amountDue,
-                allocations: summaryResult.rows.map(row => ({ method: row.payment_method, amount: Number(row.amount || 0) }))
+                allocations
             }
         });
     } catch (error) {
