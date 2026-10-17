@@ -624,7 +624,7 @@ function permissionForRequest(req) {
     }
     const groups = [
         ["marketing","marketing"],
-        ["kot-groups","kot_groups"],["expenses","expenses"],["loyalty","loyalty"],["backup","backup"],["invoice-designer","invoice_designer"],["advanced-reports","advanced_reports"],["deployment","deployment"],
+        ["kot-groups","kot_groups"],["expenses","expenses"],["loyalty","loyalty"],["backup","backup"],["advanced-reports","advanced_reports"],["deployment","deployment"],
         ["menu","menu"],["customers","customers"],["tables","tables"],["devices","devices"],
         ["reservations","reservations"],["kot","kitchen"],["payments","payments"],
         ["invoices","payments"]
@@ -2866,6 +2866,8 @@ app.post(
             const order =
                 orderResult.rows[0];
 
+            let checkoutResult = null;
+
 
             const itemValues = [];
             const itemRows = normalizedItems.map((item, index) => {
@@ -2906,13 +2908,23 @@ app.post(
                 await recordOrderActivity(client, order.id, "Marketing deal applied", `${String(b.marketingDealName).slice(0, 120)} · Discount ${Number(b.discount || 0).toFixed(2)}.`, req);
             }
 
+            if (b.checkout && typeof b.checkout === "object") {
+                checkoutResult = await settleOrderWithClient(client, req, order.id, businessId, {
+                    ...b.checkout,
+                    createKot: false
+                });
+            }
+
             await client.query("COMMIT");
 
+            if (checkoutResult) awardSettlementLoyalty(checkoutResult.insertedPayments, order.id);
 
-            res.status(201).json({
-                success: true,
-                order
-            });
+            const response = { success: true, order: checkoutResult?.order || order };
+            if (checkoutResult) {
+                response.invoice = checkoutResult.invoice;
+                response.paymentSummary = checkoutResult.paymentSummary;
+            }
+            res.status(201).json(response);
 
         } catch (e) {
 
@@ -3092,6 +3104,142 @@ app.get("/api/orders/:id/payment-summary", async (req,res)=>{
     }
 });
 
+async function settleOrderWithClient(client, req, orderId, businessId, body = {}) {
+    const normalizedOrderId = Number(orderId);
+    if (!Number.isInteger(normalizedOrderId) || normalizedOrderId <= 0) throw Object.assign(new Error("Invalid order ID"), { status: 400 });
+    const orderResult = await client.query(
+        `SELECT o.*,COALESCE(paid.collected,0) AS collected_before,COALESCE(paid.allocations,'[]'::json) AS allocations,COALESCE(config.settings,'{}'::jsonb) AS checkout_settings
+         FROM orders o
+         LEFT JOIN LATERAL (
+             SELECT COALESCE(SUM(t.amount),0) AS collected,
+                    COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations
+             FROM (
+                 SELECT payment_method,SUM(amount) AS amount
+                 FROM payments
+                 WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success'
+                 GROUP BY payment_method
+             ) t
+         ) paid ON TRUE
+         LEFT JOIN LATERAL (SELECT settings FROM app_settings WHERE business_id=o.business_id LIMIT 1) config ON TRUE
+         WHERE o.id=$1 AND o.business_id=$2 FOR UPDATE OF o`,
+        [normalizedOrderId, businessId]
+    );
+    const order = orderResult.rows[0];
+    if (!order) throw new Error("Order not found");
+    const collectedBefore = Number(order.collected_before || 0);
+    const billTotal = Math.max(0, Number(order.total || 0));
+    const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
+    const nonChargeable = body.nonChargeable === true;
+    const checkoutSettings = order.checkout_settings || {};
+    const allowedReasons = Array.isArray(checkoutSettings.nonChargeableReasons)
+        ? checkoutSettings.nonChargeableReasons.map(reason => String(reason || "").trim().slice(0, 100)).filter(Boolean).slice(0, 30)
+        : ["Complimentary", "Staff meal", "Customer recovery", "Promotion"];
+    const nonChargeableReason = String(body.nonChargeableReason || "").trim().slice(0, 100);
+    if (nonChargeable && (!nonChargeableReason || !allowedReasons.includes(nonChargeableReason))) {
+        throw Object.assign(new Error(allowedReasons.length ? "Choose a valid non-chargeable reason." : "Add non-chargeable reasons in Settings before completing this bill."), { status: 400 });
+    }
+    const keepOpen = body.keepOpen === true && !nonChargeable;
+    const methodLabel = String(body.paymentMethod || "").trim().slice(0, 50) || (nonChargeable ? "Non-chargeable" : "Payment");
+    const payments = nonChargeable ? [{ method: "Non-chargeable", amount: 0 }] : (Array.isArray(body.payments) ? body.payments : []);
+    const normalizedPayments = payments.map(payment => ({
+        method: String(payment?.method || "").trim().slice(0, 50),
+        amount: Math.round(Number(payment?.amount) * 100) / 100
+    }));
+    if (!nonChargeable && (!normalizedPayments.length || normalizedPayments.some(payment => !payment.method || !Number.isFinite(payment.amount) || payment.amount < 0))) {
+        throw new Error("Add a valid payment method and amount.");
+    }
+    const currentAmount = Math.round(normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
+    if (!nonChargeable && keepOpen && (currentAmount <= 0 || currentAmount >= remaining)) {
+        throw new Error("A partial payment must be greater than zero and less than the remaining balance.");
+    }
+    if (!nonChargeable && !keepOpen && Math.abs(currentAmount - remaining) > 0.01) {
+        throw new Error(`Payments must add up to the remaining balance of ${remaining.toFixed(2)}.`);
+    }
+
+    let insertedPayments = [];
+    if (normalizedPayments.length) {
+        const values = [];
+        const rows = normalizedPayments.map((payment, index) => {
+            const offset = index * 5;
+            values.push(normalizedOrderId, order.order_number, payment.amount, payment.method, businessId);
+            return `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},'Success',NULL,$${offset + 5})`;
+        });
+        const inserted = await client.query(`
+            INSERT INTO payments(order_id,order_number,amount,payment_method,payment_status,transaction_id,business_id)
+            VALUES ${rows.join(",")}
+            RETURNING id,amount,payment_method,payment_status,created_at
+        `, values);
+        insertedPayments = inserted.rows;
+    }
+
+    const nextStatus = keepOpen ? "Open" : "Completed";
+    const orderUpdate = await client.query(`
+        UPDATE orders SET payment_method=$1,status=$2,non_chargeable_reason=$3,updated_at=CURRENT_TIMESTAMP
+        WHERE id=$4 AND business_id=$5 RETURNING *
+    `, [methodLabel, nextStatus, nonChargeable ? nonChargeableReason : null, normalizedOrderId, businessId]);
+    const savedOrder = orderUpdate.rows[0];
+    if (!keepOpen && body.createKot === true) await createKOTForOrder(client, businessId, normalizedOrderId);
+    const paymentDescription = nonChargeable
+        ? `Non-chargeable sale recorded · ${nonChargeableReason}.`
+        : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
+    await recordOrderActivity(client, normalizedOrderId, "Payment recorded", paymentDescription, req);
+    if (!keepOpen) await recordOrderActivity(client, normalizedOrderId, "Order completed", "Sale completed.", req);
+
+    if (!keepOpen && savedOrder.order_type === "Dine-in" && savedOrder.table_number) {
+        await client.query(`UPDATE restaurant_tables SET status='Available' WHERE table_number=$1 AND business_id=$2`, [savedOrder.table_number, businessId]);
+    }
+
+    const status = nonChargeable ? "Non-chargeable" : keepOpen ? "Partially Paid" : "Paid";
+    const invoiceMethod = methodLabel;
+    const invoiceResult = await client.query(`SELECT * FROM invoices WHERE order_id=$1 FOR UPDATE`, [normalizedOrderId]);
+    let invoice = invoiceResult.rows[0] || null;
+    let customerId = body.customerId ?? savedOrder.customer_id ?? null;
+    if (customerId !== null) {
+        customerId = Number(customerId);
+        if (!Number.isInteger(customerId) || customerId <= 0) throw new Error("Invalid customer ID");
+        const customer = await client.query(`SELECT id FROM customers WHERE id=$1 AND business_id=$2`, [customerId, businessId]);
+        if (!customer.rows.length) throw new Error("Customer not found");
+    }
+    if (invoice) {
+        const updatedInvoice = await client.query(`UPDATE invoices SET customer_id=COALESCE($1,customer_id),payment_method=$2,status=$3 WHERE id=$4 RETURNING *`, [customerId, invoiceMethod, status, invoice.id]);
+        invoice = updatedInvoice.rows[0];
+    } else {
+        const sequence = Number((await client.query(`SELECT nextval('invoice_number_seq') AS number`)).rows[0].number);
+        const invoiceNumber = String(checkoutSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequence).padStart(6, "0");
+        const createdInvoice = await client.query(`
+            INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
+            VALUES($1,$2,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8) RETURNING *
+        `, [invoiceNumber, normalizedOrderId, customerId, Number(savedOrder.subtotal), Number(savedOrder.gst), Number(savedOrder.total), invoiceMethod, status]);
+        invoice = createdInvoice.rows[0];
+    }
+
+    const allocationTotals = new Map();
+    for (const allocation of (Array.isArray(order.allocations) ? order.allocations : [])) {
+        const method = String(allocation.method || "Payment");
+        allocationTotals.set(method, (allocationTotals.get(method) || 0) + Number(allocation.amount || 0));
+    }
+    for (const payment of normalizedPayments) {
+        allocationTotals.set(payment.method, (allocationTotals.get(payment.method) || 0) + Number(payment.amount || 0));
+    }
+    const allocations = [...allocationTotals.entries()]
+        .map(([method, amount]) => ({ method, amount: Math.round(amount * 100) / 100 }))
+        .sort((left, right) => left.method.localeCompare(right.method));
+    const amountCollected = Math.round(allocations.reduce((sum, row) => sum + row.amount, 0) * 100) / 100;
+    const amountDue = nonChargeable ? 0 : Math.max(0, Math.round((billTotal - amountCollected) * 100) / 100);
+    return {
+        order: savedOrder,
+        invoice,
+        paymentSummary: { total: billTotal, amountCollected, amountDue, allocations },
+        insertedPayments
+    };
+}
+
+function awardSettlementLoyalty(insertedPayments, orderId) {
+    for (const payment of insertedPayments || []) {
+        if (Number(payment.amount) > 0) awardLoyaltyForPayment(payment.id, orderId, Number(payment.amount));
+    }
+}
+
 app.post("/api/orders/:id/settle", async (req, res) => {
     const client = await pool.connect();
     const businessId = Number(req.user?.business_id);
@@ -3099,177 +3247,51 @@ app.post("/api/orders/:id/settle", async (req, res) => {
         const orderId = Number(req.params.id);
         if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: "Invalid order ID" });
         await client.query("BEGIN");
-        const orderResult = await client.query(
-            `SELECT o.*,COALESCE(paid.collected,0) AS collected_before,COALESCE(config.settings,'{}'::jsonb) AS checkout_settings
-             FROM orders o
-             LEFT JOIN LATERAL (
-                 SELECT COALESCE(SUM(amount),0) AS collected FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success'
-             ) paid ON TRUE
-             LEFT JOIN LATERAL (SELECT settings FROM app_settings WHERE business_id=o.business_id LIMIT 1) config ON TRUE
-             WHERE o.id=$1 AND o.business_id=$2 FOR UPDATE OF o`,
-            [orderId, businessId]
-        );
-        const order = orderResult.rows[0];
-        if (!order) throw new Error("Order not found");
-        const collectedBefore = Number(order.collected_before || 0);
-        const billTotal = Math.max(0, Number(order.total || 0));
-        const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
-        const nonChargeable = req.body?.nonChargeable === true;
-        const checkoutSettings = order.checkout_settings || {};
-        const allowedReasons = Array.isArray(checkoutSettings.nonChargeableReasons)
-            ? checkoutSettings.nonChargeableReasons.map(reason => String(reason || "").trim().slice(0, 100)).filter(Boolean).slice(0, 30)
-            : ["Complimentary", "Staff meal", "Customer recovery", "Promotion"];
-        const nonChargeableReason = String(req.body?.nonChargeableReason || "").trim().slice(0, 100);
-        if (nonChargeable && (!nonChargeableReason || !allowedReasons.includes(nonChargeableReason))) {
-            throw Object.assign(new Error(allowedReasons.length ? "Choose a valid non-chargeable reason." : "Add non-chargeable reasons in Settings before completing this bill."), { status: 400 });
-        }
-        const keepOpen = req.body?.keepOpen === true && !nonChargeable;
-        const methodLabel = String(req.body?.paymentMethod || "").trim().slice(0, 50) || (nonChargeable ? "Non-chargeable" : "Payment");
-        const payments = nonChargeable ? [{ method: "Non-chargeable", amount: 0 }] : (Array.isArray(req.body?.payments) ? req.body.payments : []);
-        const normalizedPayments = payments.map(payment => ({
-            method: String(payment?.method || "").trim().slice(0, 50),
-            amount: Math.round(Number(payment?.amount) * 100) / 100
-        }));
-        if (!nonChargeable && (!normalizedPayments.length || normalizedPayments.some(payment => !payment.method || !Number.isFinite(payment.amount) || payment.amount < 0))) {
-            throw new Error("Add a valid payment method and amount.");
-        }
-        const currentAmount = Math.round(normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
-        if (!nonChargeable && keepOpen && (currentAmount <= 0 || currentAmount >= remaining)) {
-            throw new Error("A partial payment must be greater than zero and less than the remaining balance.");
-        }
-        if (!nonChargeable && !keepOpen && Math.abs(currentAmount - remaining) > 0.01) {
-            throw new Error(`Payments must add up to the remaining balance of ${remaining.toFixed(2)}.`);
-        }
-
-        let insertedPayments = [];
-        if (normalizedPayments.length) {
-            const values = [];
-            const rows = normalizedPayments.map((payment, index) => {
-                const offset = index * 5;
-                values.push(orderId, order.order_number, payment.amount, payment.method, businessId);
-                return `($${offset + 1},$${offset + 2},$${offset + 3},$${offset + 4},'Success',NULL,$${offset + 5})`;
-            });
-            const inserted = await client.query(`
-                INSERT INTO payments(order_id,order_number,amount,payment_method,payment_status,transaction_id,business_id)
-                VALUES ${rows.join(",")}
-                RETURNING id,amount,payment_method,payment_status,created_at
-            `, values);
-            insertedPayments = inserted.rows;
-        }
-
-        const nextStatus = keepOpen ? "Open" : "Completed";
-        const orderUpdate = await client.query(`
-            UPDATE orders SET payment_method=$1,status=$2,non_chargeable_reason=$3,updated_at=CURRENT_TIMESTAMP
-            WHERE id=$4 AND business_id=$5 RETURNING *
-        `, [methodLabel, nextStatus, nonChargeable ? nonChargeableReason : null, orderId, businessId]);
-        const savedOrder = orderUpdate.rows[0];
-        if (!keepOpen && req.body?.createKot === true) await createKOTForOrder(client,businessId,orderId);
-        const paymentDescription = nonChargeable
-            ? `Non-chargeable sale recorded · ${nonChargeableReason}.`
-            : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
-        await recordOrderActivity(client, orderId, "Payment recorded", paymentDescription, req);
-        if (!keepOpen) await recordOrderActivity(client, orderId, "Order completed", "Sale completed.", req);
-
-        if (!keepOpen && savedOrder.order_type === "Dine-in" && savedOrder.table_number) {
-            await client.query(`UPDATE restaurant_tables SET status='Available' WHERE table_number=$1 AND business_id=$2`, [savedOrder.table_number, businessId]);
-        }
-
-        const status = nonChargeable ? "Non-chargeable" : keepOpen ? "Partially Paid" : "Paid";
-        const invoiceMethod = methodLabel;
-        let invoiceResult = await client.query(`SELECT * FROM invoices WHERE order_id=$1 FOR UPDATE`, [orderId]);
-        let invoice = invoiceResult.rows[0] || null;
-        let customerId = req.body?.customerId ?? savedOrder.customer_id ?? null;
-        if (customerId !== null) {
-            customerId = Number(customerId);
-            if (!Number.isInteger(customerId) || customerId <= 0) throw new Error("Invalid customer ID");
-            const customer = await client.query(`SELECT id FROM customers WHERE id=$1 AND business_id=$2`, [customerId, businessId]);
-            if (!customer.rows.length) throw new Error("Customer not found");
-        }
-        if (invoice) {
-            const updatedInvoice = await client.query(`UPDATE invoices SET customer_id=COALESCE($1,customer_id),payment_method=$2,status=$3 WHERE id=$4 RETURNING *`, [customerId, invoiceMethod, status, invoice.id]);
-            invoice = updatedInvoice.rows[0];
-        } else {
-            const sequence = Number((await client.query(`SELECT nextval('invoice_number_seq') AS number`)).rows[0].number);
-            const invoiceSettings = (await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId])).rows[0]?.settings || {};
-            const invoiceNumber = String(invoiceSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequence).padStart(6, "0");
-            const createdInvoice = await client.query(`
-                INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
-                VALUES($1,$2,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8) RETURNING *
-            `, [invoiceNumber, orderId, customerId, Number(savedOrder.subtotal), Number(savedOrder.gst), Number(savedOrder.total), invoiceMethod, status]);
-            invoice = createdInvoice.rows[0];
-        }
-
-        const summaryResult = await client.query(`
-            SELECT payment_method,SUM(amount) AS amount
-            FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
-            GROUP BY payment_method ORDER BY payment_method
-        `, [orderId, businessId]);
-        const amountCollected = summaryResult.rows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
-        const amountDue = nonChargeable ? 0 : Math.max(0, Math.round((billTotal - amountCollected) * 100) / 100);
+        const result = await settleOrderWithClient(client, req, orderId, businessId, req.body || {});
         await client.query("COMMIT");
-
-        for (const payment of insertedPayments) {
-            if (Number(payment.amount) > 0) awardLoyaltyForPayment(payment.id, orderId, Number(payment.amount));
-        }
-        res.json({
-            success: true,
-            order: savedOrder,
-            invoice,
-            paymentSummary: {
-                total: billTotal,
-                amountCollected,
-                amountDue,
-                allocations: summaryResult.rows.map(row => ({ method: row.payment_method, amount: Number(row.amount || 0) }))
-            }
-        });
+        awardSettlementLoyalty(result.insertedPayments, orderId);
+        delete result.insertedPayments;
+        res.json({ success: true, ...result });
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Order settlement error:", error);
-        res.status(error.message === "Order not found" ? 404 : 400).json({ error: error.message || "Failed to settle order" });
+        res.status(error.status || (error.message === "Order not found" ? 404 : 400)).json({ error: error.message || "Failed to settle order" });
     } finally {
         client.release();
     }
 });
-app.get(
-    "/api/orders/:id",
-    async (req, res) => {
-
-        try {
-
-            const orderResult =
-                await pool.query(
-                    `
-                    SELECT
-                        o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,
-                        c.name AS customer_name,
-                        c.phone AS customer_phone,
-                        c.email AS customer_email,
-                        c.gstin AS customer_gstin,
-                        c.birth_date AS customer_birth_date,
-                        c.address AS customer_address,
-                        c.city AS customer_city,
-                        c.state AS customer_state
-                    FROM orders o
-                    LEFT JOIN customers c ON c.id = o.customer_id
-                    WHERE o.id = $1 AND o.business_id = $2
-                    `,
-                    [req.params.id, Number(req.user.business_id)]
-                );
-            if (!orderResult.rows.length) return res.status(404).json({ error: "Order not found" });
-            const itemsResult = await pool.query(`
-                SELECT oi.*,m.category
-                FROM order_items oi
-                LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2
-                WHERE oi.order_id=$1
-                ORDER BY oi.id
-            `, [Number(req.params.id), Number(req.user.business_id)]);
-            res.json({ order: orderResult.rows[0], items: itemsResult.rows });
-        } catch (error) {
-            console.error("Order detail load error:", error);
-            res.status(500).json({ error: "Failed to load order" });
-        }
+app.get("/api/orders/:id", async (req, res) => {
+    try {
+        const orderId = Number(req.params.id);
+        const businessId = Number(req.user.business_id);
+        const orderQuery = pool.query(
+            "SELECT o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,COALESCE(summary.amount_collected,0) AS amount_collected,COALESCE(summary.allocations,'[]'::json) AS payment_allocations FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN LATERAL (SELECT COALESCE(SUM(t.amount),0) AS amount_collected,COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations FROM (SELECT payment_method,SUM(amount) AS amount FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success' GROUP BY payment_method) t) summary ON TRUE WHERE o.id=$1 AND o.business_id=$2",
+            [orderId, businessId]
+        );
+        const itemsQuery = pool.query(
+            "SELECT oi.*,m.category FROM order_items oi LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2 WHERE oi.order_id=$1 ORDER BY oi.id",
+            [orderId, businessId]
+        );
+        const [orderResult, itemsResult] = await Promise.all([orderQuery, itemsQuery]);
+        if (!orderResult.rows.length) return res.status(404).json({ error: "Order not found" });
+        const row = orderResult.rows[0];
+        const amountCollected = Number(row.amount_collected || 0);
+        const allocations = Array.isArray(row.payment_allocations) ? row.payment_allocations : [];
+        const nonChargeable = /non.?chargeable/i.test(String(row.payment_method || ""));
+        const paymentSummary = {
+            total: Number(row.total || 0),
+            amountCollected,
+            amountDue: nonChargeable ? 0 : Math.max(0, Math.round((Number(row.total || 0) - amountCollected) * 100) / 100),
+            allocations
+        };
+        delete row.amount_collected;
+        delete row.payment_allocations;
+        res.json({ order: row, items: itemsResult.rows, paymentSummary });
+    } catch (error) {
+        console.error("Order detail load error:", error);
+        res.status(500).json({ error: "Failed to load order" });
     }
-);
+});
 
 app.put(
     "/api/orders/:id",
@@ -3532,12 +3554,21 @@ app.put(
                 await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${Number(discount || 0).toFixed(2)}.`, req);
             }
 
+            let checkoutResult = null;
+            if (req.body.checkout && typeof req.body.checkout === "object") {
+                checkoutResult = await settleOrderWithClient(client, req, orderId, Number(req.user.business_id), req.body.checkout);
+            }
+
             await client.query("COMMIT");
 
-            res.json({
-                success: true,
-                order: updatedOrder
-            });
+            if (checkoutResult) awardSettlementLoyalty(checkoutResult.insertedPayments, orderId);
+
+            const response = { success: true, order: checkoutResult?.order || updatedOrder };
+            if (checkoutResult) {
+                response.invoice = checkoutResult.invoice;
+                response.paymentSummary = checkoutResult.paymentSummary;
+            }
+            res.json(response);
 
         } catch (e) {
             await client.query("ROLLBACK");
@@ -6752,7 +6783,7 @@ app.get('/api/system/deployment-check', async (_,res)=>{
 
 const ACCESS_MODULES_SERVER = [
     "dashboard", "orders", "new_order", "reservations", "tables",
-    "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "marketing", "invoice_designer", "advanced_reports", "printer"
+    "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "marketing", "advanced_reports", "printer"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
 const ACCESS_ORDER_PERMISSIONS_SERVER = ["orders.edit_open", "orders.print_open", "orders.edit_after_print", "orders.edit_closed"];
@@ -7064,6 +7095,12 @@ async function ensureSettingsTable() {
         ON CONFLICT (id) DO NOTHING
     `, [Number(systemBusinessId||1)]);
 
+    await pool.query("CREATE TABLE IF NOT EXISTS support_business_branding (business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE, show_powered_by_cafe_pilot BOOLEAN NOT NULL DEFAULT TRUE, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)");
+    await pool.query("ALTER TABLE support_business_branding ENABLE ROW LEVEL SECURITY");
+    await pool.query("ALTER TABLE support_business_branding FORCE ROW LEVEL SECURITY");
+    await pool.query("DROP POLICY IF EXISTS support_business_branding_system_only ON support_business_branding");
+    await pool.query("CREATE POLICY support_business_branding_system_only ON support_business_branding USING (current_setting('app.system_mode', true)='on') WITH CHECK (current_setting('app.system_mode', true)='on')");
+
     console.log("✅ Application settings ready");
 }
 
@@ -7254,11 +7291,17 @@ app.get(
     "/api/settings",
     async (req, res) => {
         try {
-            const result = await pool.query(
+            const businessId = Number(req.user.business_id);
+            const [result, brandingResult] = await Promise.all([pool.query(
                 "SELECT settings FROM app_settings WHERE business_id = $1",
-                [Number(req.user.business_id)]
-            );
-            res.json(result.rows[0]?.settings || {});
+                [businessId]
+            ), runSystemContext(() => pool.query(
+                "SELECT show_powered_by_cafe_pilot FROM support_business_branding WHERE business_id=$1",
+                [businessId]
+            ))]);
+            const settings = result.rows[0]?.settings || {};
+            settings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
+            res.json(settings);
         } catch (e) {
             console.error("❌ Settings load error:", e);
             res.status(500).json({ error: "Failed to load settings" });
@@ -7271,8 +7314,9 @@ app.put(
     async (req, res) => {
         try {
             const settings = req.body && typeof req.body === "object"
-                ? req.body
+                ? { ...req.body }
                 : {};
+            delete settings.showPoweredByCafePilot;
             const businessId = Number(req.user.business_id);
 
             const result = await pool.query(
@@ -7287,9 +7331,15 @@ app.put(
                 [businessId, JSON.stringify(settings)]
             );
 
+            const brandingResult = await runSystemContext(() => pool.query(
+                "SELECT show_powered_by_cafe_pilot FROM support_business_branding WHERE business_id=$1",
+                [businessId]
+            ));
+            const savedSettings = result.rows[0].settings || {};
+            savedSettings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
             res.json({
                 success: true,
-                settings: result.rows[0].settings,
+                settings: savedSettings,
                 updated_at: result.rows[0].updated_at
             });
         } catch (e) {
@@ -8223,11 +8273,13 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
                    b.business_type,b.owner_name,b.phone,b.email,b.address,b.city,b.state,b.active,b.created_at,
                    l.id AS license_id,l.plan,l.license_type,l.add_on,l.duration_months,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
                    (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
-                   (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users
+                   (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users,
+                   COALESCE(brand.show_powered_by_cafe_pilot,TRUE) AS show_powered_by_cafe_pilot
             FROM businesses b
             LEFT JOIN LATERAL (
                 SELECT * FROM business_licenses bl WHERE bl.business_id=b.id ORDER BY bl.id DESC LIMIT 1
             ) l ON TRUE
+            LEFT JOIN support_business_branding brand ON brand.business_id=b.id
             ORDER BY b.id DESC
         `));
         res.json(r.rows);
@@ -8248,6 +8300,21 @@ app.patch('/api/support/businesses/:id', supportAuth, async(req,res)=>{
         if(!result.rows.length)return res.status(404).json({error:'Business not found'});
         res.json({success:true,business:result.rows[0]});
     } catch(e){console.error(e);res.status(500).json({error:'Failed to update business name'});}
+});
+
+app.patch('/api/support/businesses/:id/branding', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const show=req.body?.showPoweredByCafePilot;
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        if(typeof show!=='boolean')return res.status(400).json({error:'Choose whether Cafe Pilot branding should be shown.'});
+        const result=await runSystemContext(()=>pool.query(
+            "INSERT INTO support_business_branding(business_id,show_powered_by_cafe_pilot,updated_at) SELECT id,$2,CURRENT_TIMESTAMP FROM businesses WHERE id=$1 ON CONFLICT (business_id) DO UPDATE SET show_powered_by_cafe_pilot=EXCLUDED.show_powered_by_cafe_pilot,updated_at=CURRENT_TIMESTAMP RETURNING show_powered_by_cafe_pilot",
+            [businessId,show]
+        ));
+        if(!result.rows.length)return res.status(404).json({error:'Business not found'});
+        res.json({success:true,showPoweredByCafePilot:result.rows[0].show_powered_by_cafe_pilot});
+    } catch(e){console.error(e);res.status(500).json({error:'Failed to update invoice footer branding'});}
 });
 
 app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
@@ -8512,6 +8579,7 @@ async function ensurePerformanceIndexes() {
     const statements = [
         `CREATE INDEX IF NOT EXISTS idx_orders_business_created_at ON orders(business_id, created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`,
+        "CREATE INDEX IF NOT EXISTS idx_payments_order_business_status ON payments(order_id,business_id,payment_status)",
         `CREATE INDEX IF NOT EXISTS idx_customers_business_created_at ON customers(business_id, created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_reservations_business_created_at ON reservations(business_id, created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_kot_business_created_at ON kot(business_id, created_at DESC)`,

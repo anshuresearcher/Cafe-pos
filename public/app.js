@@ -2234,38 +2234,37 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         let orderNumber;
         const isNewOrder = !currentOpenOrderId;
         const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), options: item.options || [] }));
+        const kotEnabled = appSettings.kotEnabled !== false;
+        const checkoutPayload = {
+            payments: paymentsToRecord,
+            paymentMethod,
+            keepOpen: Boolean(paymentOptions.keepOpen),
+            nonChargeable: Boolean(paymentOptions.nonChargeable),
+            nonChargeableReason: String(paymentOptions.nonChargeableReason || ""),
+            createKot: !isNewOrder && kotEnabled,
+            customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null
+        };
+        let settlement;
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
-            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify(orderPayload) });
+            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
             order = updated.order;
             orderNumber = order.order_number;
+            settlement = updated;
         } else {
             orderNumber = (appSettings.orderPrefix || "ORD-") + Date.now().toString().slice(-8);
-            const kotEnabled = appSettings.kotEnabled !== false;
             const initialStatus = paymentOptions.keepOpen ? "Open" : "Pending";
-            const result = await api("/orders", { method: "POST", body: JSON.stringify({ orderNumber, ...orderPayload, initialStatus, createKot: !paymentOptions.keepOpen && kotEnabled }) });
+            const result = await api("/orders", { method: "POST", body: JSON.stringify({ orderNumber, ...orderPayload, initialStatus, createKot: !paymentOptions.keepOpen && kotEnabled, checkout: checkoutPayload }) });
             order = result.order;
             currentOpenOrderId = order.id;
             currentOpenOrderData = { order, items: [] };
+            settlement = result;
         }
 
-        const settlement = await api(`/orders/${order.id}/settle`, {
-            method: "POST",
-            body: JSON.stringify({
-                payments: paymentsToRecord,
-                paymentMethod,
-                keepOpen: Boolean(paymentOptions.keepOpen),
-                nonChargeable: Boolean(paymentOptions.nonChargeable),
-                nonChargeableReason: String(paymentOptions.nonChargeableReason || ""),
-                createKot: !isNewOrder && appSettings.kotEnabled !== false,
-                customerId: order.customer_id || billingCustomer?.id || null
-            })
-        });
         const completedOrder = settlement.order || order;
         const invoice = settlement.invoice || null;
         const paymentSummary = settlement.paymentSummary || {};
-        const kotEnabled = appSettings.kotEnabled !== false;
         closePayment();
         cart = [];
         currentOpenOrderId = null;
@@ -2489,6 +2488,28 @@ window.openBillPreview = function(data) {
     if (restaurantAddress) restaurantAddress.textContent = appSettings.address || "Cafe Management System";
     const restaurantPhone = document.getElementById("billRestaurantPhone");
     if (restaurantPhone) restaurantPhone.textContent = appSettings.phone || "";
+    const customHeader = document.getElementById("billCustomHeader");
+    if (customHeader) {
+        customHeader.textContent = String(appSettings.header || "").trim();
+        customHeader.hidden = !customHeader.textContent;
+    }
+    const customFooter = document.getElementById("billCustomFooter");
+    if (customFooter) customFooter.textContent = String(appSettings.footer || "Thank You!\nVisit Again 😊");
+    const poweredBy = document.getElementById("billPoweredBy");
+    if (poweredBy) {
+        poweredBy.textContent = "Powered by Cafe Pilot";
+        poweredBy.hidden = appSettings.showPoweredByCafePilot === false;
+    }
+    const statusBadge = document.getElementById("billStatusBadge");
+    if (statusBadge) {
+        const method = String(data?.paymentMethod || "").toLowerCase();
+        const status = String(data?.orderStatus || "").toLowerCase();
+        const due = Number(data?.amountDue || 0);
+        const collected = Number(data?.amountCollected || 0);
+        const state = status === "cancelled" ? "cancelled" : /non.?chargeable/.test(method) ? "paid" : due <= 0 ? "paid" : collected > 0 ? "partial" : "open";
+        statusBadge.dataset.state = state;
+        statusBadge.textContent = state === "cancelled" ? "CANCELLED" : state === "paid" ? (/non.?chargeable/.test(method) ? "NON-CHARGEABLE" : "PAID") : state === "partial" ? "PARTIALLY PAID" : "UNPAID";
+    }
 
     const fallbackItems = Number(data?.orderId) === Number(currentOrderForDetails?.order?.id)
         ? currentOrderForDetails?.items
@@ -2985,7 +3006,7 @@ window.switchOrdersTab = function(tab) {
     const statusFilter = document.getElementById("ordersStatusFilter");
     if (statusFilter) statusFilter.value = "";
     document.querySelectorAll(".orders-tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === window.currentOrdersTab));
-    updateOrdersTable();
+    updateOrdersTable(false);
 };
 
 async function viewOrderActivity(orderId) {
@@ -3019,12 +3040,8 @@ async function viewOrder(orderId) {
 
     try {
 
-        const [data, paymentSummary] = await Promise.all([
-            api(`/orders/${orderId}`),
-            api(`/orders/${orderId}/payment-summary`).catch(() => null)
-        ]);
-
-        data.paymentSummary = paymentSummary;
+        const data = await api("/orders/" + Number(orderId));
+        const paymentSummary = data.paymentSummary || null;
 
 
         currentOrderForDetails =
@@ -4970,10 +4987,8 @@ async function printKOT(orderId) {
 async function printOpenOrder(orderId){
     if(!hasPermission("orders","print_open"))return alert("You do not have permission to print open orders.");
     try{
-        const [data,paymentSummary]=await Promise.all([
-            api(`/orders/${Number(orderId)}`),
-            api(`/orders/${Number(orderId)}/payment-summary`).catch(()=>null)
-        ]);
+        const data=await api("/orders/"+Number(orderId));
+        const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
         const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[]}))};
@@ -4984,10 +4999,8 @@ async function printOpenOrder(orderId){
 
 async function viewOrderBill(orderId){
     try{
-        const [data,paymentSummary]=await Promise.all([
-            api(`/orders/${Number(orderId)}`),
-            api(`/orders/${Number(orderId)}/payment-summary`).catch(()=>null)
-        ]);
+        const data=await api("/orders/"+Number(orderId));
+        const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};let orderItems=Array.isArray(data.items)?data.items:[];if(!orderItems.length&&Number(currentOrderForDetails?.order?.id)===Number(orderId))orderItems=currentOrderForDetails.items||[];
         const collected=Number(paymentSummary?.amountCollected||0);
         window.openBillPreview({
@@ -5628,7 +5641,6 @@ const ACCESS_MODULES = [
     { key: "expenses", label: "Expenses" },
     { key: "loyalty", label: "Loyalty" },
     { key: "marketing", label: "Marketing" },
-    { key: "invoice_designer", label: "Invoice Designer" },
     { key: "advanced_reports", label: "Advanced Reports" },
     { key: "printer", label: "Printer" }
 ];
@@ -8424,6 +8436,8 @@ function printerReceiptText(data){
     lines.push("TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"));
     allocations.forEach(payment=>lines.push("  "+String(payment.method||"Payment")+": "+moneyValue(payment.amount||0)));
     lines.push("Amount collected: "+moneyValue(amountCollected),"Amount due: "+moneyValue(amountDue),"--------------------------------",appSettings.footer||"Thank you!");
+    lines.splice(4,0,...String(appSettings.header||"").split(/\r?\n/).map(line=>line.trim()).filter(Boolean));
+    if(appSettings.showPoweredByCafePilot!==false)lines.push("Powered by Cafe Pilot");
     return lines.filter(Boolean).join("\n")+"\n\n\n";
 }
 function isBluetoothSelectionCancelled(error){return /user cancell?ed the requestdevice\(\) chooser|bluetooth.*selection.*cancell?ed/i.test(String(error?.message||error||""))}
@@ -8551,7 +8565,7 @@ function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_US
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'invoice-designer':renderInvoiceDesignerPreview();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
+showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
 
 function setupDesktopWindowChrome(){
     const desktop=window.cafePOSDesktop;
@@ -8870,19 +8884,31 @@ function qrMenuTableUrl(table){
 async function renderTableQrCards(){
     const grid=document.getElementById("tableQrGrid");
     if(!grid)return;
+    const select=document.getElementById("tableQrTableSelect");
+    const previousValue=select?.value||"";
     tableQrMenuQrData=new Map();
     if(!tableQrMenuTables.length){
         grid.innerHTML='<div class="table-qr-empty">No POS tables yet. Add tables in <button type="button" class="table-action-btn" onclick="showPage(\'tables\')">Tables</button> to create their QR codes.</div>';
         return;
     }
-    grid.innerHTML=tableQrMenuTables.map(table=>{
+    if(select){
+        const options=tableQrMenuTables.map(table=>'<option value="'+Number(table.id)+'">Table '+esc(qrTableDisplayName(table.table_number))+'</option>').join("");
+        select.innerHTML='<option value="">Choose a table…</option>'+options;
+        select.value=tableQrMenuTables.some(table=>String(table.id)===previousValue)?previousValue:"";
+    }
+    const selectedTable=tableQrMenuTables.find(table=>Number(table.id)===Number(select?.value));
+    if(!selectedTable){
+        grid.innerHTML='<div class="table-qr-empty"><strong>Choose a table to get started</strong><span>Only the selected table QR will be generated. Download it as a PNG or print a table card.</span></div>';
+        return;
+    }
+    grid.innerHTML=[selectedTable].map(table=>{
         const id=Number(table.id),label="Table "+qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
         return '<article class="table-qr-card"><div class="table-qr-card-head"><h4>'+esc(label)+'</h4><span>'+esc(table.status||"Available")+'</span></div>'
             +'<div class="table-qr-preview"><img id="tableQrImage'+id+'" alt="QR code for '+esc(label)+'" hidden><div id="tableQrPlaceholder'+id+'" class="table-qr-placeholder">Generating QR…</div></div>'
             +'<span class="table-qr-link" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span>'
             +'<div class="table-qr-actions"><button id="tableQrDownload'+id+'" type="button" class="table-action-btn" onclick="downloadTableMenuQr('+id+')" disabled>↓ Download PNG</button><button id="tableQrPrint'+id+'" type="button" class="big-btn" onclick="printTableMenuQr('+id+')" disabled>Print</button></div></article>';
     }).join("");
-    await Promise.all(tableQrMenuTables.map(generateTableMenuQr));
+    await generateTableMenuQr(selectedTable);
 }
 
 async function generateTableMenuQr(table){

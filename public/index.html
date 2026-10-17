@@ -425,7 +425,6 @@
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')">💸 Expenses</button>
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')">📣 Marketing</button>
 
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('invoice-designer')">🎨 Invoice Designer</button>
         <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('advanced-reports')">📈 Advanced Reports</button>
 
         </nav>
@@ -747,17 +746,14 @@
                         </div>
         </section>
         <section id="orders" class="page orders-page">
-            <div class="orders-page-header">
-                <div><span class="eyebrow">SALES MANAGEMENT</span><h2>Orders</h2><p class="orders-subtitle">Search, filter and manage open and completed bills.</p></div>
-                <div class="orders-header-actions">
-                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
-                    <button type="button" class="big-btn orders-new-order-btn" onclick="showPage('new-order')">＋ New Order</button>
-                </div>
-            </div>
             <div class="orders-tabs" role="tablist" aria-label="Order status">
                 <button type="button" class="orders-tab-btn active" data-tab="open" onclick="switchOrdersTab('open')">Open <span id="openOrdersCount">0</span></button>
                 <button type="button" class="orders-tab-btn" data-tab="closed" onclick="switchOrdersTab('closed')">Closed <span id="closedOrdersCount">0</span></button>
                 <button type="button" class="orders-tab-btn" data-tab="cancelled" onclick="switchOrdersTab('cancelled')">Cancelled <span id="cancelledOrdersCount">0</span></button>
+                <div class="orders-header-actions">
+                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
+                    <button type="button" class="big-btn orders-new-order-btn" onclick="showPage('new-order')">＋ New Order</button>
+                </div>
             </div>
             <div class="orders-filter-bar" aria-label="Advanced order search">
                 <label><span>Status</span><select id="ordersStatusFilter" onchange="filterOrders()"><option value="">Use selected tab</option><option value="open">Open</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option></select></label>
@@ -1099,7 +1095,7 @@
         </section>
 
         <section id="table-qr-menu" class="page">
-          <div class="table-qr-module-header"><div><span class="menu-eyebrow">GUEST QR MENU</span><h2>Table QR Menu</h2><p>Create a separate scan code for every POS table, control guest publishing, and update sold-out status.</p></div></div>
+          <div class="table-qr-module-header"><div><span class="menu-eyebrow">GUEST QR MENU</span><h2>Table QR Menu</h2><p>Manage guest publishing, table QR codes, and sold-out status.</p></div></div>
           <section class="restaurant-menu-publisher">
             <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for the tables configured in your POS. Guests can scan them to view this menu.</p></div></div>
             <div class="restaurant-menu-publisher-controls">
@@ -1114,7 +1110,8 @@
           </section>
 
           <section class="table-qr-section">
-            <div class="table-qr-section-head"><div><h3>QR codes for your tables</h3><p>Each code opens the menu with its table name attached. Download PNGs or print table cards.</p></div><button type="button" class="table-action-btn" onclick="loadTableQrMenuModule()">↻ Refresh tables</button></div>
+            <div class="table-qr-section-head"><div><h3>Generate a table QR</h3><p>Select one POS table, then download or print its guest menu QR.</p></div><button type="button" class="table-action-btn" onclick="loadTableQrMenuModule()">↻ Refresh tables</button></div>
+            <div class="table-qr-selector-card"><label for="tableQrTableSelect">Choose table</label><select id="tableQrTableSelect" onchange="renderTableQrCards()"><option value="">Choose a table…</option></select><span>Only the selected table QR will be generated.</span></div>
             <div id="tableQrGrid" class="table-qr-grid"><div class="table-qr-empty">Loading your POS tables…</div></div>
           </section>
 
@@ -1541,10 +1538,6 @@
 <!-- =================================================
      INVOICE DESIGNER
      ================================================= -->
-<section id="invoice-designer" class="page">
-  <div class="page-header"><div><h2>🎨 Invoice Designer</h2><p>Configure a modern customer-facing bill without changing your existing invoice workflow.</p></div><button class="big-btn" onclick="saveInvoiceDesigner()">Save Design</button></div>
-  <div class="invoice-designer-grid"><div class="dashboard-box"><div class="form-group"><label>Receipt Accent Label</label><input id="designerAccent" placeholder="Cafe Receipt"></div><div class="form-group"><label>Logo URL</label><input id="designerLogo" placeholder="https://…"></div><div class="form-group"><label>Font Size</label><select id="designerFontSize"><option value="12">12px</option><option value="13" selected>13px</option><option value="14">14px</option><option value="15">15px</option></select></div><div class="settings-options"><label><input type="checkbox" id="designerShowNotes"> Show order notes</label><label><input type="checkbox" id="designerShowInvoiceMeta" checked> Show invoice metadata</label><label><input type="checkbox" id="designerCompact"> Compact receipt layout</label></div></div><div class="dashboard-box"><h3>Live Preview</h3><div id="invoiceDesignerPreview" class="invoice-preview-paper"></div></div></div>
-</section>
 
 <!-- =================================================
      ADVANCED REPORTS
@@ -2964,7 +2957,7 @@
     <div class="modal-content bill-modal">
 
         <div class="bill-preview-toolbar">
-            <h2>Bill</h2>
+            <div class="bill-preview-toolbar-title"><h2>Bill preview</h2><span id="billStatusBadge" class="bill-status-badge">UNPAID</span></div>
             <div>
                 <button type="button" class="bill-preview-print" onclick="printBill()" aria-label="Print bill" title="Print bill">🖨</button>
                 <button type="button" class="bill-preview-close" onclick="closeBillModal()" aria-label="Close bill preview" title="Close">×</button>
@@ -2978,6 +2971,7 @@
             </p>
             <p id="billRestaurantPhone"></p>
         </div>
+        <div id="billCustomHeader" class="bill-custom-header" hidden></div>
 
         <hr>
 
@@ -3092,11 +3086,10 @@
         </div>
 
         <div class="bill-footer">
-
-            <p>Thank You!</p>
-            <p>Visit Again 😊</p>
-
+            <p id="billCustomFooter">Thank You!
+Visit Again 😊</p>
         </div>
+        <p id="billPoweredBy" class="bill-powered-by">Powered by Cafe Pilot</p>
 
         <div class="bill-actions">
 
