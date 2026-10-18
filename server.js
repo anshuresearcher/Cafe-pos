@@ -1726,8 +1726,17 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
         if (!publication || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Order not found" });
         const businessId = Number(publication.business_id);
         const data = await tenantContext.run({ businessId }, async () => {
-            const orderResult = await pool.query(`SELECT id, order_number, order_type, table_number, status, subtotal, gst, total, created_at
-                FROM orders WHERE business_id=$1 AND id=$2 AND public_tracking_token=$3 AND order_number LIKE 'QR-%' LIMIT 1`,
+            const orderResult = await pool.query(`SELECT o.id, o.order_number, o.order_type, o.table_number, o.status, o.subtotal, o.gst, o.total, o.created_at,
+                    COALESCE(paid.amount_collected,0) AS amount_collected,
+                    GREATEST(o.total-COALESCE(paid.amount_collected,0),0) AS amount_due,
+                    COALESCE(paid.amount_collected,0) >= o.total AS is_paid
+                FROM orders o
+                LEFT JOIN LATERAL (
+                    SELECT SUM(amount) AS amount_collected
+                    FROM payments
+                    WHERE business_id=o.business_id AND order_id=o.id AND payment_status='Success'
+                ) paid ON TRUE
+                WHERE o.business_id=$1 AND o.id=$2 AND o.public_tracking_token=$3 AND o.order_number LIKE 'QR-%' LIMIT 1`,
                 [businessId, orderId, trackingToken]);
             const order = orderResult.rows[0];
             if (!order) return null;
@@ -1735,7 +1744,7 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
             return { ...order, items: lines.rows };
         });
         if (!data) return res.status(404).json({ error: "Order not found" });
-        res.set("Cache-Control", "no-store").json({ order: { ...data, subtotal: Number(data.subtotal || 0), gst: Number(data.gst || 0), total: Number(data.total || 0), items: data.items.map(item => ({ ...item, quantity: Number(item.quantity || 0), price: Number(item.price || 0), line_total: Number(item.line_total || 0) })) } });
+        res.set("Cache-Control", "no-store").json({ order: { ...data, subtotal: Number(data.subtotal || 0), gst: Number(data.gst || 0), total: Number(data.total || 0), amount_collected: Number(data.amount_collected || 0), amount_due: Number(data.amount_due || 0), is_paid: data.is_paid === true, items: data.items.map(item => ({ ...item, quantity: Number(item.quantity || 0), price: Number(item.price || 0), line_total: Number(item.line_total || 0) })) } });
     } catch (error) {
         console.error("Public QR order status error:", error);
         res.status(500).json({ error: "Could not load this order" });
