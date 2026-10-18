@@ -1154,6 +1154,8 @@
 
                     </button>
 
+                    <button id="downloadCustomersCsv" class="big-btn" type="button" data-export-module="customers" hidden onclick="downloadCustomersCSV()">↓ Download customers CSV</button>
+
 
                 </div>
 
@@ -1547,6 +1549,8 @@
 <p>Operational analytics stay separate from the main sales dashboard.</p></div><div class="advanced-report-filters"><select id="advancedReportRange" onchange="toggleAdvancedReportCustomDates()"><option value="today">Today</option><option value="week">This Week</option><option value="month" selected>This Month</option><option value="custom">Custom</option></select><span id="advancedReportCustomDates" hidden><input id="advancedReportFrom" type="date" aria-label="Report start date"><input id="advancedReportTo" type="date" aria-label="Report end date"></span><button class="big-btn" type="button" onclick="loadAdvancedReports()">Apply</button></div></div>
   <div id="advancedReportsOverview" class="module-card-grid">
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('hourly-sales')"><span class="module-card-icon">🕒</span><span class="module-card-copy"><strong>Hourly Sales</strong><span>Compare orders and sales across each hour.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('weekday-sales')"><span class="module-card-icon">📆</span><span class="module-card-copy"><strong>Sales by Weekday</strong><span>Find the busiest and highest earning days.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('daypart-sales')"><span class="module-card-icon">☕</span><span class="module-card-copy"><strong>Sales by Daypart</strong><span>Compare breakfast, lunch, afternoon, evening and late night.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('top-customers')"><span class="module-card-icon">👥</span><span class="module-card-copy"><strong>Top Customers</strong><span>See your highest value customers for this period.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review the reason, user ID, cancellation time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('discount-orders')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Review completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
@@ -1555,11 +1559,13 @@
   <div id="advancedReportDetails" hidden>
     <div class="module-subpage-header"><button type="button" class="module-back-button" onclick="showAdvancedReportsView('overview')">← Advanced Reports</button><div><span class="module-eyebrow">ANALYTICS</span><h2 id="advancedReportDetailTitle">Hourly Sales</h2><p id="advancedReportDetailDescription">Review the selected report.</p></div></div>
     <div class="cards advanced-report-summary-cards"><div class="card"><span>Expense Total</span><strong id="advancedExpenseTotal">₹0.00</strong></div><div class="card"><span>Cancellation Value</span><strong id="advancedCancelledValue">₹0.00</strong></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="hourly-sales"><h3>Hourly Sales</h3><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><h3>Top Customers</h3><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By User ID</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="discount-orders" hidden><div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="downloadDiscountReport" onclick="downloadAdvancedReport('discounts')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Discount</th><th>Discount Rule</th><th>Total</th><th>Payment</th></tr></thead><tbody id="advancedDiscountBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="non-chargeable-orders" hidden><div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="downloadNonChargeableReport" onclick="downloadAdvancedReport('non-chargeable')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="advancedNonChargeableBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="hourly-sales"><div class="advanced-report-table-heading"><h3>Hourly Sales</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('hourly-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="weekday-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Weekday</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('weekday-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Weekday</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedWeekdayBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="daypart-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Daypart</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('daypart-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Daypart</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedDaypartBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><div class="advanced-report-table-heading"><h3>Top Customers</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('top-customers')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By User ID</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="discount-orders" hidden><div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="downloadDiscountReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('discounts')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Discount</th><th>Discount Rule</th><th>Total</th><th>Payment</th></tr></thead><tbody id="advancedDiscountBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="non-chargeable-orders" hidden><div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="downloadNonChargeableReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('non-chargeable')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="advancedNonChargeableBody"></tbody></table></div></div>
   </div>
 </section>
 <!-- =================================================
@@ -1963,7 +1969,7 @@
 
     </div>
 
-    <button onclick="exportCompleteReportCSV()">
+    <button class="big-btn" type="button" data-export-module="reports" hidden onclick="exportCompleteReportCSV()">
     📊 Export Complete Report
 </button>
 
@@ -2039,6 +2045,29 @@
 
 
 
+    <div id="salesReportsOverview" class="module-card-grid sales-reports-overview">
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('sales-summary')"><span class="module-card-icon">🧮</span><span class="module-card-copy"><strong>Sales Summary</strong><span>Gross sales, discounts, charges, tax and payment totals.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('payments')"><span class="module-card-icon">💳</span><span class="module-card-copy"><strong>Payment Breakdown</strong><span>Collections by payment method.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('best-items')"><span class="module-card-icon">🔥</span><span class="module-card-copy"><strong>Best Selling Items</strong><span>Most popular menu items and revenue.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('category')"><span class="module-card-icon">📊</span><span class="module-card-copy"><strong>Sales by Category</strong><span>Compare item quantities and revenue by menu category.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('order-type')"><span class="module-card-icon">🍽️</span><span class="module-card-copy"><strong>Sales by Order Type</strong><span>Compare dine-in, takeaway and other order channels.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('daily')"><span class="module-card-icon">📅</span><span class="module-card-copy"><strong>Daily Sales</strong><span>Track sales and order counts across the selected dates.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('gst')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>GST / Tax Report</strong><span>Taxable sales and GST collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('audit')"><span class="module-card-icon">🔎</span><span class="module-card-copy"><strong>Sale Transaction Audit</strong><span>Payment transactions, collected amount and amount due.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('discounts')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('non-chargeable')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Completed orders recorded without payment.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    </div>
+    <div id="salesReportDetailsHeader" class="module-subpage-header" hidden><button type="button" class="module-back-button" onclick="showSalesReportView('overview')">← All Sales Reports</button><div><span class="module-eyebrow">SALES REPORT</span><h2 id="salesReportDetailTitle">Sales Summary</h2><p id="salesReportDetailDescription">Review the selected report.</p></div></div>
+
+    <div class="dashboard-box sales-summary-report">
+        <div class="advanced-report-table-heading">
+            <div><h3>🧮 Sales Summary</h3><p class="access-muted">Financial totals and payment breakdown for the selected date range.</p></div>
+            <button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadSalesSummaryCSV()">↓ Download Sales Summary CSV</button>
+        </div>
+        <div class="table-container"><table><thead><tr><th>Description</th><th>Total</th></tr></thead><tbody id="reportSalesSummaryBody"><tr><td colspan="2">Apply a date range to load the sales summary.</td></tr></tbody></table></div>
+    </div>
+
+
     <!-- =================================================
          PAYMENT BREAKDOWN
          ================================================= -->
@@ -2046,9 +2075,7 @@
     <div class="dashboard-box">
 
 
-        <h3>
-            💳 Payment Breakdown
-        </h3>
+        <div class="advanced-report-table-heading"><h3>💳 Payment Breakdown</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportPaymentBody','cafe-pos-payment-breakdown','Payment breakdown')">↓ Download CSV</button></div>
 
 
         <p
@@ -2123,9 +2150,7 @@
     <div class="dashboard-box">
 
 
-        <h3>
-            🔥 Best Selling Items
-        </h3>
+        <div class="advanced-report-table-heading"><h3>🔥 Best Selling Items</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportBestItemsBody','cafe-pos-best-selling-items','Best selling items')">↓ Download CSV</button></div>
 
 
         <p
@@ -2198,9 +2223,7 @@
 
     <div class="dashboard-box">
 
-        <h3>
-            📊 Sales by Category
-        </h3>
+        <div class="advanced-report-table-heading"><h3>📊 Sales by Category</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportCategoryBody','cafe-pos-sales-by-category','Sales by category')">↓ Download CSV</button></div>
 
         <p
             id="reportCategoryLabel"
@@ -2262,9 +2285,7 @@
 
 <div class="dashboard-box">
 
-    <h3>
-        🍽️ Sales by Order Type
-    </h3>
+    <div class="advanced-report-table-heading"><h3>🍽️ Sales by Order Type</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportOrderTypeBody','cafe-pos-sales-by-order-type','Sales by order type')">↓ Download CSV</button></div>
 
     <p
         id="reportOrderTypeLabel"
@@ -2321,7 +2342,7 @@
 
 <div class="dashboard-box">
 
-    <h3>📅 Daily Sales</h3>
+    <div class="advanced-report-table-heading"><h3>📅 Daily Sales</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportDailyBody','cafe-pos-daily-sales','Daily sales')">↓ Download CSV</button></div>
 
     <p id="reportDailyLabel"
        style="color:#777; margin-top:5px;">
@@ -2360,7 +2381,7 @@
 
 <div class="dashboard-box">
 
-    <h3>🧾 GST / Tax Report</h3>
+    <div class="advanced-report-table-heading"><h3>🧾 GST / Tax Report</h3><button class="big-btn" type="button" data-export-module="reports" hidden onclick="downloadReportTableCSV('reportGstBody','cafe-pos-gst-tax-report','GST and tax')">↓ Download CSV</button></div>
 
     <p id="reportGstLabel"
        style="color:#777; margin-top:5px;">
@@ -2399,7 +2420,7 @@
 <div class="dashboard-box sales-audit-box">
     <div class="sales-audit-header">
         <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review payment transactions, payment methods, amounts collected, and remaining due for the selected report period.</p></div>
-        <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
+        <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
     </div>
     <div id="salesAuditStatus" class="access-muted" role="status">Choose a date range above, then load the transaction audit.</div>
     <div class="table-container">
@@ -2412,12 +2433,12 @@
 
 
 <div class="dashboard-box report-order-category-box">
-    <div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="reportDiscountOrdersDownload" onclick="downloadOrderCategoryReport('discounts')" hidden>↓ Download CSV</button></div>
+    <div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="reportDiscountOrdersDownload" data-export-module="reports" onclick="downloadOrderCategoryReport('discounts')" hidden>↓ Download CSV</button></div>
     <p class="access-muted">Completed orders that used a discount during the selected report period.</p>
     <div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Table</th><th>Discount</th><th>Discount Rule</th><th>Payment</th><th>Total</th></tr></thead><tbody id="reportDiscountOrdersBody"><tr><td colspan="8">Loading…</td></tr></tbody></table></div>
 </div>
 <div class="dashboard-box report-order-category-box">
-    <div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="reportNonChargeableOrdersDownload" onclick="downloadOrderCategoryReport('non-chargeable')" hidden>↓ Download CSV</button></div>
+    <div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="reportNonChargeableOrdersDownload" data-export-module="reports" onclick="downloadOrderCategoryReport('non-chargeable')" hidden>↓ Download CSV</button></div>
     <p class="access-muted">Completed orders recorded without payment during the selected report period.</p>
     <div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Table</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="reportNonChargeableOrdersBody"><tr><td colspan="7">Loading…</td></tr></tbody></table></div>
 </div>

@@ -94,6 +94,8 @@ let accessUsers = [];
 let accessProfiles = [];
 let editingMenuItemId = null;
 let menuOptionSets = [];
+let menuOptionSetsLoaded = false;
+let menuOptionSetsLoadPromise = null;
 let currentMenuImageData = null;
 let editingAccessUserId = null;
 let editingAccessProfileId = null;
@@ -592,6 +594,10 @@ function applyPermissionsToUI(){
     if (loyaltySection && !canViewLoyalty) loyaltySection.hidden = true;
     if (loyaltyCard) loyaltyCard.hidden = !canViewLoyalty;
 
+    document.querySelectorAll("[data-export-module]").forEach(function(button){
+        button.hidden = !hasPermission(button.dataset.exportModule, "export");
+    });
+
     const label = document.getElementById("sessionUserLabel");
 
     if(label && currentUser){
@@ -1083,6 +1089,8 @@ function showAdvancedReportsView(reportKey = "overview") {
     const description = document.getElementById("advancedReportDetailDescription");
     const reports = {
         "hourly-sales": { title: "Hourly Sales", description: "Compare orders and sales across each hour." },
+        "weekday-sales": { title: "Sales by Weekday", description: "Find the busiest and highest earning days." },
+        "daypart-sales": { title: "Sales by Daypart", description: "Compare sales across breakfast, lunch, afternoon, evening and late night." },
         "top-customers": { title: "Top Customers", description: "See your highest value customers for this period." },
         "cancelled-orders": { title: "Cancelled Orders", description: "Review the cancellation reason, staff user ID, time and order value." },
         "discount-orders": { title: "Discounted Orders", description: "Review completed orders that used a discount." },
@@ -1094,6 +1102,34 @@ function showAdvancedReportsView(reportKey = "overview") {
     if (title) title.textContent = selected?.title || "Advanced Reports";
     if (description) description.textContent = selected?.description || "Choose a report to view its details.";
     document.querySelectorAll("[data-advanced-report-panel]").forEach(panel => { panel.hidden = panel.dataset.advancedReportPanel !== reportKey; });
+}
+
+function showSalesReportView(reportKey = "overview") {
+    const reports = {
+        "sales-summary": { title: "Sales Summary", description: "Gross sales, discounts, charges, tax and payment totals.", body: "reportSalesSummaryBody" },
+        payments: { title: "Payment Breakdown", description: "Collections by payment method.", body: "reportPaymentBody" },
+        "best-items": { title: "Best Selling Items", description: "Most popular menu items and revenue.", body: "reportBestItemsBody" },
+        category: { title: "Sales by Category", description: "Compare item quantities and revenue by menu category.", body: "reportCategoryBody" },
+        "order-type": { title: "Sales by Order Type", description: "Compare dine-in, takeaway and other order channels.", body: "reportOrderTypeBody" },
+        daily: { title: "Daily Sales", description: "Track sales and order counts across the selected dates.", body: "reportDailyBody" },
+        gst: { title: "GST / Tax Report", description: "Taxable sales and GST collected.", body: "reportGstBody" },
+        audit: { title: "Sale Transaction Audit", description: "Review payment transactions, collected amount and amount due.", body: "salesAuditBody" },
+        discounts: { title: "Discounted Orders", description: "Completed orders that used a discount.", body: "reportDiscountOrdersBody" },
+        "non-chargeable": { title: "Non-chargeable Orders", description: "Completed orders recorded without payment.", body: "reportNonChargeableOrdersBody" }
+    };
+    const selected = reports[reportKey];
+    const overview = document.getElementById("salesReportsOverview");
+    const header = document.getElementById("salesReportDetailsHeader");
+    if (overview) overview.hidden = Boolean(selected);
+    if (header) header.hidden = !selected;
+    setText("salesReportDetailTitle", selected?.title || "Sales Reports");
+    setText("salesReportDetailDescription", selected?.description || "Choose a report to view its details.");
+    Object.entries(reports).forEach(([key, report]) => {
+        const panel = document.getElementById(report.body)?.closest(".dashboard-box");
+        if (!panel) return;
+        panel.dataset.salesReportPanel = key;
+        panel.hidden = !selected || key !== reportKey;
+    });
 }
 
 
@@ -1704,7 +1740,27 @@ function getAvailableMenuVariants(item) {
         ? item.variants.filter(variant => variant && variant.available !== false && variant.available !== 0 && !["false", "0"].includes(String(variant.available).toLowerCase()))
         : [];
 }
-function selectBillingMenuItem(item) {
+async function loadMenuOptionSets(){
+    if(menuOptionSetsLoaded)return menuOptionSets;
+    if(!menuOptionSetsLoadPromise){
+        menuOptionSetsLoadPromise=api("/menu-option-sets")
+            .then(result=>{
+                menuOptionSets=Array.isArray(result?.optionSets)?result.optionSets:[];
+                menuOptionSetsLoaded=true;
+                return menuOptionSets;
+            })
+            .finally(()=>{menuOptionSetsLoadPromise=null;});
+    }
+    return menuOptionSetsLoadPromise;
+}
+async function selectBillingMenuItem(item) {
+    try{
+        await loadMenuOptionSets();
+    }catch(error){
+        console.error("Item options failed:",error);
+        showProfileToast("Could not load item choices. Please try again.");
+        return;
+    }
     if (Array.isArray(item?.variants) && item.variants.length) {
         openVariantPicker(item);
         return;
@@ -5097,7 +5153,7 @@ async function loadMenuManagement(){
         currentMenu=await api('/menu');
         setText('menuItemCount',currentMenu.length);
         try{kotGroups=await api('/kot-groups');}catch(_){kotGroups=kotGroups||[];}
-        try{menuOptionSets=(await api('/menu-option-sets')).optionSets||[];}catch(_){menuOptionSets=[];}
+        try{await loadMenuOptionSets();}catch(_){menuOptionSets=[];}
         renderMenuOptionSetsOverview();
         populateKOTGroupSelect();
         const list=document.querySelector('#menu .menu-list');
@@ -5303,7 +5359,7 @@ function renderMenuOptionSetsOverview(){
     list.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<article class="menu-option-set-summary-card"><div class="menu-option-set-summary-top"><span class="menu-option-set-summary-icon">🧩</span><span class="menu-option-set-summary-count">${(set.options||[]).length} choices</span></div><h3>${esc(set.name)}</h3><p>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} selections allowed</p><div class="menu-option-set-summary-choices">${(set.options||[]).slice(0,5).map(option=>`<span>${esc(option.name)}</span>`).join('')}${(set.options||[]).length>5?`<small>+${set.options.length-5} more</small>`:''}</div></article>`).join(''):'<div class="menu-option-sets-empty"><span>🧩</span><strong>No item option sets yet</strong><p>Create option sets here, then attach them to menu items.</p><button type="button" class="big-btn" onclick="openOptionSetsModal()">＋ Create an option set</button></div>';
 }
 async function openOptionSetsModal(){
-    try{menuOptionSets=(await api('/menu-option-sets')).optionSets||[];}catch(error){alert('Could not load option sets: '+error.message);return;}
+    try{await loadMenuOptionSets();}catch(error){alert('Could not load option sets: '+error.message);return;}
     if(!currentMenu.length){try{currentMenu=await api('/menu');}catch(error){alert('Could not load menu items: '+error.message);return;}}
     renderMenuOptionSetsOverview();renderOptionSetList();newOptionSet();document.getElementById('menuOptionSetsModal').style.display='flex';
 }
@@ -6736,6 +6792,42 @@ async function loadCustomers() {
 
 }
 
+function csvSafeCell(value){
+    let text=String(value??"");
+    if(typeof value!=="number"&&/^[\t\r ]*[=+\-@]/.test(text))text="'"+text;
+    return '"'+text.replace(/"/g,'""')+'"';
+}
+function downloadCsvRows(filename,rows){
+    const content="\uFEFF"+rows.map(row=>row.map(csvSafeCell).join(",")).join("\r\n");
+    const url=URL.createObjectURL(new Blob([content],{type:"text/csv;charset=utf-8"}));
+    const link=document.createElement("a");link.href=url;link.download=filename;document.body.appendChild(link);link.click();link.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+async function downloadCustomersCSV(){
+    if(!hasPermission("customers","export"))return showProfileToast("You don’t have permission to export customers.");
+    try{
+        const customers=await api("/customers?export=1");
+        const columns=[
+            ["Customer ID","id"],["Name","name"],["Phone","phone"],["Email","email"],["GSTIN","gstin"],
+            ["Birth date","birth_date"],["Address","address"],["City","city"],["State","state"],["Created at","created_at"]
+        ];
+        downloadCsvRows(`cafe-pos-customers-${new Date().toISOString().slice(0,10)}.csv`,[
+            columns.map(([label])=>label),
+            ...((Array.isArray(customers)?customers:[]).map(customer=>columns.map(([,key])=>customer?.[key]??"")))
+        ]);
+        showProfileToast(`${customers.length} customer record${customers.length===1?"":"s"} downloaded.`);
+    }catch(error){alert(error.message||"Could not download customer data.");}
+}
+function downloadReportTableCSV(bodyId,filename,label){
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
+    const body=document.getElementById(bodyId),table=body?.closest("table");
+    const headers=[...(table?.querySelectorAll("thead tr:last-child th")||[])].map(cell=>cell.innerText.replace(/\s+/g," ").trim());
+    if(!body||!headers.length)return alert("This report table is not available yet.");
+    const rows=[...body.querySelectorAll("tr")].map(row=>[...row.cells].map(cell=>cell.innerText.replace(/\s+/g," ").trim())).filter(row=>row.length===headers.length);
+    downloadCsvRows(`${filename}-${new Date().toISOString().slice(0,10)}.csv`,[headers,...rows]);
+    showProfileToast(`${label} report downloaded.`);
+}
+
 function cacheBillingCustomer(customer) {
     if (!customer?.id) return;
     const current = Array.isArray(currentCustomers) ? currentCustomers : [];
@@ -7241,6 +7333,7 @@ async function loadSalesAuditReport() {
 }
 
 function downloadSalesAuditCSV() {
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
     if (!salesAuditTransactions.length) return alert("Load sale transactions before downloading the audit.");
     const columns = [
         ["Payment time", row => row.payment_time], ["Order number", row => row.order_number], ["Invoice number", row => row.invoice_number],
@@ -7248,7 +7341,7 @@ function downloadSalesAuditCSV() {
         ["Payment status", row => row.payment_status], ["Transaction ID", row => row.transaction_id], ["Transaction amount", row => row.transaction_amount],
         ["Bill total", row => row.bill_total], ["Order amount collected to date", row => row.amount_collected], ["Order amount due", row => row.amount_due], ["Order status", row => row.order_status]
     ];
-    const csvCell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const csvCell = value => csvSafeCell(value);
     const content = "\uFEFF" + [columns.map(([label]) => label), ...salesAuditTransactions.map(row => columns.map(([, get]) => get(row)))].map(row => row.map(csvCell).join(",")).join("\r\n");
     const blobUrl = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
@@ -7573,6 +7666,15 @@ if (filter === "custom") {
             "💳 Payment report:",
             payments
         );
+
+        try{
+            const salesSummaryReport=await api("/reports/sales-summary"+queryString);
+            renderSalesSummaryReport(salesSummaryReport);
+        }catch(summaryError){
+            console.warn("Sales summary report failed:",summaryError.message);
+            const salesSummaryBody=document.getElementById("reportSalesSummaryBody");
+            if(salesSummaryBody)salesSummaryBody.innerHTML=`<tr><td colspan="2">Unable to load sales summary: ${esc(summaryError.message)}</td></tr>`;
+        }
 
 
         const paymentBody =
@@ -8139,15 +8241,62 @@ if (gstBody) {
 
 
 
+function salesSummaryReportRows(data){
+    const summary=data?.summary||{},payments=Array.isArray(data?.payments)?data.payments:[],charges=Array.isArray(data?.chargeBreakdown)?data.chargeBreakdown:[];
+    const notTracked="Not tracked";
+    const paidTotal=payments.reduce((sum,payment)=>sum+Number(payment.amount||0),0);
+    return [
+        ["Gross Sales (Net Sales - Direct Charges + Discounts + Sales Return)",Number(summary.gross_sales||0)],
+        ["Sales Return",notTracked],
+        ["Discounts",-Number(summary.discounts||0)],
+        ["Packaging charges (Direct Charges)",notTracked],
+        ["Net Sales",Number(summary.net_sales||0)],
+        ["Service charges (Indirect Charges)",Number(summary.service_charges||0)],
+        ["Taxes",Number(summary.taxes||0)],
+        ["Rounding",Number(summary.rounding||0)],
+        ["Tip",notTracked],
+        ["No. of people (PAX)",Number(summary.pax||0)],
+        ["Total Gross Revenue",Number(summary.total_gross_revenue||0)],
+        ["Payment Balance",Number(summary.payment_balance||0)],
+        ["", ""],
+        ["Cost of Goods Sold",notTracked],
+        ["Materials",notTracked],
+        ["Materials Audit",notTracked],
+        ["Materials Voided",notTracked],
+        ["Margin on Net Sales",notTracked],
+        ["", ""],
+        ["Payment Summary",paidTotal],
+        ...payments.map(payment=>[String(payment.payment_method||"Unknown"),Number(payment.amount||0)]),
+        ["", ""],
+        ["Charge Total",Number(summary.service_charges||0)],
+        ["", ""],
+        ...charges.map(charge=>[String(charge.name||"Service charges (Indirect Charges)"),Number(charge.amount||0)])
+    ];
+}
+function renderSalesSummaryReport(data){
+    const body=document.getElementById("reportSalesSummaryBody");if(!body)return;
+    body.innerHTML=salesSummaryReportRows(data).map(([description,total])=>description
+        ?`<tr><td>${esc(description)}</td><td>${typeof total==="number"?money(total):esc(total)}</td></tr>`
+        :'<tr class="sales-summary-spacer"><td></td><td></td></tr>').join("");
+}
+async function downloadSalesSummaryCSV(){
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
+    try{
+        const query=orderCategoryReportQuery(true,true);if(!query)return;
+        const data=await api(`/reports/sales-summary?${query}`);
+        downloadCsvRows(`cafe-pos-sales-summary-${new Date().toISOString().slice(0,10)}.csv`,[["Description","Total"],...salesSummaryReportRows(data)]);
+        showProfileToast("Sales summary report downloaded.");
+    }catch(error){alert(error.message||"Could not download the sales summary.");}
+}
+
 window.exportCompleteReportCSV = function() {
+
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
 
     console.log("📊 Complete report export started.");
 
     function csvEscape(value) {
-        return '"' +
-            String(value ?? "")
-                .replace(/"/g, '""') +
-            '"';
+        return csvSafeCell(value);
     }
 
     function appendTable(title, headers, bodyId) {
@@ -8174,7 +8323,7 @@ window.exportCompleteReportCSV = function() {
                 const values = Array.from(cells)
                     .slice(0, headers.length)
                     .map(function(cell) {
-                        return cell.innerText.trim();
+                        return cell.textContent.replace(/\s+/g, " ").trim();
                     });
 
                 csv += values.map(csvEscape).join(",") + "\r\n";
@@ -8230,6 +8379,12 @@ window.exportCompleteReportCSV = function() {
     csv += "\r\n";
 
     appendTable(
+        "SALES SUMMARY",
+        ["Description", "Total"],
+        "reportSalesSummaryBody"
+    );
+
+    appendTable(
         "PAYMENT BREAKDOWN",
         ["Payment Method", "Orders", "Amount"],
         "reportPaymentBody"
@@ -8265,6 +8420,24 @@ window.exportCompleteReportCSV = function() {
         "reportGstBody"
     );
 
+    appendTable(
+        "SALE TRANSACTION AUDIT",
+        ["Payment time", "Order / Invoice", "Type / Table", "Payment mode", "Transaction ID", "Transaction", "Bill total", "Order collected to date", "Order due", "Order status"],
+        "salesAuditBody"
+    );
+
+    appendTable(
+        "DISCOUNTED ORDERS",
+        ["Order", "Date", "Type", "Table", "Discount", "Discount Rule", "Payment", "Total"],
+        "reportDiscountOrdersBody"
+    );
+
+    appendTable(
+        "NON-CHARGEABLE ORDERS",
+        ["Order", "Date", "Type", "Table", "Reason", "Order Value", "Payment"],
+        "reportNonChargeableOrdersBody"
+    );
+
     const blob = new Blob(
         ["\uFEFF", csv],
         { type: "text/csv;charset=utf-8;" }
@@ -8294,6 +8467,8 @@ window.exportCompleteReportCSV = function() {
 // ==========================================
 
 window.exportReportsCSV = function () {
+
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
 
     console.log("Export CSV clicked");
 
@@ -8608,6 +8783,7 @@ async function loadOrderCategoryReports() {
 }
 
 async function downloadOrderCategoryReport(reportType) {
+    if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
     try {
         const query = orderCategoryReportQuery(true, true);
         if (!query) return;
@@ -8670,16 +8846,20 @@ async function loadAdvancedReports(){
         if(!query)return;
         const r=await api('/reports/advanced?'+query);
         advancedReportData=r;
-        const hourly=Array.isArray(r.hourly)?r.hourly:[], customers=Array.isArray(r.customers)?r.customers:[], cancelled=Array.isArray(r.cancelled)?r.cancelled:[];
+        const hourly=Array.isArray(r.hourly)?r.hourly:[], weekday=Array.isArray(r.weekday)?r.weekday:[], dayparts=Array.isArray(r.dayparts)?r.dayparts:[], customers=Array.isArray(r.customers)?r.customers:[], cancelled=Array.isArray(r.cancelled)?r.cancelled:[];
         const discounts=Array.isArray(r.discountOrders)?r.discountOrders:[], nonChargeable=Array.isArray(r.nonChargeableOrders)?r.nonChargeableOrders:[];
         setText('advancedExpenseTotal',money(r.expenseTotal));
         setText('advancedCancelledValue',money(cancelled.reduce((a,x)=>a+Number(x.value||0),0)));
         const hourlyBody=document.getElementById('advancedHourlyBody');
+        const weekdayBody=document.getElementById('advancedWeekdayBody');
+        const daypartBody=document.getElementById('advancedDaypartBody');
         const customersBody=document.getElementById('advancedCustomersBody');
         const cancelledBody=document.getElementById('advancedCancelledBody');
         const discountBody=document.getElementById('advancedDiscountBody');
         const nonChargeableBody=document.getElementById('advancedNonChargeableBody');
         if(hourlyBody)hourlyBody.innerHTML=hourly.length?hourly.map(x=>`<tr><td>${String(x.hour).padStart(2,'0')}:00</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
+        if(weekdayBody)weekdayBody.innerHTML=weekday.length?weekday.map(x=>`<tr><td>${esc(String(x.day||'').trim())}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
+        if(daypartBody)daypartBody.innerHTML=dayparts.length?dayparts.map(x=>`<tr><td>${esc(x.daypart)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(customersBody)customersBody.innerHTML=customers.length?customers.map(x=>`<tr><td>${esc(x.customer)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?new Date(x.cancelled_at).toLocaleString():'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${x.cancelled_by_user_id==null?'—':esc(x.cancelled_by_user_id)}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
         if(discountBody)discountBody.innerHTML=discounts.length?discounts.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${money(x.discount)}</td><td>${esc(x.discount_name||'Discount')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'—')}</td></tr>`).join(''):'<tr><td colspan="7">No discounted orders in this period.</td></tr>';
@@ -8698,11 +8878,16 @@ async function loadAdvancedReports(){
 }
 
 async function downloadAdvancedReport(reportType){
+    if(!hasPermission("advanced_reports","export"))return showProfileToast("You don’t have permission to export advanced reports.");
     try{
         const query=advancedReportQuery(true);
         if(!query)return;
         const data=await api(`/reports/advanced?${query}`);
         const keys={
+            'hourly-sales':{title:'Hourly Sales',rows:Array.isArray(data.hourly)?data.hourly:[],columns:[['Hour',x=>String(x.hour).padStart(2,'0')+':00'],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
+            'weekday-sales':{title:'Sales by Weekday',rows:Array.isArray(data.weekday)?data.weekday:[],columns:[['Weekday',x=>String(x.day||'').trim()],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
+            'daypart-sales':{title:'Sales by Daypart',rows:Array.isArray(data.dayparts)?data.dayparts:[],columns:[['Daypart',x=>x.daypart],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
+            'top-customers':{title:'Top Customers',rows:Array.isArray(data.customers)?data.customers:[],columns:[['Customer',x=>x.customer],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
             cancelled:{title:'Cancelled Orders',rows:Array.isArray(data.cancelled)?data.cancelled:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Cancelled At',x=>x.cancelled_at],['Reason',x=>x.reason||'Not recorded'],['Cancelled By User ID',x=>x.cancelled_by_user_id??''],['Order Value',x=>x.value]]},
             discounts:{title:'Discounted Orders',rows:Array.isArray(data.discountOrders)?data.discountOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Discount',x=>x.discount],['Discount Rule',x=>x.discount_name],['Payment',x=>x.payment_method],['Total',x=>x.total]]},
             'non-chargeable':{title:'Non-chargeable Orders',rows:Array.isArray(data.nonChargeableOrders)?data.nonChargeableOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Reason',x=>x.reason||'Not recorded'],['Order Value',x=>x.total],['Payment',x=>x.payment_method]]}
@@ -8713,7 +8898,7 @@ async function downloadAdvancedReport(reportType){
         const csv=['\uFEFF'+report.columns.map(column=>csvValue(column[0])).join(','),...report.rows.map(row=>report.columns.map(column=>csvValue(column[1](row))).join(','))].join('\r\n');
         const link=document.createElement('a');
         link.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
-        link.download=`cafe-pos-${reportType}-orders-${new Date().toISOString().slice(0,10)}.csv`;
+        link.download=`cafe-pos-${reportType}-${new Date().toISOString().slice(0,10)}.csv`;
         document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
         showProfileToast(`${report.title} report downloaded.`);
     }catch(error){alert(error.message||'Could not download this report.');}
@@ -8724,7 +8909,7 @@ function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_US
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'reports':loadOrderCategoryReports();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
+showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'reports':showSalesReportView('overview');loadOrderCategoryReports();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
 
 function setupDesktopWindowChrome(){
     const desktop=window.cafePOSDesktop;

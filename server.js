@@ -607,6 +607,8 @@ function permissionForRequest(req) {
     if (path === "/dashboard/stats") return "dashboard.view";
     if (path === "/reports/advanced") return req.query?.export === "1" ? "advanced_reports.export" : "advanced_reports.view";
     if (path === "/reports/order-categories") return req.query?.export === "1" ? "reports.export" : "reports.view";
+    if (path === "/reports/sales-summary") return req.query?.export === "1" ? "reports.export" : "reports.view";
+    if (path === "/customers" && req.query?.export === "1") return "customers.export";
     if (path.startsWith("/reports/")) return "reports.view";
     if (path === "/settings") return method === "GET" ? "settings.view" : "settings.edit";
     if (path === "/menu-option-sets") return method === "GET" ? "menu.view" : "menu.edit";
@@ -5607,6 +5609,84 @@ app.get("/api/reports/sales-audit", async (req, res) => {
     }
 });
 
+app.get("/api/reports/sales-summary", async (req, res) => {
+    try {
+        const range = req.query.range || "today";
+        const dateRange = getReportDateRange(range, req.query.from, req.query.to);
+        const businessId = Number(req.user.business_id);
+        const orderSummary = await pool.query(`
+            WITH period_orders AS (
+                SELECT o.id,o.subtotal,o.discount,o.service_charge,o.gst,o.total,o.pax,
+                       o.order_type,o.charge_adjustment_name
+                FROM orders o
+                WHERE o.business_id=$1
+                  AND o.status='Completed'
+                  AND EXISTS (
+                      SELECT 1 FROM payments p
+                      WHERE p.order_id=o.id AND p.business_id=o.business_id
+                        AND p.payment_status='Success'
+                        AND p.created_at >= ${dateRange.start}
+                        AND p.created_at < ${dateRange.end}
+                  )
+            ), paid_to_date AS (
+                SELECT p.order_id,SUM(p.amount) AS amount_paid
+                FROM payments p
+                INNER JOIN period_orders o ON o.id=p.order_id
+                WHERE p.business_id=$1 AND p.payment_status='Success'
+                GROUP BY p.order_id
+            )
+            SELECT
+                COALESCE(SUM(o.subtotal),0) AS gross_sales,
+                COALESCE(SUM(o.discount),0) AS discounts,
+                COALESCE(SUM(GREATEST(o.subtotal-o.discount,0)),0) AS net_sales,
+                COALESCE(SUM(o.service_charge),0) AS service_charges,
+                COALESCE(SUM(o.gst),0) AS taxes,
+                COALESCE(SUM(o.total-((o.subtotal-o.discount)+o.service_charge+o.gst)),0) AS rounding,
+                COALESCE(SUM(CASE WHEN LOWER(COALESCE(o.order_type,'')) LIKE '%dine%' THEN COALESCE(o.pax,1) ELSE 0 END),0) AS pax,
+                COALESCE(SUM(o.total),0) AS total_gross_revenue,
+                COALESCE(SUM(GREATEST(o.total-COALESCE(p.amount_paid,0),0)),0) AS payment_balance
+            FROM period_orders o
+            LEFT JOIN paid_to_date p ON p.order_id=o.id
+        `, [businessId]);
+        const paymentRows = await pool.query(`
+            SELECT payment_method,COALESCE(SUM(amount),0) AS amount
+            FROM payments
+            WHERE business_id=$1 AND payment_status='Success'
+              AND created_at >= ${dateRange.start} AND created_at < ${dateRange.end}
+            GROUP BY payment_method ORDER BY SUM(amount) DESC,payment_method
+        `, [businessId]);
+        const chargeRows = await pool.query(`
+            WITH period_orders AS (
+                SELECT o.service_charge,o.charge_adjustment_name
+                FROM orders o
+                WHERE o.business_id=$1 AND o.status='Completed' AND o.service_charge>0
+                  AND EXISTS (
+                      SELECT 1 FROM payments p
+                      WHERE p.order_id=o.id AND p.business_id=o.business_id
+                        AND p.payment_status='Success'
+                        AND p.created_at >= ${dateRange.start}
+                        AND p.created_at < ${dateRange.end}
+                  )
+            )
+            SELECT COALESCE(NULLIF(BTRIM(charge_adjustment_name),''),'Service charges') AS charge_name,
+                   COALESCE(SUM(service_charge),0) AS amount
+            FROM period_orders GROUP BY 1 ORDER BY SUM(service_charge) DESC,charge_name
+        `, [businessId]);
+        const row = orderSummary.rows[0] || {};
+        res.json({
+            range,
+            summary: Object.fromEntries([
+                "gross_sales", "discounts", "net_sales", "service_charges", "taxes", "rounding", "pax", "total_gross_revenue", "payment_balance"
+            ].map(key => [key, Number(row[key] || 0)])),
+            payments: paymentRows.rows.map(payment => ({ payment_method: payment.payment_method, amount: Number(payment.amount || 0) })),
+            chargeBreakdown: chargeRows.rows.map(charge => ({ name: charge.charge_name, amount: Number(charge.amount || 0) })),
+            untracked: ["sales_returns", "direct_charges", "tips", "cost_of_goods_sold", "materials", "materials_audit", "materials_voided", "margin_on_net_sales"]
+        });
+    } catch (error) {
+        res.status(400).json({ error: error.message || "Failed to load sales summary" });
+    }
+});
+
 app.get(
     "/api/reports/summary",
     async (req, res) => {
@@ -6727,6 +6807,7 @@ app.get('/api/reports/advanced', async (req, res) => {
 
         let hourly = [];
         let weekday = [];
+        let dayparts = [];
         let customers = [];
         let cancelled = [];
         let discountOrders = [];
@@ -6782,6 +6863,37 @@ app.get('/api/reports/advanced', async (req, res) => {
         } catch (e) {
             console.error("Advanced report weekday error:", e);
             warnings.push("Weekday sales unavailable");
+        }
+
+        // -----------------------------------------
+        // SALES BY CAFE DAYPART
+        // -----------------------------------------
+        try {
+            const result = await pool.query(`
+                SELECT
+                    CASE
+                        WHEN EXTRACT(HOUR FROM p.created_at) >= 5 AND EXTRACT(HOUR FROM p.created_at) < 11 THEN 'Breakfast'
+                        WHEN EXTRACT(HOUR FROM p.created_at) >= 11 AND EXTRACT(HOUR FROM p.created_at) < 15 THEN 'Lunch'
+                        WHEN EXTRACT(HOUR FROM p.created_at) >= 15 AND EXTRACT(HOUR FROM p.created_at) < 18 THEN 'Afternoon'
+                        WHEN EXTRACT(HOUR FROM p.created_at) >= 18 AND EXTRACT(HOUR FROM p.created_at) < 22 THEN 'Evening'
+                        ELSE 'Late night'
+                    END AS daypart,
+                    MIN(CASE WHEN EXTRACT(HOUR FROM p.created_at) < 5 THEN EXTRACT(HOUR FROM p.created_at) + 24 ELSE EXTRACT(HOUR FROM p.created_at) END)::int AS sort_hour,
+                    COUNT(DISTINCT p.order_id)::int AS orders,
+                    COALESCE(SUM(p.amount), 0) AS sales
+                FROM payments p
+                WHERE p.payment_status = 'Success'
+                  AND p.business_id = ${Number(req.user.business_id)}
+                  AND p.created_at >= ${dr.start}
+                  AND p.created_at < ${dr.end}
+                GROUP BY 1
+                ORDER BY sort_hour
+            `);
+
+            dayparts = result.rows;
+        } catch (e) {
+            console.error("Advanced report daypart error:", e);
+            warnings.push("Daypart sales unavailable");
         }
 
         // -----------------------------------------
@@ -6909,6 +7021,7 @@ app.get('/api/reports/advanced', async (req, res) => {
         res.json({
             hourly,
             weekday,
+            dayparts,
             customers,
             cancelled,
             discountOrders,
