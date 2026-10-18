@@ -605,7 +605,8 @@ function permissionForRequest(req) {
     const method = req.method.toUpperCase();
     if (path.startsWith("/auth/")) return null;
     if (path === "/dashboard/stats") return "dashboard.view";
-    if (path === "/reports/advanced") return "advanced_reports.view";
+    if (path === "/reports/advanced") return req.query?.export === "1" ? "advanced_reports.export" : "advanced_reports.view";
+    if (path === "/reports/order-categories") return req.query?.export === "1" ? "reports.export" : "reports.view";
     if (path.startsWith("/reports/")) return "reports.view";
     if (path === "/settings") return method === "GET" ? "settings.view" : "settings.edit";
     if (path === "/menu-option-sets") return method === "GET" ? "menu.view" : "menu.edit";
@@ -644,6 +645,7 @@ function permissionForRequest(req) {
     }
     if (path.endsWith("/payment-summary")) return "payments.view";
     if (path === "/orders" || path.startsWith("/orders/")) {
+        if (/^\/orders\/\d+\/cancel$/.test(path) && method === "PUT") return "orders.cancel";
         if (/^\/orders\/\d+\/printed$/.test(path)) return "orders.print_open";
         if (/^\/orders\/\d+\/kot$/.test(path)) return "orders.print_open";
         if (method === "GET") return "orders.view";
@@ -746,7 +748,9 @@ async function requireAuth(req, res, next) {
             const required = permissionForRequest(req);
             if (!required) return next();
             const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
-            const hasRequestedPermission = permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
+            const hasRequestedPermission = required === "orders.cancel"
+                ? ["orders.edit_open", "orders.edit", "orders.cancel_closed"].some(key => permissions[key] === true)
+                : permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
             if ((user.profile_name !== "Admin" || user.permissions_override !== null) && !hasRequestedPermission) {
                 return res.status(403).json({ error: "Permission denied: " + required });
             }
@@ -910,6 +914,9 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_printed_at TIMESTAMP`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS non_chargeable_reason VARCHAR(120)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason VARCHAR(300)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by_user_id INTEGER`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
     await pool.query(`CREATE TABLE IF NOT EXISTS order_activity (
         id SERIAL PRIMARY KEY,
         order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
@@ -920,6 +927,16 @@ async function ensureBusinessTables() {
         business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE
     )`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_activity_order_time ON order_activity(order_id, created_at DESC)`);
+    await pool.query(`
+        UPDATE orders o
+        SET cancelled_at = COALESCE(
+            (SELECT MAX(a.created_at) FROM order_activity a WHERE a.order_id=o.id AND a.business_id=o.business_id AND a.event_type='Order cancelled'),
+            o.updated_at,
+            o.created_at
+        )
+        WHERE o.status='Cancelled' AND o.cancelled_at IS NULL
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_cancelled_report ON orders(business_id,cancelled_at DESC) WHERE status='Cancelled'`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_id VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_name VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_adjustment_id VARCHAR(120)`);
@@ -1481,6 +1498,53 @@ app.get("/public-menu/:token", async (req, res) => {
     }
 });
 
+function normalizeQrGuestCustomer(value){
+    const source=value&&typeof value==="object"?value:{};
+    const name=String(source.name||"").trim();
+    const rawPhone=String(source.phone||"").trim();
+    const digits=rawPhone.replace(/\D/g,"");
+    const phone=(rawPhone.startsWith("+")?"+":"")+digits;
+    const email=String(source.email||"").trim();
+    const birthDate=String(source.birthDate||source.birth_date||"").trim();
+    if(!name||name.length>100)throw Object.assign(new Error("Enter your name (up to 100 characters)."),{status:400});
+    if(!/^\+?[\d\s().-]+$/.test(rawPhone)||digits.length<6||digits.length>15)throw Object.assign(new Error("Enter a valid phone or WhatsApp number."),{status:400});
+    if(email&&(email.length>254||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))throw Object.assign(new Error("Enter a valid email address or leave it blank."),{status:400});
+    if(birthDate){
+        const parsed=new Date(birthDate+"T00:00:00.000Z");
+        if(!/^\d{4}-\d{2}-\d{2}$/.test(birthDate)||Number.isNaN(parsed.getTime())||parsed.toISOString().slice(0,10)!==birthDate||parsed.getTime()>Date.now())throw Object.assign(new Error("Enter a valid birthday or leave it blank."),{status:400});
+    }
+    return{name,phone,email:email||null,birthDate:birthDate||null};
+}
+
+async function upsertQrGuestCustomer(queryable,businessId,customer){
+    const phoneDigits=customer.phone.replace(/\D/g,"");
+    const existing=await queryable.query("SELECT id FROM customers WHERE business_id=$1 AND regexp_replace(phone,'[^0-9]','','g')=$2 ORDER BY id LIMIT 1",[businessId,phoneDigits]);
+    if(existing.rows.length){
+        const updated=await queryable.query(`UPDATE customers SET name=$1,email=COALESCE($2,email),birth_date=COALESCE($3,birth_date) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date`,[customer.name,customer.email,customer.birthDate,existing.rows[0].id,businessId]);
+        return updated.rows[0];
+    }
+    const created=await queryable.query("INSERT INTO customers(name,phone,email,birth_date,business_id) VALUES($1,$2,$3,$4,$5) RETURNING id,name,phone,email,birth_date",[customer.name,customer.phone,customer.email,customer.birthDate,businessId]);
+    return created.rows[0];
+}
+
+app.post("/public-menu/:token/customers", async (req,res)=>{
+    const token=String(req.params.token||"");
+    if(!/^[a-f0-9]{48}$/i.test(token))return res.status(404).json({error:"Menu not found"});
+    try{
+        const details=normalizeQrGuestCustomer(req.body);
+        const access=await runSystemContext(()=>pool.query("SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1",[token]));
+        const publication=access.rows[0];
+        if(!publication||!publication.enabled||!(await businessHasLicenseAddon(publication.business_id,"Table QR")))return res.status(404).json({error:"This QR menu is not currently accepting orders"});
+        const businessId=Number(publication.business_id);
+        const customer=await tenantContext.run({businessId},()=>upsertQrGuestCustomer(pool,businessId,details));
+        res.status(200).json({success:true,customer});
+    }catch(error){
+        if(error.status)return res.status(error.status).json({error:error.message});
+        console.error("Save public QR guest details error:",error);
+        res.status(500).json({error:"Could not save your details"});
+    }
+});
+
 app.post("/public-menu/:token/orders", async (req, res) => {
     const token = String(req.params.token || "");
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
@@ -1492,6 +1556,9 @@ app.post("/public-menu/:token/orders", async (req, res) => {
     const assignedTableNumber = orderType === "Dine-in" ? tableNumber : null;
     const trackingToken = crypto.randomBytes(24).toString("hex");
     const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
+    let guestCustomerDetails;
+    try{guestCustomerDetails=normalizeQrGuestCustomer(req.body?.customer);}
+    catch(error){return res.status(error.status||400).json({error:error.message||"Enter your details before ordering"});}
     if (!linkTableNumber || tableNumber !== linkTableNumber || !tableNumber || tableNumber.length > 60 || /[\u0000-\u001f\u007f]/.test(tableNumber)) {
         return res.status(400).json({ error: "This order link does not have a valid table number" });
     }
@@ -1526,6 +1593,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                     [businessId, tableNumber]
                 );
                 if (!tableResult.rows.length) throw Object.assign(new Error("This QR link does not match a table in this POS"), { status: 400 });
+                const guestCustomer=await upsertQrGuestCustomer(client,businessId,guestCustomerDetails);
 
                 const linesByKey = new Map();
                 for (const source of requestedItems) {
@@ -1608,8 +1676,8 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
                 const note = String(req.body?.notes || "").trim().slice(0, 300);
                 const orderResult = await client.query(
-                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13) RETURNING id,order_number,table_number,total,status",
-                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, discount, selectedPromotion?.source === "marketing" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "marketing" ? selectedPromotion.name : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.name : null]
+                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14) RETURNING id,order_number,table_number,total,status",
+                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, discount, selectedPromotion?.source === "marketing" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "marketing" ? selectedPromotion.name : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.name : null, guestCustomer.id]
                 );
                 const order = orderResult.rows[0];
                 const itemValues = [];
@@ -1622,7 +1690,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                     "INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options) VALUES " + itemRows.join(","),
                     itemValues
                 );
-                await createKOTForOrder(client, businessId, order.id);
+                if (businessSettings.kotEnabled !== false) await createKOTForOrder(client, businessId, order.id);
                 if (orderType === "Dine-in") {
                     await client.query("UPDATE restaurant_tables SET status='Occupied' WHERE business_id=$1 AND table_number::text=$2", [businessId, tableNumber]);
                 }
@@ -2664,7 +2732,7 @@ app.post(
         // Completed = direct-sale workflow when KOT is disabled.
         const requestedStatus = String(b.initialStatus || b.status || "Pending").trim();
         const orderStatus = requestedStatus === "Open" ? "Open" : "Pending";
-        const createKot = b.createKot !== false;
+        const createKotRequested = b.createKot !== false;
 
 
         if (
@@ -2707,6 +2775,7 @@ app.post(
             const businessId = Number(req.user.business_id);
             const settingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
             const businessSettings = settingsRow.rows[0]?.settings || {};
+            const createKot = createKotRequested && businessSettings.kotEnabled !== false;
             const orderPrefix = String(businessSettings.orderPrefix || "ORD-").slice(0, 24);
             orderNumber = orderPrefix + Date.now().toString().slice(-8) + crypto.randomBytes(2).toString("hex").toUpperCase();
             if (businessSettings.gstCalculationEnabled === false) { total = Math.max(0, total - (Number(gst) || 0)); gst = 0; }
@@ -2966,6 +3035,8 @@ app.post("/api/orders/:id/kot", async (req,res)=>{
         await client.query("BEGIN");
         const order=await client.query("SELECT id FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE",[orderId,businessId]);
         if(!order.rows.length){await client.query("ROLLBACK");return res.status(404).json({error:"Order not found"});}
+        const settings=await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1",[businessId]);
+        if(settings.rows[0]?.settings?.kotEnabled===false){await client.query("ROLLBACK");return res.status(409).json({error:"Kitchen ticket generation is disabled in Settings."});}
         const created=createKOTForOrder(client,businessId,orderId);
         await created;
         await client.query("COMMIT");
@@ -2994,7 +3065,11 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
             ), new_qr_orders AS (
                 SELECT id,order_number,table_number,total,created_at
                 FROM orders
-                WHERE business_id=$1 AND $2::bigint IS NOT NULL AND id>$2 AND order_number LIKE 'QR-%'
+                WHERE business_id=$1 AND order_number LIKE 'QR-%'
+                  AND (
+                    ($2::bigint IS NOT NULL AND id>$2)
+                    OR ($2::bigint IS NULL AND LOWER(COALESCE(status,'')) IN ('pending','preparing'))
+                  )
                 ORDER BY id
             )
             SELECT latest.latest_order_id,
@@ -3178,7 +3253,7 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         WHERE id=$4 AND business_id=$5 RETURNING *
     `, [methodLabel, nextStatus, nonChargeable ? nonChargeableReason : null, normalizedOrderId, businessId]);
     const savedOrder = orderUpdate.rows[0];
-    if (!keepOpen && body.createKot === true) await createKOTForOrder(client, businessId, normalizedOrderId);
+    if (!keepOpen && body.createKot === true && order.checkout_settings?.kotEnabled !== false) await createKOTForOrder(client, businessId, normalizedOrderId);
     const paymentDescription = nonChargeable
         ? `Non-chargeable sale recorded · ${nonChargeableReason}.`
         : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
@@ -3365,6 +3440,7 @@ app.put(
             const canEditOpen = adminDefaults || permissions["orders.edit_open"] === true || permissions["orders.edit"] === true;
             const orderSettingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
             const orderSettings = orderSettingsRow.rows[0]?.settings || {};
+            const shouldCreateKot = createKot === true && orderSettings.kotEnabled !== false;
             const appliedGst = orderSettings.gstCalculationEnabled === false ? 0 : Number(gst);
             const appliedTotal = orderSettings.gstCalculationEnabled === false ? Math.max(0, Number(total) - Number(gst)) : Number(total);
             if (existingOrder.status === "Cancelled") throw new Error("Cancelled orders cannot be edited.");
@@ -3529,7 +3605,7 @@ app.put(
                 INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
                 VALUES ${itemRows.join(",")}
             `, itemValues);
-            if (createKot === true && existingOrder.status !== "Completed") await createKOTForOrder(client, Number(req.user.business_id), orderId);
+            if (shouldCreateKot && existingOrder.status !== "Completed") await createKOTForOrder(client, Number(req.user.business_id), orderId);
 
             if (existingOrder.status === "Completed") {
                 await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [Number(subtotal), appliedGst, appliedTotal, orderId]);
@@ -3630,17 +3706,24 @@ app.put(
             }
 
 
-            if (
-                [
-                    "Completed",
-                    "Cancelled"
-                ].includes(order.status)
-            ) {
-
-                throw new Error(
-                    "This order cannot be cancelled"
-                );
-
+            if (order.status === "Cancelled") throw Object.assign(new Error("This order has already been cancelled."), { status: 409 });
+            const permissions = req.user.permissions && typeof req.user.permissions === "object" ? req.user.permissions : {};
+            const adminDefaults = req.user.profile_name === "Admin" && req.user.permissions_override === null;
+            const closed = order.status === "Completed";
+            if (closed && !adminDefaults && permissions["orders.cancel_closed"] !== true) {
+                throw Object.assign(new Error("You do not have permission to cancel a closed order."), { status: 403 });
+            }
+            if (!closed && !adminDefaults && permissions["orders.edit_open"] !== true && permissions["orders.edit"] !== true) {
+                throw Object.assign(new Error("You do not have permission to cancel this open order."), { status: 403 });
+            }
+            const businessId = Number(req.user.business_id);
+            const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+            const settings = settingsResult.rows[0]?.settings || {};
+            const allowedReasons = [...new Set((Array.isArray(settings.cancellationReasons) ? settings.cancellationReasons : ["Customer request", "Duplicate order", "Item unavailable", "Other"])
+                .map(value => String(value || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30);
+            const reason = String(req.body?.reason || "").trim().slice(0, 300);
+            if (!reason || !allowedReasons.includes(reason)) {
+                throw Object.assign(new Error(allowedReasons.length ? "Choose a cancellation reason from Settings." : "Add a cancellation reason in Settings before cancelling orders."), { status: 400 });
             }
 
 
@@ -3648,11 +3731,12 @@ app.put(
                 await client.query(
                     `
                     UPDATE orders
-                    SET status = 'Cancelled'
+                    SET status = 'Cancelled', cancellation_reason=$3, cancelled_by_user_id=$4,
+                        cancelled_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
                     WHERE id = $1 AND business_id = $2
                     RETURNING *
                     `,
-                    [req.params.id, Number(req.user.business_id)]
+                    [req.params.id, businessId, reason, Number(req.user.id)]
                 );
 
 
@@ -3685,7 +3769,7 @@ app.put(
 
             }
 
-            await recordOrderActivity(client, order.id, "Order cancelled", "Order cancelled by staff.", req);
+            await recordOrderActivity(client, order.id, "Order cancelled", `Reason: ${reason}. Cancelled by user ID ${Number(req.user.id)}${closed ? ". Closed order cancellation." : "."}`, req);
 
             await client.query("COMMIT");
 
@@ -3701,7 +3785,7 @@ app.put(
                 "ROLLBACK"
             );
 
-            res.status(400).json({
+            res.status(e.status || 400).json({
                 error: e.message
             });
 
@@ -6598,6 +6682,38 @@ app.post('/api/backup/restore', async (req,res)=>{
 // =====================================================
 // ADVANCED REPORTS
 // =====================================================
+app.get('/api/reports/order-categories', async (req, res) => {
+    try {
+        const range = req.query.range || "today";
+        const dr = getReportDateRange(range, req.query.from, req.query.to);
+        const businessId = Number(req.user.business_id);
+        const [discountResult, nonChargeableResult] = await Promise.all([
+            pool.query(`
+                SELECT o.id AS order_id,o.order_number,o.created_at,o.order_type,o.table_number,
+                       o.discount,COALESCE(NULLIF(o.marketing_deal_name,''),NULLIF(o.discount_adjustment_name,''),'Discount') AS discount_name,
+                       o.payment_method,o.total
+                FROM orders o
+                WHERE o.business_id=$1 AND o.status='Completed' AND COALESCE(o.discount,0)>0
+                  AND o.created_at >= ${dr.start} AND o.created_at < ${dr.end}
+                ORDER BY o.created_at DESC,o.id DESC
+                LIMIT 5000
+            `, [businessId]),
+            pool.query(`
+                SELECT o.id AS order_id,o.order_number,o.created_at,o.order_type,o.table_number,
+                       o.non_chargeable_reason AS reason,o.total,o.payment_method
+                FROM orders o
+                WHERE o.business_id=$1 AND o.status='Completed' AND LOWER(COALESCE(o.payment_method,''))='non-chargeable'
+                  AND o.created_at >= ${dr.start} AND o.created_at < ${dr.end}
+                ORDER BY o.created_at DESC,o.id DESC
+                LIMIT 5000
+            `, [businessId])
+        ]);
+        res.json({ discountOrders: discountResult.rows, nonChargeableOrders: nonChargeableResult.rows });
+    } catch (e) {
+        res.status(400).json({ error: e.message || "Could not load order reports" });
+    }
+});
+
 app.get('/api/reports/advanced', async (req, res) => {
     try {
         const range = req.query.range || "month";
@@ -6613,6 +6729,8 @@ app.get('/api/reports/advanced', async (req, res) => {
         let weekday = [];
         let customers = [];
         let cancelled = [];
+        let discountOrders = [];
+        let nonChargeableOrders = [];
         let expenseTotal = 0;
 
         // -----------------------------------------
@@ -6704,22 +6822,67 @@ app.get('/api/reports/advanced', async (req, res) => {
         try {
             const result = await pool.query(`
                 SELECT
-                    DATE(o.created_at) AS date,
-                    COUNT(*)::int AS orders,
-                    COALESCE(SUM(o.total), 0) AS value
+                    o.id AS order_id,
+                    o.order_number,
+                    o.order_type,
+                    o.table_number,
+                    COALESCE(o.cancelled_at,o.updated_at,o.created_at) AS cancelled_at,
+                    o.cancellation_reason AS reason,
+                    o.cancelled_by_user_id,
+                    o.total AS value
                 FROM orders o
+                LEFT JOIN app_users u ON u.id=o.cancelled_by_user_id AND u.business_id=o.business_id
                 WHERE o.status = 'Cancelled'
-                  AND o.business_id = ${Number(req.user.business_id)}
-                  AND o.created_at >= ${dr.start}
-                  AND o.created_at < ${dr.end}
-                GROUP BY DATE(o.created_at)
-                ORDER BY date DESC
-            `);
+                  AND o.business_id = $1
+                  AND COALESCE(o.cancelled_at,o.updated_at,o.created_at) >= ${dr.start}
+                  AND COALESCE(o.cancelled_at,o.updated_at,o.created_at) < ${dr.end}
+                ORDER BY COALESCE(o.cancelled_at,o.updated_at,o.created_at) DESC,o.id DESC
+                LIMIT 5000
+            `, [Number(req.user.business_id)]);
 
             cancelled = result.rows;
         } catch (e) {
             console.error("Advanced report cancelled error:", e);
             warnings.push("Cancelled orders unavailable");
+        }
+
+        // -----------------------------------------
+        // DISCOUNTED ORDERS
+        // -----------------------------------------
+        try {
+            const result = await pool.query(`
+                SELECT o.id AS order_id,o.order_number,o.created_at,o.order_type,o.table_number,
+                       o.discount,COALESCE(NULLIF(o.marketing_deal_name,''),NULLIF(o.discount_adjustment_name,''),'Discount') AS discount_name,
+                       o.payment_method,o.total
+                FROM orders o
+                WHERE o.business_id=$1 AND o.status='Completed' AND COALESCE(o.discount,0)>0
+                  AND o.created_at >= ${dr.start} AND o.created_at < ${dr.end}
+                ORDER BY o.created_at DESC,o.id DESC
+                LIMIT 5000
+            `, [Number(req.user.business_id)]);
+            discountOrders = result.rows;
+        } catch (e) {
+            console.error("Advanced report discount orders error:", e);
+            warnings.push("Discounted orders unavailable");
+        }
+
+        // -----------------------------------------
+        // NON-CHARGEABLE ORDERS
+        // -----------------------------------------
+        try {
+            const result = await pool.query(`
+                SELECT o.id AS order_id,o.order_number,o.created_at,o.order_type,o.table_number,
+                       o.non_chargeable_reason AS reason,o.total,o.payment_method
+                FROM orders o
+                WHERE o.business_id=$1 AND o.status='Completed' AND LOWER(COALESCE(o.payment_method,''))='non-chargeable'
+                  AND o.created_at >= ${dr.start} AND o.created_at < ${dr.end}
+                ORDER BY o.created_at DESC,o.id DESC
+                LIMIT 5000
+            `, [Number(req.user.business_id)]);
+            nonChargeableOrders = result.rows;
+        } catch (e) {
+            console.error("Advanced report non-chargeable orders error:", e);
+            warnings.push("Non-chargeable orders unavailable");
         }
 
         // -----------------------------------------
@@ -6748,6 +6911,8 @@ app.get('/api/reports/advanced', async (req, res) => {
             weekday,
             customers,
             cancelled,
+            discountOrders,
+            nonChargeableOrders,
             expenseTotal,
             warnings
         });
@@ -6786,7 +6951,7 @@ const ACCESS_MODULES_SERVER = [
     "kitchen", "kot_groups", "menu", "customers", "payments", "reports", "settings", "access", "devices", "expenses", "loyalty", "marketing", "advanced_reports", "printer"
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
-const ACCESS_ORDER_PERMISSIONS_SERVER = ["orders.edit_open", "orders.print_open", "orders.edit_after_print", "orders.edit_closed"];
+const ACCESS_ORDER_PERMISSIONS_SERVER = ["orders.edit_open", "orders.print_open", "orders.edit_after_print", "orders.edit_closed", "orders.cancel_closed"];
 
 function defaultPermissionsServer() {
     const p = {};
@@ -6795,7 +6960,7 @@ function defaultPermissionsServer() {
             p[`${moduleKey}.${action}`] = false;
         }
     }
-    for (const key of ACCESS_ORDER_PERMISSIONS_SERVER) p[key] = key !== "orders.edit_closed";
+    for (const key of ACCESS_ORDER_PERMISSIONS_SERVER) p[key] = !["orders.edit_closed", "orders.cancel_closed"].includes(key);
     p["dashboard.view"] = true;
     return p;
 }
@@ -6859,6 +7024,7 @@ async function ensureAccessTables() {
             || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.print_open') THEN '{"orders.print_open":true}'::jsonb ELSE '{}'::jsonb END
             || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.edit_after_print') THEN '{"orders.edit_after_print":true}'::jsonb ELSE '{}'::jsonb END
             || CASE WHEN name='Admin' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.edit_closed') THEN '{"orders.edit_closed":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN NOT (COALESCE(permissions,'{}'::jsonb) ? 'orders.cancel_closed') THEN CASE WHEN name='Admin' THEN '{"orders.cancel_closed":true}'::jsonb ELSE '{"orders.cancel_closed":false}'::jsonb END ELSE '{}'::jsonb END
     `);
     await pool.query(`
         UPDATE access_profiles

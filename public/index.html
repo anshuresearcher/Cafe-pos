@@ -126,10 +126,10 @@
 .menu-price-variant-row span{font-size:13px;font-weight:650}.menu-price-variant-row input{width:100%;padding:10px;border:1px solid #dfe3e8;border-radius:9px}
 .table-qr-module-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:18px}.table-qr-module-header h2{margin:3px 0 5px}.table-qr-module-header p{margin:0;color:#697586;font-size:13px}
 .table-qr-section{margin:18px 0;padding:20px;background:#fff;border:1px solid #e5eaf0;border-radius:18px;box-shadow:0 8px 24px rgba(24,39,75,.05)}.table-qr-section-head{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;margin-bottom:14px}.table-qr-section-head h3{margin:0 0 4px}.table-qr-section-head p{margin:0;color:#697586;font-size:13px}.table-qr-search{max-width:300px;min-width:190px;padding:10px 12px;border:1px solid #d8e0e8;border-radius:10px}
-.table-qr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}.table-qr-card{min-width:0;padding:16px;border:1px solid #e6eaf0;border-radius:16px;background:#fff}.table-qr-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.table-qr-card-head h4{margin:0;font-size:16px}.table-qr-card-head span{color:#697586;font-size:11px}.table-qr-preview{display:grid;place-items:center;min-height:190px;margin:12px 0;padding:12px;border-radius:14px;background:#f7f8fa}.table-qr-preview img{width:170px;height:170px;object-fit:contain;image-rendering:pixelated}.table-qr-placeholder{color:#87909d;font-size:12px;text-align:center}.table-qr-actions{display:flex;gap:8px}.table-qr-actions button{flex:1}.table-qr-link{display:block;overflow:hidden;margin:9px 0 12px;color:#667386;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+.table-qr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px}.table-qr-card{min-width:0;padding:16px;border:1px solid #e6eaf0;border-radius:16px;background:#fff}.table-qr-card-head{display:flex;justify-content:space-between;align-items:center;gap:8px}.table-qr-card-head h4{margin:0;font-size:16px}.table-qr-card-head span{color:#697586;font-size:11px}.table-qr-preview{display:grid;place-items:center;min-height:220px;margin:12px 0;padding:12px;border-radius:14px;background:radial-gradient(circle at 20% 20%,#ffe6f1,#f1edff 60%,#eaf4c5)}.table-qr-preview img{width:142px;height:190px;object-fit:contain;image-rendering:auto;border-radius:9px;box-shadow:0 8px 22px #25222f24}.table-qr-placeholder{color:#87909d;font-size:12px;text-align:center}.table-qr-actions{display:flex;gap:8px}.table-qr-actions button{flex:1}.table-qr-link{display:block;overflow:hidden;margin:9px 0 12px;color:#667386;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
 .qr-stock-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}.qr-stock-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px;border:1px solid #e6eaf0;border-radius:13px}.qr-stock-card strong{display:block;font-size:13px}.qr-stock-card small{display:block;margin-top:3px;color:#798394;font-size:11px}.qr-stock-card .menu-availability-toggle{flex:0 0 auto}.qr-stock-empty,.table-qr-empty{grid-column:1/-1;padding:28px;border:1px dashed #d9dee6;border-radius:14px;color:#788392;text-align:center}
 @media(max-width:650px){.restaurant-menu-publisher-head{display:block}.restaurant-menu-publisher-controls{align-items:stretch}.menu-price-fields{grid-template-columns:1fr}.menu-admin-actions .menu-availability-toggle{margin-left:0}.menu-price-variant-row{grid-template-columns:1fr 120px}}
-@media(max-width:650px){.table-qr-module-header,.table-qr-section-head{display:block}.table-qr-search{max-width:none;width:100%;margin-top:12px}.table-qr-actions{flex-direction:column}.table-qr-preview{min-height:160px}.table-qr-preview img{width:145px;height:145px}}
+@media(max-width:650px){.table-qr-module-header,.table-qr-section-head{display:block}.table-qr-search{max-width:none;width:100%;margin-top:12px}.table-qr-actions{flex-direction:column}.table-qr-preview{min-height:210px}.table-qr-preview img{width:132px;height:178px}}
 </style>
 </head>
 
@@ -1097,7 +1097,7 @@
         <section id="table-qr-menu" class="page">
           <div class="table-qr-module-header"><div><span class="menu-eyebrow">GUEST QR MENU</span><h2>Table QR Menu</h2><p>Manage guest publishing, table QR codes, and sold-out status.</p></div></div>
           <section class="restaurant-menu-publisher">
-            <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for the tables configured in your POS. Guests can scan them to view this menu.</p></div></div>
+            <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for your POS tables. Guests enter their name and phone first, then browse the live menu—no OTP.</p></div></div>
             <div class="restaurant-menu-publisher-controls">
               <label class="restaurant-menu-publish-toggle"><input id="publicMenuEnabled" type="checkbox"> Publish QR menu</label>
               <label for="publicMenuPriceChannel">Guest price list</label>
@@ -1544,18 +1544,22 @@
      ================================================= -->
 <section id="advanced-reports" class="page">
   <div class="page-header"><div><h2>📈 Advanced Reports</h2><div id="advancedReportWarnings" class="report-warning" role="status"></div>
-<p>Operational analytics stay separate from the main sales dashboard.</p></div><div><select id="advancedReportRange"><option value="today">Today</option><option value="week">This Week</option><option value="month" selected>This Month</option><option value="custom">Custom</option></select><button class="big-btn" onclick="loadAdvancedReports()">Apply</button></div></div>
+<p>Operational analytics stay separate from the main sales dashboard.</p></div><div class="advanced-report-filters"><select id="advancedReportRange" onchange="toggleAdvancedReportCustomDates()"><option value="today">Today</option><option value="week">This Week</option><option value="month" selected>This Month</option><option value="custom">Custom</option></select><span id="advancedReportCustomDates" hidden><input id="advancedReportFrom" type="date" aria-label="Report start date"><input id="advancedReportTo" type="date" aria-label="Report end date"></span><button class="big-btn" type="button" onclick="loadAdvancedReports()">Apply</button></div></div>
   <div id="advancedReportsOverview" class="module-card-grid">
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('hourly-sales')"><span class="module-card-icon">🕒</span><span class="module-card-copy"><strong>Hourly Sales</strong><span>Compare orders and sales across each hour.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('top-customers')"><span class="module-card-icon">👥</span><span class="module-card-copy"><strong>Top Customers</strong><span>See your highest value customers for this period.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
-    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review cancellations by date and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review the reason, user ID, cancellation time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('discount-orders')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Review completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('non-chargeable-orders')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Review completed orders with no payment collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
   </div>
   <div id="advancedReportDetails" hidden>
     <div class="module-subpage-header"><button type="button" class="module-back-button" onclick="showAdvancedReportsView('overview')">← Advanced Reports</button><div><span class="module-eyebrow">ANALYTICS</span><h2 id="advancedReportDetailTitle">Hourly Sales</h2><p id="advancedReportDetailDescription">Review the selected report.</p></div></div>
     <div class="cards advanced-report-summary-cards"><div class="card"><span>Expense Total</span><strong id="advancedExpenseTotal">₹0.00</strong></div><div class="card"><span>Cancellation Value</span><strong id="advancedCancelledValue">₹0.00</strong></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="hourly-sales"><h3>Hourly Sales</h3><div class="table-container"><table><thead><tr><th>Hour</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedHourlyBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><h3>Top Customers</h3><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><h3>Cancelled Orders</h3><div class="table-container"><table><thead><tr><th>Date</th><th>Orders</th><th>Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By User ID</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="discount-orders" hidden><div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="downloadDiscountReport" onclick="downloadAdvancedReport('discounts')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Discount</th><th>Discount Rule</th><th>Total</th><th>Payment</th></tr></thead><tbody id="advancedDiscountBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="non-chargeable-orders" hidden><div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="downloadNonChargeableReport" onclick="downloadAdvancedReport('non-chargeable')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="advancedNonChargeableBody"></tbody></table></div></div>
   </div>
 </section>
 <!-- =================================================
@@ -1626,7 +1630,7 @@
             <span>Print</span>
         </div>
         <div id="accessPermissionsEditor" class="access-permissions-editor"></div>
-        <div class="order-permission-controls"><h3>Order controls</h3><p class="access-muted">Control open-order edits, printing and changes to completed bills.</p><div id="accessOrderPermissionEditor" class="order-permission-grid"></div></div>
+        <div class="order-permission-controls"><h3>Order controls</h3><p class="access-muted">Control open-order edits, printing, closed-bill edits and closed-order cancellation.</p><div id="accessOrderPermissionEditor" class="order-permission-grid"></div></div>
         <div class="modal-actions">
             <button class="big-btn" type="button" onclick="saveAccessProfile()">💾 Save Profile</button>
             <button class="cancel-btn" type="button" onclick="closeAccessProfileModal()">Cancel</button>
@@ -1741,6 +1745,11 @@
                 <h3>Non-chargeable Reasons</h3>
                 <p class="access-muted">Add one reason per line. Staff must choose a saved reason before a no-charge bill can be completed.</p>
                 <div class="form-group"><label for="settingNonChargeableReasons">Available reasons</label><textarea id="settingNonChargeableReasons" rows="6" maxlength="3200" placeholder="Complimentary&#10;Staff meal&#10;Customer recovery&#10;Promotion"></textarea></div>
+            </div>
+            <div class="settings-card" data-settings-feature="cancellation-reasons" hidden>
+                <h3>Cancellation Reasons</h3>
+                <p class="access-muted">Add one reason per line. Staff choose one of these reasons whenever an order is cancelled.</p>
+                <div class="form-group"><label for="settingCancellationReasons">Available reasons</label><textarea id="settingCancellationReasons" rows="6" maxlength="3600" placeholder="Customer request&#10;Duplicate order&#10;Item unavailable&#10;Other"></textarea></div>
             </div>
             <div class="settings-card" data-settings-feature="billing-rules" hidden>
                 <h3>🧮 Billing Rules</h3>
@@ -1944,7 +1953,7 @@
 
             <button
                 class="big-btn"
-                onclick="loadReports();loadSalesAuditReport()">
+                onclick="loadReports();loadSalesAuditReport();loadOrderCategoryReports()">
 
                 🔄 Apply
 
@@ -2399,6 +2408,18 @@
             <tbody id="salesAuditBody"><tr><td colspan="10">No audit loaded.</td></tr></tbody>
         </table>
     </div>
+</div>
+
+
+<div class="dashboard-box report-order-category-box">
+    <div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="reportDiscountOrdersDownload" onclick="downloadOrderCategoryReport('discounts')" hidden>↓ Download CSV</button></div>
+    <p class="access-muted">Completed orders that used a discount during the selected report period.</p>
+    <div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Table</th><th>Discount</th><th>Discount Rule</th><th>Payment</th><th>Total</th></tr></thead><tbody id="reportDiscountOrdersBody"><tr><td colspan="8">Loading…</td></tr></tbody></table></div>
+</div>
+<div class="dashboard-box report-order-category-box">
+    <div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="reportNonChargeableOrdersDownload" onclick="downloadOrderCategoryReport('non-chargeable')" hidden>↓ Download CSV</button></div>
+    <p class="access-muted">Completed orders recorded without payment during the selected report period.</p>
+    <div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Table</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="reportNonChargeableOrdersBody"><tr><td colspan="7">Loading…</td></tr></tbody></table></div>
 </div>
 
 </section>
@@ -3134,6 +3155,17 @@ Visit Again 😊</p>
             <button type="button" class="cancel-btn" onclick="closeBillingAdjustmentModal()">Cancel</button>
             <button type="button" class="big-btn" onclick="saveBillingAdjustment()">💾 Save Rule</button>
         </div>
+    </div>
+</div>
+
+<div id="cancelOrderModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cancelOrderDialogTitle">
+    <div class="modal-content cancel-order-dialog">
+        <div class="modal-heading"><div><span class="module-eyebrow">ORDER CANCELLATION</span><h2 id="cancelOrderDialogTitle">Cancel order</h2></div><button type="button" class="close-btn" onclick="closeCancelOrderDialog()" aria-label="Close cancellation dialog">✕</button></div>
+        <p id="cancelOrderDialogDescription" class="cancel-order-description">Choose a reason to cancel this order.</p>
+        <p id="cancelOrderPaymentNotice" class="cancel-order-payment-notice" hidden>This order is already closed. Cancelling records the order as cancelled; handle any payment refund separately.</p>
+        <div class="form-group"><label for="cancelOrderReason">Cancellation reason</label><select id="cancelOrderReason"></select></div>
+        <p id="cancelOrderDialogError" class="cancel-order-error" role="alert" hidden></p>
+        <div class="modal-actions"><button type="button" class="table-action-btn" onclick="closeCancelOrderDialog()">Keep order</button><button type="button" class="cancel-btn" id="confirmCancelOrderButton" onclick="submitCancelOrder()">Cancel order</button></div>
     </div>
 </div>
 

@@ -106,6 +106,8 @@ const STARTER_PAYMENT_MODES = [
 
 const DEFAULT_NON_CHARGEABLE_REASONS = ["Complimentary", "Staff meal", "Customer recovery", "Promotion"];
 function normalizeNonChargeableReasons(value) { return [...new Set((Array.isArray(value) ? value : []).map(reason => String(reason || "").trim().slice(0, 100)).filter(Boolean))].slice(0, 30); }
+const DEFAULT_CANCELLATION_REASONS = ["Customer request", "Duplicate order", "Item unavailable", "Other"];
+function normalizeCancellationReasons(value) { return [...new Set((Array.isArray(value) ? value : []).map(reason => String(reason || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30); }
 
 let appSettings = {
     restaurantName: "CAFE POS", address: "", phone: "", gstin: "",
@@ -117,6 +119,7 @@ let appSettings = {
     paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
     defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: STARTER_PAYMENT_MODES.map(mode => ({ ...mode })), orderPrefix: "ORD-", invoicePrefix: "INV-",
     nonChargeableReasons: DEFAULT_NON_CHARGEABLE_REASONS.slice(),
+    cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
     allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
     printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
@@ -460,6 +463,9 @@ async function loadLoginBusinessWelcome() {
 }
 async function loginUser(event) {
     event?.preventDefault();
+    // Prime audio while the login submit is still a trusted user gesture;
+    // waiting for the network response can make browsers block later alerts.
+    primeKOTAlertAudio();
     const username=document.getElementById("loginUsername")?.value.trim()||"";
     const password=document.getElementById("loginPassword")?.value||"";
     const box=document.getElementById("loginError"); if(box) box.textContent="";
@@ -469,7 +475,7 @@ async function loginUser(event) {
         authToken=data.token; currentUser=data.user; currentDevice=data.device||null; currentLicense=data.license||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.setItem("cafeAuthToken",authToken);
         const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
         scheduleSessionExpiry(data.expiresAt || (Date.now() + fallbackSessionHours * 60 * 60 * 1000));
-        primeKOTAlertAudio(); await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
+        await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
 async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
@@ -993,6 +999,7 @@ const SETTINGS_FEATURES = [
     { key: "pos-preferences", title: "POS Preferences", icon: "🧭", description: "Choose sales channels and defaults for each POS module." },
     { key: "billing-rules", title: "Billing Rules", icon: "🧮", description: "Set payment, invoice numbering and bill rounding rules." },
     { key: "non-chargeable", title: "Non-chargeable Reasons", icon: "📝", description: "Choose the reasons staff can use for no-charge bills." },
+    { key: "cancellation-reasons", title: "Cancellation Reasons", icon: "↩️", description: "Manage the reasons staff select when cancelling orders." },
     { key: "printer-receipt", title: "Printer & Receipt", icon: "🖨️", description: "Set receipt branding, UPI details and print behavior." },
     { key: "operations", title: "Operations", icon: "🕒", description: "Set opening hours, order type and order note behavior." },
     { key: "alerts-customer-experience", title: "Alert & Customer Experience", icon: "🔔", description: "Set customer messages, stock alerts and KOT alerts." },
@@ -1077,7 +1084,9 @@ function showAdvancedReportsView(reportKey = "overview") {
     const reports = {
         "hourly-sales": { title: "Hourly Sales", description: "Compare orders and sales across each hour." },
         "top-customers": { title: "Top Customers", description: "See your highest value customers for this period." },
-        "cancelled-orders": { title: "Cancelled Orders", description: "Review cancellations by date and order value." }
+        "cancelled-orders": { title: "Cancelled Orders", description: "Review the cancellation reason, staff user ID, time and order value." },
+        "discount-orders": { title: "Discounted Orders", description: "Review completed orders that used a discount." },
+        "non-chargeable-orders": { title: "Non-chargeable Orders", description: "Review completed orders with no payment collected." }
     };
     const selected = reports[reportKey];
     if (overview) overview.hidden = Boolean(selected);
@@ -2275,22 +2284,24 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         if (kotEnabled && appSettings.kotPrintMode === "checkout" && !paymentOptions.keepOpen) {
             Promise.resolve().then(() => printKOT(order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
         }
-        openBillPreview({
+        window.currentBillData = {
             orderId: completedOrder.id || order.id,
+            isOpenOrder: Boolean(paymentOptions.keepOpen),
             orderNumber: completedOrder.order_number || orderNumber,
             invoiceNumber: invoice?.invoice_number || null,
             orderType: completedOrder.order_type || orderType,
             tableNumber: completedOrder.table_number || tableNumber,
             pax: completedOrder.pax || (orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null),
-            subtotal: Number(completedOrder.subtotal || subtotal),
+            subtotal: Number(completedOrder.subtotal ?? subtotal),
             discount: Number(completedOrder.discount ?? b.discount),
             discountName: b.discountName,
             serviceCharge: Number(completedOrder.service_charge ?? b.serviceCharge),
             chargeName: b.chargeName,
-            gst: Number(completedOrder.gst || gst),
-            total: Number(completedOrder.total || total),
+            gst: Number(completedOrder.gst ?? gst),
+            total: Number(completedOrder.total ?? total),
             roundingAdjustment: b.roundingAdjustment,
-            paymentMethod, customerId: completedOrder.customer_id || billingCustomer?.id || null,
+            paymentMethod,
+            customerId: completedOrder.customer_id || billingCustomer?.id || null,
             customerName: completedOrder.customer_name || billingCustomer?.name || customerName || priorOrder.customer_name || null,
             customerPhone: completedOrder.customer_phone || billingCustomer?.phone || customerPhone || priorOrder.customer_phone || null,
             customerEmail: completedOrder.customer_email || billingCustomer?.email || customerEmail || priorOrder.customer_email || null,
@@ -2303,7 +2314,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             amountCollected: Number(paymentSummary.amountCollected || 0),
             amountDue: Number(paymentSummary.amountDue || 0),
             items: billItems
-        });
+        };
         showPage("new-order");
         showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : "Sale completed");
         if (!paymentOptions.keepOpen && appSettings.autoPrint === true) Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
@@ -2390,9 +2401,9 @@ async function saveOpenOrder() {
             currentOpenOrderData = null;
             updateCart();
             await loadTables(); await updateDashboard(); await updateOrdersTable();
-            alert(`${String(result.order.status||'').toLowerCase()==='completed'?'Closed bill updated':'Open order updated'} successfully.\n\nOrder: ${result.order.order_number}`);
+            const savedStatus = String(result.order.status || "").toLowerCase();
+            showProfileToast(savedStatus === "completed" ? "Bill changes saved successfully." : "Order saved successfully.");
             if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
-            showPage("orders");
             return;
         }
 
@@ -2418,10 +2429,9 @@ async function saveOpenOrder() {
         currentOpenOrderId = null;
         currentOpenOrderData = null;
         updateCart();
-        alert(`Order saved successfully.\n\nOrder: ${orderNumber}\nStatus: Open`);
         await loadTables(); await updateDashboard(); await updateOrdersTable();
+        showProfileToast("Order saved successfully.");
         if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
-        showPage("orders");
     } catch (error) {
         console.error(error);
         alert("Failed to save open order: " + error.message);
@@ -2764,7 +2774,7 @@ window.closeBillModal = function() {
 
 window.printBill = function() {
 
-    window.printThermalBill();
+    window.printThermalBill({ manual: true });
 };
 
   const width =
@@ -2776,11 +2786,13 @@ window.printBill = function() {
     ) ||
     "80";
 
-window.printThermalBill = async function() {
+window.printThermalBill = async function(options = {}) {
     const data = window.currentBillData;
-    const billCopies = Math.min(20, Math.max(0, Math.floor(Number(appSettings.billCopies) || 0)));
+    const manualPrint = options.manual === true;
+    const configuredBillCopies = Math.min(20, Math.max(0, Math.floor(Number(appSettings.billCopies) || 0)));
+    const billCopies = manualPrint && configuredBillCopies === 0 ? 1 : configuredBillCopies;
     if (!data) return alert("No bill is available to print.");
-    if (billCopies === 0) { showProfileToast("Bill printing skipped · copies set to 0"); return; }
+    if (!manualPrint && billCopies === 0) { showProfileToast("Automatic bill printing skipped · copies set to 0"); return; }
 
     if (!(window.cafePrinters || []).some(printer => printer.is_default && printer.active !== false) && data.orderId) {
         try { window.cafePrinters = await api("/printers?source=order"); }
@@ -3231,7 +3243,8 @@ async function viewOrder(orderId) {
             const canEdit = closed
                 ? (order.bill_printed_at ? hasPermission("orders", "edit_after_print") || hasPermission("orders", "edit_closed") : hasPermission("orders", "edit_closed"))
                 : !cancelled && (hasPermission("orders", "edit_open") || hasPermission("orders", "edit"));
-            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderBill(${Number(order.id)})">🧾 View bill</button><button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${!closed && !cancelled ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
+            const canCancel = !cancelled && (closed ? hasPermission("orders", "cancel_closed") : (hasPermission("orders", "edit_open") || hasPermission("orders", "edit")));
+            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderBill(${Number(order.id)})">🧾 View bill</button><button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${canCancel ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
             actions.hidden = false;
             actions.insertAdjacentHTML("afterbegin", '<button type="button" class="table-action-btn" onclick="printOrderKOT('+Number(order.id)+')">🖨️ Print KOT</button>');
         }
@@ -3263,63 +3276,60 @@ function closeOrderDetails() {
 }
 
 
-async function cancelOrder(orderId) {
+let pendingCancellationOrderId = null;
+function cancelOrder(orderId) {
+    const order = currentOrders.find(entry => Number(entry.id) === Number(orderId));
+    const closed = String(order?.status || "").toLowerCase() === "completed";
+    if (closed && !hasPermission("orders", "cancel_closed")) return alert("You do not have permission to cancel a closed order.");
+    if (!closed && !hasPermission("orders", "edit_open") && !hasPermission("orders", "edit")) return alert("You do not have permission to cancel this open order.");
+    pendingCancellationOrderId = Number(orderId);
+    const reasons = normalizeCancellationReasons(appSettings.cancellationReasons || DEFAULT_CANCELLATION_REASONS);
+    const reasonSelect = document.getElementById("cancelOrderReason");
+    if (reasonSelect) reasonSelect.innerHTML = reasons.map(reason => `<option value="${esc(reason)}">${esc(reason)}</option>`).join("");
+    const description = document.getElementById("cancelOrderDialogDescription");
+    if (description) description.textContent = `${closed ? "Cancel closed order" : "Cancel open order"} ${order?.order_number || `#${orderId}`}? This action cannot be undone.`;
+    const paymentNotice = document.getElementById("cancelOrderPaymentNotice");
+    if (paymentNotice) paymentNotice.hidden = !closed;
+    const error = document.getElementById("cancelOrderDialogError");
+    if (error) { error.hidden = true; error.textContent = ""; }
+    const confirmButton = document.getElementById("confirmCancelOrderButton");
+    if (confirmButton) confirmButton.disabled = !reasons.length;
+    if (!reasons.length && error) { error.textContent = "Add a cancellation reason in Settings before cancelling orders."; error.hidden = false; }
+    document.getElementById("cancelOrderModal").style.display = "flex";
+}
 
-    const reason =
-        prompt(
-            "Enter cancellation reason:",
-            "Customer cancelled"
-        );
+function closeCancelOrderDialog() {
+    const modal = document.getElementById("cancelOrderModal");
+    if (modal) modal.style.display = "none";
+    pendingCancellationOrderId = null;
+}
 
-
-    if (reason === null) {
-
+async function submitCancelOrder() {
+    const orderId = Number(pendingCancellationOrderId);
+    const reason = document.getElementById("cancelOrderReason")?.value || "";
+    const errorBox = document.getElementById("cancelOrderDialogError");
+    const confirmButton = document.getElementById("confirmCancelOrderButton");
+    if (!orderId) return;
+    if (!reason) {
+        if (errorBox) { errorBox.textContent = "Add a cancellation reason in Settings before cancelling orders."; errorBox.hidden = false; }
         return;
-
     }
-
-
-    if (!confirm("Cancel this order?")) {
-
-        return;
-
-    }
-
-
+    if (!confirm(`Cancel order ${currentOrders.find(order => Number(order.id) === orderId)?.order_number || `#${orderId}`}?`)) return;
+    if (confirmButton) confirmButton.disabled = true;
+    if (errorBox) { errorBox.hidden = true; errorBox.textContent = ""; }
     try {
-
-        await api(
-            `/orders/${orderId}/cancel`,
-            {
-
-                method: "PUT",
-
-                body: JSON.stringify({
-                    reason
-                })
-
-            }
-        );
-
-
-        alert(
-            "Order cancelled."
-        );
-
-
+        await api(`/orders/${orderId}/cancel`, { method: "PUT", body: JSON.stringify({ reason }) });
+        closeCancelOrderDialog();
         await updateOrdersTable();
-
         await loadTables();
-
-        await updateDashboard();
-
-
+        if (hasPermission("dashboard", "view")) await updateDashboard();
+        if (window.selectedOrderId === orderId) await viewOrder(orderId);
+        showProfileToast("Order cancelled and recorded.");
     } catch (error) {
-
-        alert(error.message);
-
+        if (errorBox) { errorBox.textContent = error.message || "Could not cancel this order."; errorBox.hidden = false; }
+    } finally {
+        if (confirmButton) confirmButton.disabled = false;
     }
-
 }
 
 
@@ -3368,7 +3378,7 @@ async function printCurrentOrder() {
         paymentMethod: order.payment_method || "-"
     };
 
-    await window.printThermalBill();
+    await window.printThermalBill({ manual: true });
 }
 
 // ==========================================
@@ -4993,7 +5003,7 @@ async function printOpenOrder(orderId){
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
         const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[]}))};
         window.openBillPreview(bill);
-        await window.printThermalBill();
+        await window.printThermalBill({ manual: true });
     }catch(error){alert("Unable to print open order: "+error.message);}
 }
 
@@ -5662,6 +5672,7 @@ function defaultAccessPermissions() {
     permissions["orders.print_open"] = true;
     permissions["orders.edit_after_print"] = true;
     permissions["orders.edit_closed"] = false;
+    permissions["orders.cancel_closed"] = false;
     permissions["dashboard.view"] = true;
     return permissions;
 }
@@ -5874,7 +5885,8 @@ function buildAccessPermissionEditor(permissions) {
             ["orders.edit_open", "Edit open orders"],
             ["orders.print_open", "Print open orders"],
             ["orders.edit_after_print", "Edit a bill after it has been printed"],
-            ["orders.edit_closed", "Edit a closed bill"]
+            ["orders.edit_closed", "Edit a closed bill"],
+            ["orders.cancel_closed", "Cancel a closed order"]
         ];
         orderControls.innerHTML = controls.map(([key, label]) => `<label class="order-permission-check"><input type="checkbox" data-permission-key="${key}" ${normalized[key] ? "checked" : ""}><span>${label}</span></label>`).join("");
     }
@@ -6370,10 +6382,16 @@ async function selectBillingTable(tableNumber, status) {
                 .filter(order => !["completed", "cancelled"].includes(String(order.status || "").toLowerCase()))
                 .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
             if (!active) return alert("Table " + tableNumber + " is occupied, but no active order was found.");
-            if (String(active.status).toLowerCase() === "open") {
+            if (hasPermission("orders", "edit_open") || hasPermission("orders", "edit")) {
                 await editOpenOrder(active.id);
                 return;
             }
+            if (!hasPermission("orders", "view")) return alert("You do not have permission to open this table order.");
+            showPage("orders");
+            window.currentOrdersTab = "open";
+            const statusFilter = document.getElementById("ordersStatusFilter");
+            if (statusFilter) statusFilter.value = "";
+            await updateOrdersTable(true, false);
             await viewOrder(active.id);
             return;
         } catch (error) {
@@ -6508,6 +6526,7 @@ async function loadSettings() {
     setSettingValue("settingDefaultPayment", appSettings.defaultPayment);
     setSettingValue("settingOrderPrefix", appSettings.orderPrefix); setSettingValue("settingInvoicePrefix", appSettings.invoicePrefix);
     setSettingValue("settingNonChargeableReasons", normalizeNonChargeableReasons(appSettings.nonChargeableReasons || DEFAULT_NON_CHARGEABLE_REASONS).join("\n"));
+    setSettingValue("settingCancellationReasons", normalizeCancellationReasons(appSettings.cancellationReasons || DEFAULT_CANCELLATION_REASONS).join("\n"));
     setSettingValue("settingAllowZeroAmount", appSettings.allowZeroAmount);
     setSettingValue("settingTotalRoundingMode", ["none", "nearest", "up", "down"].includes(appSettings.totalRoundingMode) ? appSettings.totalRoundingMode : appSettings.roundTotals ? "nearest" : "none");
     setSettingValue("settingLogoUrl", appSettings.logoUrl); setSettingValue("settingUpiId", appSettings.upiId); setSettingValue("settingReceiptFont", appSettings.receiptFont);
@@ -6558,6 +6577,7 @@ async function saveSettings() {
         paymentModes: normalizePaymentModes(appSettings.paymentModes),
         orderPrefix: readSettingValue("settingOrderPrefix") || "ORD-", invoicePrefix: readSettingValue("settingInvoicePrefix") || "INV-",
         nonChargeableReasons: normalizeNonChargeableReasons(String(readSettingValue("settingNonChargeableReasons") || "").split(/\r?\n/)),
+        cancellationReasons: normalizeCancellationReasons(String(readSettingValue("settingCancellationReasons") || "").split(/\r?\n/)),
         allowZeroAmount: readSettingValue("settingAllowZeroAmount"),
         totalRoundingMode: readSettingValue("settingTotalRoundingMode") || "none",
         roundTotals: (readSettingValue("settingTotalRoundingMode") || "none") !== "none",
@@ -6604,6 +6624,7 @@ function resetSettings() {
         paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
         defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: normalizePaymentModes(STARTER_PAYMENT_MODES), orderPrefix: "ORD-", invoicePrefix: "INV-",
         nonChargeableReasons: DEFAULT_NON_CHARGEABLE_REASONS.slice(),
+        cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
         allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
         printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
         defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
@@ -8536,19 +8557,135 @@ async function printLocalPrinterTest(name){
     }
 }
 async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
+function orderCategoryReportQuery(includeExport = false, notify = false) {
+    const range = document.getElementById("reportDateFilter")?.value || "today";
+    const params = new URLSearchParams({ range });
+    if (range === "custom") {
+        const from = document.getElementById("reportFromDate")?.value || "";
+        const to = document.getElementById("reportToDate")?.value || "";
+        if (!from || !to) {
+            if (notify) alert("Choose both the start and end dates for this report.");
+            return null;
+        }
+        if (from > to) {
+            if (notify) alert("The report start date must be before the end date.");
+            return null;
+        }
+        params.set("from", from);
+        params.set("to", to);
+    }
+    if (includeExport) params.set("export", "1");
+    return params.toString();
+}
+
+async function loadOrderCategoryReports() {
+    try {
+        const query = orderCategoryReportQuery();
+        if (!query) return;
+        const data = await api("/reports/order-categories?" + query);
+        const discounts = Array.isArray(data.discountOrders) ? data.discountOrders : [];
+        const nonChargeable = Array.isArray(data.nonChargeableOrders) ? data.nonChargeableOrders : [];
+        const discountBody = document.getElementById("reportDiscountOrdersBody");
+        const nonChargeableBody = document.getElementById("reportNonChargeableOrdersBody");
+        if (discountBody) discountBody.innerHTML = discounts.length
+            ? discounts.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? new Date(order.created_at).toLocaleString() : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + money(order.discount) + '</td><td>' + esc(order.discount_name || "Discount") + '</td><td>' + esc(order.payment_method || "—") + '</td><td>' + money(order.total) + '</td></tr>').join("")
+            : '<tr><td colspan="8">No discounted orders in this period.</td></tr>';
+        if (nonChargeableBody) nonChargeableBody.innerHTML = nonChargeable.length
+            ? nonChargeable.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? new Date(order.created_at).toLocaleString() : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + esc(order.reason || "Not recorded") + '</td><td>' + money(order.total) + '</td><td>' + esc(order.payment_method || "Non-chargeable") + '</td></tr>').join("")
+            : '<tr><td colspan="7">No non-chargeable orders in this period.</td></tr>';
+        const canExport = hasPermission("reports", "export");
+        ["reportDiscountOrdersDownload", "reportNonChargeableOrdersDownload"].forEach(id => {
+            const button = document.getElementById(id);
+            if (button) button.hidden = !canExport;
+        });
+    } catch (error) {
+        console.warn("Could not load discount and non-chargeable reports:", error.message);
+        const discountBody = document.getElementById("reportDiscountOrdersBody");
+        const nonChargeableBody = document.getElementById("reportNonChargeableOrdersBody");
+        if (discountBody) discountBody.innerHTML = '<tr><td colspan="8">Could not load discounted orders.</td></tr>';
+        if (nonChargeableBody) nonChargeableBody.innerHTML = '<tr><td colspan="7">Could not load non-chargeable orders.</td></tr>';
+    }
+}
+
+async function downloadOrderCategoryReport(reportType) {
+    try {
+        const query = orderCategoryReportQuery(true, true);
+        if (!query) return;
+        const data = await api("/reports/order-categories?" + query);
+        const reports = {
+            discounts: {
+                title: "Discounted Orders",
+                rows: Array.isArray(data.discountOrders) ? data.discountOrders : [],
+                columns: [["Order", order => order.order_number || ("#" + order.order_id)], ["Order ID", order => order.order_id], ["Date", order => order.created_at], ["Order Type", order => order.order_type], ["Table", order => order.table_number], ["Discount", order => order.discount], ["Discount Rule", order => order.discount_name], ["Payment", order => order.payment_method], ["Total", order => order.total]]
+            },
+            "non-chargeable": {
+                title: "Non-chargeable Orders",
+                rows: Array.isArray(data.nonChargeableOrders) ? data.nonChargeableOrders : [],
+                columns: [["Order", order => order.order_number || ("#" + order.order_id)], ["Order ID", order => order.order_id], ["Date", order => order.created_at], ["Order Type", order => order.order_type], ["Table", order => order.table_number], ["Reason", order => order.reason || "Not recorded"], ["Order Value", order => order.total], ["Payment", order => order.payment_method]]
+            }
+        };
+        const report = reports[reportType];
+        if (!report) return;
+        const csvValue = value => {
+            let text = String(value ?? "");
+            if (/^[=+@\-]/.test(text)) text = "'" + text;
+            return '"' + text.replace(/"/g, '""') + '"';
+        };
+        const csv = ["\uFEFF" + report.columns.map(column => csvValue(column[0])).join(","), ...report.rows.map(row => report.columns.map(column => csvValue(column[1](row))).join(","))].join("\r\n");
+        const link = document.createElement("a");
+        link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+        link.download = "cafe-pos-" + reportType + "-orders-" + new Date().toISOString().slice(0, 10) + ".csv";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(link.href);
+        showProfileToast(report.title + " report downloaded.");
+    } catch (error) {
+        alert(error.message || "Could not download this report.");
+    }
+}
+
+let advancedReportData = null;
+function toggleAdvancedReportCustomDates(){
+    const range=document.getElementById("advancedReportRange")?.value;
+    const fields=document.getElementById("advancedReportCustomDates");
+    if(fields)fields.hidden=range!=="custom";
+}
+function advancedReportQuery(includeExport=false){
+    const range=document.getElementById("advancedReportRange")?.value||"month";
+    const params=new URLSearchParams({range});
+    if(range==="custom"){
+        const from=document.getElementById("advancedReportFrom")?.value||"";
+        const to=document.getElementById("advancedReportTo")?.value||"";
+        if(!from||!to)return alert("Choose both the start and end dates for this report."),null;
+        if(from>to)return alert("The report start date must be before the end date."),null;
+        params.set("from",from);params.set("to",to);
+    }
+    if(includeExport)params.set("export","1");
+    return params.toString();
+}
 async function loadAdvancedReports(){
     try{
-        const range=document.getElementById('advancedReportRange')?.value||'month';
-        const r=await api('/reports/advanced?range='+encodeURIComponent(range));
+        const query=advancedReportQuery();
+        if(!query)return;
+        const r=await api('/reports/advanced?'+query);
+        advancedReportData=r;
         const hourly=Array.isArray(r.hourly)?r.hourly:[], customers=Array.isArray(r.customers)?r.customers:[], cancelled=Array.isArray(r.cancelled)?r.cancelled:[];
+        const discounts=Array.isArray(r.discountOrders)?r.discountOrders:[], nonChargeable=Array.isArray(r.nonChargeableOrders)?r.nonChargeableOrders:[];
         setText('advancedExpenseTotal',money(r.expenseTotal));
         setText('advancedCancelledValue',money(cancelled.reduce((a,x)=>a+Number(x.value||0),0)));
         const hourlyBody=document.getElementById('advancedHourlyBody');
         const customersBody=document.getElementById('advancedCustomersBody');
         const cancelledBody=document.getElementById('advancedCancelledBody');
+        const discountBody=document.getElementById('advancedDiscountBody');
+        const nonChargeableBody=document.getElementById('advancedNonChargeableBody');
         if(hourlyBody)hourlyBody.innerHTML=hourly.length?hourly.map(x=>`<tr><td>${String(x.hour).padStart(2,'0')}:00</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(customersBody)customersBody.innerHTML=customers.length?customers.map(x=>`<tr><td>${esc(x.customer)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
-        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.date)}</td><td>${x.orders}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="3">No cancelled orders.</td></tr>';
+        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?new Date(x.cancelled_at).toLocaleString():'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${x.cancelled_by_user_id==null?'—':esc(x.cancelled_by_user_id)}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
+        if(discountBody)discountBody.innerHTML=discounts.length?discounts.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${money(x.discount)}</td><td>${esc(x.discount_name||'Discount')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'—')}</td></tr>`).join(''):'<tr><td colspan="7">No discounted orders in this period.</td></tr>';
+        if(nonChargeableBody)nonChargeableBody.innerHTML=nonChargeable.length?nonChargeable.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'Non-chargeable')}</td></tr>`).join(''):'<tr><td colspan="6">No non-chargeable orders in this period.</td></tr>';
+        const canExport=hasPermission('advanced_reports','export');
+        ['downloadCancelledReport','downloadDiscountReport','downloadNonChargeableReport'].forEach(id=>{const button=document.getElementById(id);if(button)button.hidden=!canExport;});
         const warningBox=document.getElementById('advancedReportWarnings');
         if(warningBox) warningBox.textContent=(r.warnings||[]).length?`Some datasets were unavailable: ${(r.warnings||[]).join(' | ')}`:'';
     }catch(e){
@@ -8560,12 +8697,34 @@ async function loadAdvancedReports(){
     }
 }
 
+async function downloadAdvancedReport(reportType){
+    try{
+        const query=advancedReportQuery(true);
+        if(!query)return;
+        const data=await api(`/reports/advanced?${query}`);
+        const keys={
+            cancelled:{title:'Cancelled Orders',rows:Array.isArray(data.cancelled)?data.cancelled:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Cancelled At',x=>x.cancelled_at],['Reason',x=>x.reason||'Not recorded'],['Cancelled By User ID',x=>x.cancelled_by_user_id??''],['Order Value',x=>x.value]]},
+            discounts:{title:'Discounted Orders',rows:Array.isArray(data.discountOrders)?data.discountOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Discount',x=>x.discount],['Discount Rule',x=>x.discount_name],['Payment',x=>x.payment_method],['Total',x=>x.total]]},
+            'non-chargeable':{title:'Non-chargeable Orders',rows:Array.isArray(data.nonChargeableOrders)?data.nonChargeableOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Reason',x=>x.reason||'Not recorded'],['Order Value',x=>x.total],['Payment',x=>x.payment_method]]}
+        };
+        const report=keys[reportType];
+        if(!report)return;
+        const csvValue=value=>{let text=String(value??'');if(/^[=+@\-]/.test(text))text="'"+text;return '"'+text.replace(/"/g,'""')+'"';};
+        const csv=['\uFEFF'+report.columns.map(column=>csvValue(column[0])).join(','),...report.rows.map(row=>report.columns.map(column=>csvValue(column[1](row))).join(','))].join('\r\n');
+        const link=document.createElement('a');
+        link.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
+        link.download=`cafe-pos-${reportType}-orders-${new Date().toISOString().slice(0,10)}.csv`;
+        document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
+        showProfileToast(`${report.title} report downloaded.`);
+    }catch(error){alert(error.message||'Could not download this report.');}
+}
+
 async function loadDeploymentChecks(){try{const r=await api('/system/deployment-check');const box=document.getElementById('deploymentChecks');box.innerHTML=r.checks.map(c=>`<div class="deployment-check ${c.ok?'ok':'bad'}"><span>${c.ok?'✅':'⚠️'}</span><div><b>${esc(c.label)}</b><br><small>${esc(c.detail|| (c.ok?'Ready':'Needs attention'))}</small></div></div>`).join('');}catch(e){document.getElementById('deploymentChecks').textContent=e.message;}}
 function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_USER=your_postgres_user\nDB_HOST=127.0.0.1\nDB_NAME=cafe_pos\nDB_PASSWORD=your_postgres_password\nDB_PORT=5432\nPG_DUMP_PATH=pg_dump\nPSQL_PATH=psql\n`;const blob=new Blob([text],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='.env.example';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);}
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
+showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'reports':loadOrderCategoryReports();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
 
 function setupDesktopWindowChrome(){
     const desktop=window.cafePOSDesktop;
@@ -8684,6 +8843,7 @@ window.addEventListener(
 let tableQrMenuTables=[];
 let tableQrMenuItems=[];
 let tableQrMenuQrData=new Map();
+let tableQrMenuPosterData=new Map();
 
 function parseQrMenuBaseUrl(value){
     let parsed;
@@ -8732,7 +8892,7 @@ async function loadTableQrMenuModule(){
         if(url)url.value=window.location.origin+"/restaurant/"+publication.token;
         const hostNote=document.getElementById("publicMenuHostNote");
         if(hostNote)hostNote.hidden=!(["localhost","127.0.0.1","::1"].includes(window.location.hostname));
-        if(status)status.textContent=publication.enabled?"Your QR menu is live. Table codes open the published menu.":"Your QR menu is private until you turn publishing on.";
+        if(status)status.textContent=publication.enabled?"Your QR menu is live. Guests enter their details, then open the published menu.":"Your QR menu is private until you turn publishing on.";
         renderQrStockItems();
         await renderTableQrCards();
     }catch(error){
@@ -8768,6 +8928,45 @@ function qrTableDisplayName(value){
     if(tableMatch&&/^t?\d+$/i.test(tableMatch[1]))return "T"+tableMatch[1].replace(/^t/i,"");
     if(/^\d+$/.test(label))return "T"+label;
     return label;
+}
+function loadQrPosterImage(source){
+    return new Promise((resolve,reject)=>{
+        const image=new Image();
+        image.onload=()=>resolve(image);
+        image.onerror=()=>reject(new Error("Could not prepare the QR poster image."));
+        image.src=source;
+    });
+}
+async function createGenzTableQrPoster(table,qrDataUrl){
+    const qrImage=await loadQrPosterImage(qrDataUrl);
+    const canvas=document.createElement("canvas");
+    canvas.width=1200;canvas.height=1600;
+    const context=canvas.getContext("2d");
+    if(!context)throw new Error("This browser cannot prepare the themed QR poster.");
+    const roundedRect=(x,y,width,height,radius,color)=>{
+        context.beginPath();context.moveTo(x+radius,y);context.arcTo(x+width,y,x+width,y+height,radius);context.arcTo(x+width,y+height,x,y+height,radius);context.arcTo(x,y+height,x,y,radius);context.arcTo(x,y,x+width,y,radius);context.closePath();context.fillStyle=color;context.fill();
+    };
+    context.fillStyle="#eee9f8";context.fillRect(0,0,canvas.width,canvas.height);
+    roundedRect(30,30,1140,1540,58,"#25222f");
+    context.globalAlpha=.16;context.fillStyle="#ff6cad";context.beginPath();context.arc(1090,180,210,0,Math.PI*2);context.fill();
+    context.fillStyle="#d9fb55";context.beginPath();context.arc(105,1320,210,0,Math.PI*2);context.fill();context.globalAlpha=1;
+    context.textAlign="center";context.textBaseline="middle";
+    context.font="900 29px Arial, sans-serif";context.fillStyle="#e9e3f5";context.fillText("GOOD FOOD · NO GATEKEEPING",600,130);
+    context.font="900 78px Arial, sans-serif";context.fillStyle="#fffaf1";context.fillText("Your next fave",600,260);
+    context.fillStyle="#d9fb55";context.fillText("is one scan away ✦",600,350);
+    context.font="700 27px Arial, sans-serif";context.fillStyle="#cec8dc";context.fillText("Scan the code. Pick your mood. We’ll make the good stuff.",600,425,1010);
+    const tableLabel="TABLE "+qrTableDisplayName(table.table_number||table.id);
+    context.font="900 26px Arial, sans-serif";
+    const badgeWidth=Math.max(210,context.measureText(tableLabel).width+64);
+    roundedRect((1200-badgeWidth)/2,466,badgeWidth,62,31,"#ff6cad");
+    context.fillStyle="#25222f";context.fillText(tableLabel,600,497);
+    roundedRect(190,560,820,820,38,"#ffffff");
+    context.imageSmoothingEnabled=false;
+    context.drawImage(qrImage,280,650,640,640);
+    context.font="900 30px Arial, sans-serif";context.fillStyle="#25222f";context.fillText("SCAN · PICK · REPEAT",600,1442);
+    const brand=String(appSettings.restaurantName||currentUser?.business_name||"YOUR CAFE").trim().toUpperCase();
+    context.font="700 22px Arial, sans-serif";context.fillStyle="#d8d1e6";context.fillText(brand||"YOUR CAFE",600,1490,1000);
+    return canvas.toDataURL("image/png");
 }
 async function renderTableQrCards(){
     const grid=document.getElementById("tableQrGrid");if(!grid)return;
@@ -8838,7 +9037,7 @@ async function loadTableQrMenuModule(){
         if(baseField)baseField.value=suggestedBase;
         if(url)url.value=parseQrMenuBaseUrl(suggestedBase)+"/restaurant/"+publication.token;
         updateRestaurantMenuLinkPreview();
-        if(status)status.textContent=publication.enabled?"Your QR menu is live. Table codes open the published menu.":"Your QR menu is private until you turn publishing on.";
+        if(status)status.textContent=publication.enabled?"Your QR menu is live. Guests enter their details, then open the published menu.":"Your QR menu is private until you turn publishing on.";
         renderQrStockItems();
         await renderTableQrCards();
     }catch(error){
@@ -8887,6 +9086,7 @@ async function renderTableQrCards(){
     const select=document.getElementById("tableQrTableSelect");
     const previousValue=select?.value||"";
     tableQrMenuQrData=new Map();
+    tableQrMenuPosterData=new Map();
     if(!tableQrMenuTables.length){
         grid.innerHTML='<div class="table-qr-empty">No POS tables yet. Add tables in <button type="button" class="table-action-btn" onclick="showPage(\'tables\')">Tables</button> to create their QR codes.</div>';
         return;
@@ -8918,7 +9118,9 @@ async function generateTableMenuQr(table){
         const result=await api("/menu/public-settings/qr",{method:"POST",body:JSON.stringify({url:qrMenuTableUrl(table)})});
         if(!result.dataUrl)throw new Error("QR image was not returned.");
         tableQrMenuQrData.set(String(id),result.dataUrl);
-        image.src=result.dataUrl;image.hidden=false;
+        const posterDataUrl=await createGenzTableQrPoster(table,result.dataUrl);
+        tableQrMenuPosterData.set(String(id),posterDataUrl);
+        image.src=posterDataUrl;image.hidden=false;
         if(placeholder)placeholder.hidden=true;
         if(download)download.disabled=false;
         if(print)print.disabled=false;
@@ -8926,19 +9128,19 @@ async function generateTableMenuQr(table){
 }
 
 function downloadTableMenuQr(tableId){
-    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuPosterData.get(String(tableId));
     if(!table||!dataUrl)return;
     const safeName=qrTableDisplayName(table.table_number||table.id).replace(/[^a-z0-9_-]+/gi,"-");
     const link=document.createElement("a");link.href=dataUrl;link.download="table-"+safeName+"-menu-qr.png";document.body.appendChild(link);link.click();link.remove();
 }
 
 function printTableMenuQr(tableId){
-    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));
+    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuPosterData.get(String(tableId));
     if(!table||!dataUrl)return;
     const tableLabel="Table "+qrTableDisplayName(table.table_number);
     const printWindow=window.open("","_blank","width=760,height=900");
     if(!printWindow){alert("Allow pop-ups for this POS page to print a table QR.");return;}
-    printWindow.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>'+esc(tableLabel)+'</h1><p>Scan to view our menu and order</p><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' QR code"></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>');
+    printWindow.document.write('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:10mm}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#eee9f8;font-family:Arial,sans-serif}.sheet{display:grid;place-items:center;width:100%;min-height:275mm}.sheet img{display:block;width:min(170mm,100%);height:auto;max-height:275mm;object-fit:contain}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:999px;background:#d9fb55;color:#25222f;font-weight:900;cursor:pointer}@media print{body{min-height:auto;background:#fff}.sheet{min-height:0}.sheet img{width:170mm;max-height:275mm}.print-action{display:none}}</style></head><body><main class="sheet"><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' themed menu QR"></main><button class="print-action" onclick="window.print()">Print QR ✦</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),300));</script></body></html>');
     printWindow.document.close();
 }
 
@@ -8967,7 +9169,6 @@ let posQrOrderAlertCursor=null;
 let posQrOrderAlertTimer=null;
 let posQrOrderAlertBusy=false;
 function playPOSQrOrderAlertSound(){
-    if(appSettings.enableNotifications===false)return;
     try{
         ensureKOTAlertAudio();
         const context=kotAlertAudioContext;
@@ -8980,21 +9181,45 @@ function playPOSQrOrderAlertSound(){
         }
         if(context.state!=="running")return;
         const now=context.currentTime;
-        [740,988,740,1174].forEach((frequency,index)=>{
-            const at=now+index*0.2;
+        [0,0.24,0.5].forEach((offset,index)=>{
+            const at=now+offset;
             const oscillator=context.createOscillator();
             const gain=context.createGain();
-            oscillator.type="sine";
-            oscillator.frequency.value=frequency;
+            oscillator.type="square";
+            oscillator.frequency.setValueAtTime(index===1?235:285,at);
+            oscillator.frequency.exponentialRampToValueAtTime(155,at+0.19);
             gain.gain.setValueAtTime(0.0001,at);
-            gain.gain.exponentialRampToValueAtTime(0.2,at+0.02);
-            gain.gain.exponentialRampToValueAtTime(0.0001,at+0.16);
+            gain.gain.exponentialRampToValueAtTime(0.13,at+0.018);
+            gain.gain.setValueAtTime(0.13,at+0.13);
+            gain.gain.exponentialRampToValueAtTime(0.0001,at+0.2);
             oscillator.connect(gain);
             gain.connect(context.destination);
             oscillator.start(at);
-            oscillator.stop(at+0.18);
+            oscillator.stop(at+0.22);
         });
     }catch(error){console.warn("QR order alert sound failed:",error.message);}
+}
+function showQROrderArrivalToast(arrivals){
+    const items=Array.isArray(arrivals)?arrivals:[];
+    if(!items.length)return;
+    let toast=document.getElementById("qrOrderArrivalToast");
+    if(!toast){
+        toast=document.createElement("div");
+        toast.id="qrOrderArrivalToast";
+        toast.className="qr-order-arrival-toast";
+        toast.setAttribute("role","status");
+        toast.setAttribute("aria-live","polite");
+        document.body.appendChild(toast);
+    }
+    const first=items[0];
+    const table=first.table_number?` · Table ${first.table_number}`:"";
+    const orderText=items.length===1?`${first.order_number||"New QR order"}${table}`:`${items.length} new QR orders have arrived`;
+    toast.innerHTML=`<span class="qr-order-arrival-icon" aria-hidden="true">▦</span><span class="qr-order-arrival-copy"><strong>${items.length===1?"New QR order received":"New QR orders received"}</strong><span>${esc(orderText)}</span></span><button type="button" class="qr-order-arrival-view">View orders</button><button type="button" class="qr-order-arrival-close" aria-label="Dismiss notification">×</button>`;
+    toast.querySelector(".qr-order-arrival-view")?.addEventListener("click",()=>{showPage("orders");updateOrdersTable(true,false);toast.classList.remove("show");});
+    toast.querySelector(".qr-order-arrival-close")?.addEventListener("click",()=>toast.classList.remove("show"));
+    toast.classList.add("show");
+    clearTimeout(toast._hideTimer);
+    toast._hideTimer=setTimeout(()=>toast.classList.remove("show"),12000);
 }
 async function pollPOSQrOrderAlerts(){
     if(!currentUser){stopPOSQrOrderAlerts();return;}
@@ -9005,16 +9230,10 @@ async function pollPOSQrOrderAlerts(){
         const result=await api(url);
         const latest=Number(result.latestOrderId||0);
         const arrivals=Array.isArray(result.orders)?result.orders:[];
-        if(posQrOrderAlertCursor===null){posQrOrderAlertCursor=latest;return;}
         posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
         if(!arrivals.length)return;
-        if(appSettings.enableNotifications!==false){
-            playPOSQrOrderAlertSound();
-            const first=arrivals[0];
-            const table=first.table_number?" · Table "+first.table_number:"";
-            const message=arrivals.length===1?`New QR order ${first.order_number||""}${table}`:`${arrivals.length} new QR orders`;
-            showProfileToast("🔔 "+message);
-        }
+        playPOSQrOrderAlertSound();
+        showQROrderArrivalToast(arrivals);
         if(document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
     }catch(error){console.warn("QR order notification check failed:",error.message);}
     finally{posQrOrderAlertBusy=false;}
