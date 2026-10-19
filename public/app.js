@@ -1,11 +1,12 @@
 // ==========================================
-// CAFE POS SYSTEM
+// SLASH POS SYSTEM
 // Table • Reservation • Orders • KOT • Payment
 // Billing • Menu • Customers • Reports
 // ==========================================
 
 const API = "/api";
-let authToken = sessionStorage.getItem("cafeAuthToken") || "";
+let authToken = "";
+sessionStorage.removeItem("cafeAuthToken");
 let currentUser = null;
 let currentLicense = null;
 let currentDevice = null;
@@ -81,7 +82,9 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
 
 let cart = [];
 let orderType = "Takeaway";
-let selectedPOSChannelKey = "takeaway";
+// Empty until settings are loaded. This lets the saved POS preference choose the
+// first channel for a fresh billing session instead of silently keeping Takeaway.
+let selectedPOSChannelKey = "";
 
 let restaurantTables = [];
 let currentOrders = [];
@@ -112,7 +115,7 @@ const DEFAULT_CANCELLATION_REASONS = ["Customer request", "Duplicate order", "It
 function normalizeCancellationReasons(value) { return [...new Set((Array.isArray(value) ? value : []).map(reason => String(reason || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30); }
 
 let appSettings = {
-    restaurantName: "CAFE POS", address: "", phone: "", gstin: "",
+    restaurantName: "SLASH POS", address: "", phone: "", gstin: "",
     header: "Cafe Management System", footer: "Thank You!\nVisit Again 😊",
     showInvoice: true, showCustomer: true, showCustomerPhone: true,
     showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
@@ -127,7 +130,13 @@ let appSettings = {
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
     sessionTimeout: 12, auditLog: false,
-    uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide"
+    uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide",
+    posSalesChannels: [
+        { key: "dine_in", label: "Dine", orderType: "Dine-in", qrMenu: false },
+        { key: "takeaway", label: "Takeaway", orderType: "Takeaway", qrMenu: false },
+        { key: "delivery", label: "Delivery", orderType: "Takeaway", qrMenu: false },
+        { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
+    ]
 };
 const DEFAULT_APP_SETTINGS = { ...appSettings };
 
@@ -178,13 +187,94 @@ function normalizeOrderBillItems(items, order = {}) {
             price,
             quantity,
             options: Array.isArray(item?.options) ? item.options : [],
-            lineTotal
+            lineTotal,
+            taxRate: Math.max(0, Number(item?.taxRate ?? item?.tax_rate ?? 0)),
+            taxMode: String(item?.taxMode ?? item?.tax_mode ?? "exclusive").toLowerCase() === "inclusive" ? "inclusive" : "exclusive"
         };
     });
     if (isQrOrder && normalized.length === 1 && normalized[0].price === 0 && normalized[0].lineTotal === 0 && Number(order.total || 0) > 0) {
         normalized[0].price = (Number(order.subtotal || 0) + Number(order.gst || 0)) / normalized[0].quantity;
     }
     return normalized;
+}
+
+function formatBillTaxRate(value) {
+    return Number(Number(value || 0).toFixed(2)).toString();
+}
+
+function buildTaxComponentsFromGroups(groups, totalTaxValue) {
+    if (Number(totalTaxValue || 0) <= 0) return [];
+    const groupRows = (Array.isArray(groups) ? groups : [])
+        .map(group => ({ rate: Number(group?.rate || 0), base: Math.max(0, Number(group?.base || 0)) }))
+        .filter(group => Number.isFinite(group.rate) && group.rate > 0 && Number.isFinite(group.base) && group.base > 0);
+    if (!groupRows.length) return [];
+
+    groupRows.forEach(group => {
+        group.rawTaxCents = group.base * group.rate;
+        group.taxCents = Math.round(group.rawTaxCents);
+    });
+
+    // Keep displayed components aligned with the order's GST total, including cent rounding.
+    const targetTaxCents = Math.max(0, Math.round(Number(totalTaxValue || 0) * 100));
+    let taxCentsDifference = targetTaxCents - groupRows.reduce((sum, group) => sum + group.taxCents, 0);
+    if (taxCentsDifference) {
+        const ranked = [...groupRows].sort((a, b) => (b.rawTaxCents - b.taxCents) - (a.rawTaxCents - a.taxCents));
+        const direction = Math.sign(taxCentsDifference);
+        for (let index = 0; taxCentsDifference !== 0 && ranked.length; index = (index + 1) % ranked.length) {
+            const group = ranked[index];
+            if (direction < 0 && group.taxCents <= 0) continue;
+            group.taxCents += direction;
+            taxCentsDifference -= direction;
+        }
+    }
+
+    return groupRows.flatMap(group => {
+        const cgstCents = Math.round(group.taxCents / 2);
+        const sgstCents = group.taxCents - cgstCents;
+        return [
+            { component: "CGST", rate: group.rate / 2, taxableBase: group.base, taxAmount: cgstCents / 100 },
+            { component: "SGST", rate: group.rate / 2, taxableBase: group.base, taxAmount: sgstCents / 100 }
+        ];
+    });
+}
+
+function buildBillTaxBreakdown(items, discountValue, totalTaxValue) {
+    if (Number(totalTaxValue || 0) <= 0) return [];
+    const groups = new Map();
+    let orderSubtotal = 0;
+    for (const item of Array.isArray(items) ? items : []) {
+        const rate = Math.max(0, Number(item?.taxRate ?? item?.tax_rate ?? 0));
+        const quantity = Math.max(0, Number(item?.quantity ?? item?.qty ?? 0));
+        const price = Math.max(0, Number(item?.price ?? item?.unit_price ?? 0));
+        if (!Number.isFinite(rate) || !Number.isFinite(quantity) || !Number.isFinite(price)) continue;
+        const gross = price * quantity;
+        const inclusive = String(item?.taxMode ?? item?.tax_mode ?? "exclusive").toLowerCase() === "inclusive";
+        const taxableBase = inclusive ? gross / (1 + rate / 100) : gross;
+        orderSubtotal += taxableBase;
+        if (rate <= 0) continue;
+        const key = rate.toFixed(4);
+        groups.set(key, (groups.get(key) || 0) + taxableBase);
+    }
+
+    const groupRows = [...groups.entries()].map(([key, base]) => ({ rate: Number(key), base }));
+    if (!groupRows.length || orderSubtotal <= 0) return [];
+
+    const discount = Math.min(orderSubtotal, Math.max(0, Number(discountValue || 0)));
+    const remainingFraction = Math.max(0, orderSubtotal - discount) / orderSubtotal;
+    groupRows.forEach(group => {
+        group.base *= remainingFraction;
+    });
+    return buildTaxComponentsFromGroups(groupRows, totalTaxValue);
+}
+
+function renderLiveTaxBreakdown(elementId, rows) {
+    const container = document.getElementById(elementId);
+    if (!container) return;
+    const details = Array.isArray(rows) ? rows : [];
+    container.innerHTML = details.map(row =>
+        `<div><span>${esc(row.component)} ${esc(formatBillTaxRate(row.rate))}% on ${esc(money(row.taxableBase))}</span><strong>${esc(money(row.taxAmount))}</strong></div>`
+    ).join("");
+    container.style.display = details.length ? "grid" : "none";
 }
 
 function normalizePaymentModes(modes) {
@@ -294,10 +384,10 @@ async function api(url, options = {}) {
 
         headers: {
             "Content-Type": "application/json",
-            ...(authToken ? { "Authorization": "Bearer " + authToken } : {}),
             ...(options.headers || {})
         },
 
+        credentials: "include",
         ...options
 
     });
@@ -311,7 +401,7 @@ async function api(url, options = {}) {
     }
 
     if (!response.ok) {
-        if (response.status === 401 && authToken) {
+        if (response.status === 401 && currentUser) {
             handleAutomaticLogout(
                 data.error || "Your session has expired or is no longer valid. Please login again."
             );
@@ -399,7 +489,7 @@ function getNumberValue(value, possibleKeys = []) {
 function hasLicenseAddon(addon){return String(currentLicense?.add_on||"").split(/[;,]/).map(value=>value.trim().toLowerCase()).includes(String(addon||"").toLowerCase());}
 function hasPermission(moduleKey, action="view") {
     if (!currentUser) return false;
-    if (currentUser.profile_name === "Admin" && currentUser.permissions_override === null) return true;
+    if (currentUser.is_owner === true && currentUser.permissions_override === null) return true;
     return currentUser.permissions?.[`${moduleKey}.${action}`] === true;
 }
 function showRegisterBusiness() {
@@ -472,16 +562,16 @@ async function loginUser(event) {
     const password=document.getElementById("loginPassword")?.value||"";
     const box=document.getElementById("loginError"); if(box) box.textContent="";
     try{
-        const r=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
+        const r=await fetch(API+"/auth/login",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
         const data=await r.json().catch(()=>({})); if(!r.ok) throw new Error(data.error||"Login failed");
-        authToken=data.token; currentUser=data.user; currentDevice=data.device||null; currentLicense=data.license||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.setItem("cafeAuthToken",authToken);
+        authToken=""; currentUser=data.user; currentDevice=data.device||null; currentLicense=data.license||null; cacheLoginBusinessName(currentUser.business_name); sessionStorage.removeItem("cafeAuthToken");
         const fallbackSessionHours = Math.max(1, Number(appSettings.sessionTimeout || 12));
         scheduleSessionExpiry(data.expiresAt || (Date.now() + fallbackSessionHours * 60 * 60 * 1000));
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{if(authToken) await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
-async function checkSession(){if(!authToken){document.getElementById("loginScreen")?.style.setProperty("display","flex");return false;}try {
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function checkSession(){try {
     const r = await api("/auth/me");
 
     currentUser = r.user;
@@ -512,50 +602,6 @@ async function checkSession(){if(!authToken){document.getElementById("loginScree
 }
 }
 
-    document.querySelectorAll(".nav-btn").forEach(function(btn){
-        const text=btn.getAttribute("onclick")||"";
-        const m=text.match(/showPage\('([^']+)'\)/);
-        if(!m)return;
-
-        const page=m[1];
-        const mod=
-            page==="new-order"
-                ?"new_order"
-                :(page==="kot-groups"
-                    ?"kot_groups"
-                    :page);
-
-        let visible=hasPermission(mod,"view");
-
-        if(
-            (page==="kitchen"||page==="kot-groups") &&
-            appSettings.kotEnabled===false &&
-            appSettings.kotDisabledBehavior==="hide"
-        ){
-            visible=false;
-        }
-
-        btn.style.display=visible?"":"none";
-    });
-
-    const label=document.getElementById("sessionUserLabel");
-
-    if(label && currentUser){
-        const businessName=currentUser.business_name || "Cafe POS";
-        const userName=currentUser.display_name || "User";
-        const role=currentUser.profile_name || "No Profile";
-
-        label.textContent=`${businessName} · ${userName} · ${role}`;
-
-        const headerTitle=document.querySelector(".header h1");
-        if(headerTitle){
-            headerTitle.textContent=businessName;
-        }
-
-        document.title=`${businessName} · Cafe POS`;
-    }
-
-    updateProfilePanelInfo();
 
 function applyPermissionsToUI(){
     document.querySelectorAll(".nav-btn").forEach(function(btn){
@@ -601,7 +647,7 @@ function applyPermissionsToUI(){
     const label = document.getElementById("sessionUserLabel");
 
     if(label && currentUser){
-        const businessName = currentUser.business_name || "Cafe POS";
+        const businessName = currentUser.business_name || "Slash POS";
         const userName = currentUser.display_name || "User";
         const role = currentUser.profile_name || "No Profile";
 
@@ -613,7 +659,7 @@ function applyPermissionsToUI(){
             headerTitle.textContent = businessName;
         }
 
-        document.title = `${businessName} · Cafe POS`;
+        document.title = `${businessName} · Slash POS`;
     }
 
     updateProfilePanelInfo();
@@ -692,7 +738,7 @@ function profileAction(action){
     switch(action){
         case "notification": showProfileToast("🔔 Test notification sent."); break;
         case "sync": showProfileToast("🔄 Syncing data…"); break;
-        case "whats-new": showProfileToast("✨ You're on the latest version of Cafe Pilot."); break;
+        case "whats-new": showProfileToast("✨ You're on the latest version of Slash."); break;
         case "change-business": showBusinessProfileDialog(); break;
         case "about": openBusinessAboutDialog(); break;
     }
@@ -753,8 +799,8 @@ function stopSessionHeartbeat(){
     if(sessionHeartbeatTimer){clearInterval(sessionHeartbeatTimer);sessionHeartbeatTimer=null;}
 }
 function verifySessionHeartbeat(){
-    if(!authToken||!currentUser||document.visibilityState!=="visible")return;
-    api("/auth/heartbeat").catch(error=>{if(authToken)console.warn("Session check failed:",error.message);});
+    if(!currentUser||document.visibilityState!=="visible")return;
+    api("/auth/heartbeat").catch(error=>{if(currentUser)console.warn("Session check failed:",error.message);});
 }
 function startSessionHeartbeat(){
     stopSessionHeartbeat();
@@ -802,12 +848,12 @@ function showPage(pageName) {
 
     const activePage = document.querySelector(".page.active-page");
     if (pageName === "table-view") {
-        selectedPOSChannelKey = "dine_in";
+        selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
         setOrderType("Dine-in", true);
     }
     if (pageName === "new-order" && activePage?.id !== "new-order" && !currentOpenOrderId) {
         if (document.getElementById("tableNumber")?.value) {
-            selectedPOSChannelKey = "dine_in";
+            selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
             setOrderType("Dine-in", true);
         } else {
             setOrderType("Takeaway");
@@ -1003,6 +1049,7 @@ const SETTINGS_FEATURES = [
     { key: "gst", title: "GST", icon: "％", description: "Enable or disable GST calculation on orders." },
     { key: "general-currency", title: "General / Currency", icon: "💱", description: "Set currency and the default GST rate." },
     { key: "pos-preferences", title: "POS Preferences", icon: "🧭", description: "Choose sales channels and defaults for each POS module." },
+    { key: "sales-channels", title: "Sales Channels", icon: "🛍️", description: "Create and manage where menu items can be sold." },
     { key: "billing-rules", title: "Billing Rules", icon: "🧮", description: "Set payment, invoice numbering and bill rounding rules." },
     { key: "non-chargeable", title: "Non-chargeable Reasons", icon: "📝", description: "Choose the reasons staff can use for no-charge bills." },
     { key: "cancellation-reasons", title: "Cancellation Reasons", icon: "↩️", description: "Manage the reasons staff select when cancelling orders." },
@@ -1092,7 +1139,7 @@ function showAdvancedReportsView(reportKey = "overview") {
         "weekday-sales": { title: "Sales by Weekday", description: "Find the busiest and highest earning days." },
         "daypart-sales": { title: "Sales by Daypart", description: "Compare sales across breakfast, lunch, afternoon, evening and late night." },
         "top-customers": { title: "Top Customers", description: "See your highest value customers for this period." },
-        "cancelled-orders": { title: "Cancelled Orders", description: "Review the cancellation reason, staff user ID, time and order value." },
+        "cancelled-orders": { title: "Cancelled Orders", description: "Review the cancellation reason, staff name, time and order value." },
         "discount-orders": { title: "Discounted Orders", description: "Review completed orders that used a discount." },
         "non-chargeable-orders": { title: "Non-chargeable Orders", description: "Review completed orders with no payment collected." }
     };
@@ -1141,8 +1188,6 @@ function setOrderType(type, preserveSaleChannel = false) {
     orderType = type;
     const label = document.getElementById("orderType");
     if (label) label.textContent = type;
-    document.getElementById("dineBtn")?.classList.toggle("selected", type === "Dine-in");
-    document.getElementById("takeBtn")?.classList.toggle("selected", type === "Takeaway");
     const menuTitle = document.getElementById("billingMenuTitle");
     if (menuTitle) menuTitle.textContent = type === "Dine-in" ? "Dine-in menu" : "Takeaway menu";
     const takeawayHint = document.getElementById("takeawayMenuHint");
@@ -1153,12 +1198,9 @@ function setOrderType(type, preserveSaleChannel = false) {
     if (!preserveSaleChannel) {
         const preferences = getPOSChannelPreferences();
         const modulePrefs = type === "Dine-in" ? preferences.tableView : preferences.newOrder;
-        const fallback = type === "Dine-in" ? "dine_in" : "takeaway";
+        const fallback = POS_CHANNELS.find(channel => channel.orderType === type)?.key;
         let nextChannel = modulePrefs.defaultChannel || fallback;
-        if (type === "Dine-in" && !modulePrefs.channels.includes("dine_in")) nextChannel = modulePrefs.channels[0] || "dine_in";
-        if (type === "Takeaway" && POS_CHANNELS.find(channel => channel.key === nextChannel)?.orderType !== "Takeaway") {
-            nextChannel = modulePrefs.channels.find(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway") || "takeaway";
-        }
+        if (!modulePrefs.channels.includes(nextChannel)) nextChannel = modulePrefs.channels[0] || fallback;
         selectedPOSChannelKey = nextChannel;
     }
     if (type !== "Dine-in") {
@@ -1236,13 +1278,58 @@ function getSelectedBillingAdjustment(id) {
     const rule = billingAdjustments.find(x => Number(x.id) === Number(id) && x.active !== false);
     if (!rule) return null;
     const applies = String(rule.applies_to || "all").toLowerCase();
-    const channel = selectedPOSChannelKey === "online" ? "online" : orderType === "Dine-in" ? "dine-in" : orderType === "Takeaway" ? "takeaway" : String(orderType || "").toLowerCase();
+    const channel = currentSaleChannelKey();
     if (applies !== "all" && applies !== channel) return null;
     return rule;
 }
 
 function isMarketingDealAvailableForCheckout(deal) {
     return !marketingDealUnavailableReason(deal);
+}
+
+function marketingDealLocalParts(now = new Date()) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+        weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(now);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    const dayKey = ({ Mon: "mon", Tue: "tue", Wed: "wed", Thu: "thu", Fri: "fri", Sat: "sat", Sun: "sun" })[values.weekday];
+    const dayIndex = MARKETING_WEEKDAYS.findIndex(day => day.key === dayKey);
+    return {
+        date: values.year + "-" + values.month + "-" + values.day,
+        dayKey,
+        previousDayKey: MARKETING_WEEKDAYS[(dayIndex + 6) % 7]?.key,
+        minute: Number(values.hour) * 60 + Number(values.minute)
+    };
+}
+
+function marketingDealScheduleUnavailableReason(deal, now = new Date()) {
+    const local = marketingDealLocalParts(now);
+    if (deal?.startDate && String(deal.startDate) > local.date) return "Starts " + deal.startDate;
+    if (deal?.endDate && String(deal.endDate) < local.date) return "Ended " + deal.endDate;
+
+    const allDays = MARKETING_WEEKDAYS.map(day => day.key);
+    const days = Array.isArray(deal?.days) && deal.days.length
+        ? deal.days.map(day => String(day).toLowerCase()).filter(day => allDays.includes(day))
+        : allDays;
+    const dayIsSelected = days.includes(local.dayKey);
+    const startTime = String(deal?.startTime || "").trim();
+    const endTime = String(deal?.endTime || "").trim();
+    if (Boolean(startTime) !== Boolean(endTime)) return "Set both deal hours to use this schedule";
+    if (!startTime) return dayIsSelected ? "" : "Not available today";
+
+    const parseTime = value => {
+        const match = /^(?:[01][0-9]|2[0-3]):[0-5][0-9]$/.exec(value);
+        return match ? Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5)) : null;
+    };
+    const start = parseTime(startTime);
+    const end = parseTime(endTime);
+    if (start === null || end === null || start === end) return "Deal hours are invalid";
+    const inWindow = start < end
+        ? dayIsSelected && local.minute >= start && local.minute < end
+        : (dayIsSelected && local.minute >= start) ||
+          (days.includes(local.previousDayKey) && local.minute < end);
+    return inWindow ? "" : "Outside deal days or hours";
 }
 
 function marketingDealUnavailableReason(deal) {
@@ -1255,10 +1342,8 @@ function marketingDealUnavailableReason(deal) {
     if (deal.useMembership) return "Membership eligibility is not linked to this POS customer yet";
     if (deal.requireAuthentication) return "Customer verification is not configured for this checkout";
     if (Number(deal.maxOccurrences) > 0) return "Usage limits are not tracked for checkout yet";
-    const now = new Date();
-    const today = [now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"), String(now.getDate()).padStart(2, "0")].join("-");
-    if (deal.startDate && String(deal.startDate) > today) return `Starts ${deal.startDate}`;
-    if (deal.endDate && String(deal.endDate) < today) return `Ended ${deal.endDate}`;
+    const scheduleUnavailable = marketingDealScheduleUnavailableReason(deal);
+    if (scheduleUnavailable) return scheduleUnavailable;
     const channels = Array.isArray(deal.channels) ? deal.channels : [];
     const normalizeChannel = value => String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
     if (channels.length && !channels.map(normalizeChannel).includes(normalizeChannel(currentSaleChannelKey()))) return "Unavailable on this channel";
@@ -1360,6 +1445,7 @@ function getBillingBreakdown() {
     let exclusiveTax = 0;
     let totalBeforeCharge = 0;
     const taxesByRate = {};
+    const taxableBasesByRate = {};
 
     for (const [index, line] of lines.entries()) {
         const adjustedNet = Math.max(0, line.net - Number(discountPlan.discounts[index] || 0));
@@ -1368,8 +1454,13 @@ function getBillingBreakdown() {
         if (line.inclusive) inclusiveTax += lineTax;
         else exclusiveTax += lineTax;
         taxesByRate[String(line.rate)] = (taxesByRate[String(line.rate)] || 0) + lineTax;
+        if (line.rate > 0) taxableBasesByRate[String(line.rate)] = (taxableBasesByRate[String(line.rate)] || 0) + adjustedNet;
         totalBeforeCharge += adjustedNet + lineTax;
     }
+    const taxBreakdown = buildTaxComponentsFromGroups(
+        Object.entries(taxableBasesByRate).map(([rate, base]) => ({ rate: Number(rate), base })),
+        gst
+    );
 
     const taxable = Math.max(0, subtotal - discount);
     let serviceCharge = 0;
@@ -1391,7 +1482,7 @@ function getBillingBreakdown() {
 
     return {
         subtotal, discount, serviceCharge, gst, inclusiveTax, exclusiveTax,
-        total, unroundedTotal, roundingAdjustment: total - unroundedTotal, roundingMode, taxable, gstRate: null, taxesByRate,
+        total, unroundedTotal, roundingAdjustment: total - unroundedTotal, roundingMode, taxable, gstRate: null, taxesByRate, taxBreakdown,
         discountId: discountRule?.source === "marketing" ? null : discountRule?.id || null,
         chargeId: chargeRule?.id || null,
         discountName: discountRule?.name || "",
@@ -1426,6 +1517,7 @@ function updateBill() {
             money(gst);
 
     }
+    renderLiveTaxBreakdown("billingTaxBreakdown", b.taxBreakdown);
 
 
     setText("discountAmount", money(b.discount));
@@ -1468,6 +1560,7 @@ function previewCurrentBill() {
         serviceCharge: breakdown.serviceCharge,
         chargeName: breakdown.chargeName,
         gst: breakdown.gst,
+        taxBreakdown: breakdown.taxBreakdown,
         total: breakdown.total,
         roundingAdjustment: breakdown.roundingAdjustment,
         paymentMethod: order.payment_method || "Pending",
@@ -1486,7 +1579,9 @@ function previewCurrentBill() {
             name: item.name,
             price: Number(item.price),
             quantity: Number(item.quantity),
-            options: item.options || []
+            options: item.options || [],
+            taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0),
+            taxMode: item.taxMode || "exclusive"
         }))
     });
 }
@@ -1595,34 +1690,57 @@ function refreshSideBillPreview() {
 // MENU
 // ==========================================
 
-const POS_CHANNELS = [
-    { key: "dine_in", label: "Dine-In", orderType: "Dine-in" },
-    { key: "takeaway", label: "Takeaway Meal", orderType: "Takeaway" },
+const DEFAULT_POS_CHANNELS = [
+    { key: "dine_in", label: "Dine", orderType: "Dine-in" },
+    { key: "takeaway", label: "Takeaway", orderType: "Takeaway" },
     { key: "delivery", label: "Delivery", orderType: "Takeaway" },
-    { key: "online", label: "Online", orderType: "Takeaway" }
+    { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
 ];
+let POS_CHANNELS = DEFAULT_POS_CHANNELS.map(channel => ({ ...channel }));
+function normalizePOSChannels(value) {
+    const source = Array.isArray(value) && value.length ? value : DEFAULT_POS_CHANNELS;
+    const fixedLabels = { dine_in: "Dine", takeaway: "Takeaway", delivery: "Delivery", online: "Slash" };
+    const seen = new Set();
+    const channels = source.slice(0, 40).map(channel => {
+        const key = String(channel?.key || "").trim().toLowerCase();
+        return {
+            key,
+            label: String(fixedLabels[key] || channel?.label || "").trim().slice(0, 60),
+            orderType: channel?.orderType === "Dine-in" ? "Dine-in" : channel?.orderType === "Takeaway" ? "Takeaway" : "",
+            qrMenu: channel?.qrMenu === true
+        };
+    }).filter(channel => {
+        if (!/^[a-z][a-z0-9_]{1,19}$/.test(channel.key) || !channel.label || !channel.orderType || seen.has(channel.key)) return false;
+        seen.add(channel.key);
+        return true;
+    });
+    if (!channels.some(channel => channel.orderType === "Dine-in") || !channels.some(channel => channel.orderType === "Takeaway") || !channels.some(channel => channel.qrMenu)) return DEFAULT_POS_CHANNELS.map(channel => ({ ...channel }));
+    return channels;
+}
+function syncPOSChannelsFromSettings() {
+    POS_CHANNELS = normalizePOSChannels(appSettings.posSalesChannels);
+    appSettings.posSalesChannels = POS_CHANNELS.map(channel => ({ ...channel }));
+}
+function getSaleChannel(key) { return POS_CHANNELS.find(channel => channel.key === String(key || "")) || null; }
 function defaultPOSChannelPreferences() {
+    const dineIn = POS_CHANNELS.filter(channel => channel.orderType === "Dine-in").map(channel => channel.key);
+    const takeaway = POS_CHANNELS.filter(channel => channel.orderType === "Takeaway").map(channel => channel.key);
     return {
-        newOrder: { channels: ["dine_in", "takeaway", "delivery", "online"], defaultChannel: "takeaway" },
-        tableView: { channels: ["dine_in"], defaultChannel: "dine_in" }
+        newOrder: { channels: takeaway, defaultChannel: takeaway[0] || "takeaway" },
+        tableView: { channels: dineIn, defaultChannel: dineIn[0] || "dine_in" }
     };
 }
 function normalizePOSChannelPreferences(value) {
     const defaults = defaultPOSChannelPreferences();
     const normalizeModule = function(moduleValue, fallback) {
-        const valid = Array.isArray(moduleValue?.channels) ? moduleValue.channels.filter(key => POS_CHANNELS.some(channel => channel.key === key)) : [];
+        const moduleType = fallback === defaults.tableView ? "Dine-in" : "Takeaway";
+        const valid = Array.isArray(moduleValue?.channels) ? moduleValue.channels.filter(key => POS_CHANNELS.some(channel => channel.key === key && channel.orderType === moduleType)) : [];
         const channels = valid.length ? [...new Set(valid)] : fallback.channels.slice();
         const defaultChannel = channels.includes(moduleValue?.defaultChannel) ? moduleValue.defaultChannel : channels[0];
         return { channels, defaultChannel };
     };
     const newOrder = normalizeModule(value?.newOrder, defaults.newOrder);
-    if (!newOrder.channels.some(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway")) newOrder.channels.push("takeaway");
-    if (POS_CHANNELS.find(channel => channel.key === newOrder.defaultChannel)?.orderType !== "Takeaway") {
-        newOrder.defaultChannel = newOrder.channels.find(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway") || "takeaway";
-    }
     const tableView = normalizeModule(value?.tableView, defaults.tableView);
-    if (!tableView.channels.includes("dine_in")) tableView.channels.unshift("dine_in");
-    tableView.defaultChannel = "dine_in";
     return {
         newOrder,
         tableView
@@ -1631,22 +1749,39 @@ function normalizePOSChannelPreferences(value) {
 function getPOSChannelPreferences() {
     return normalizePOSChannelPreferences(appSettings.posChannelPreferences);
 }
+function updateBillingChannelLabels() {
+    const channel = getSaleChannel(selectedPOSChannelKey);
+    const label = channel?.label || (orderType === "Dine-in" ? "Dine" : "Takeaway");
+    const orderLabel = document.getElementById("orderType");
+    if (orderLabel) orderLabel.textContent = label;
+    const menuTitle = document.getElementById("billingMenuTitle");
+    if (menuTitle) menuTitle.textContent = label + " menu";
+    const hint = document.getElementById("takeawayMenuHint");
+    if (hint) hint.textContent = label + " billing is ready — choose items below.";
+}
 function renderBillingSaleChannelOptions() {
     const select = document.getElementById("billingSaleChannel");
     if (!select) return;
     const preferences = getPOSChannelPreferences();
     const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
-    const channels = modulePrefs.channels.length ? modulePrefs.channels : [orderType === "Dine-in" ? "dine_in" : "takeaway"];
-    if (!channels.includes(selectedPOSChannelKey)) selectedPOSChannelKey = modulePrefs.defaultChannel || channels[0];
+    const channels = modulePrefs.channels.length ? modulePrefs.channels : POS_CHANNELS.filter(channel => channel.orderType === orderType).map(channel => channel.key);
+    if (!channels.includes(selectedPOSChannelKey)) {
+        selectedPOSChannelKey = channels.includes(modulePrefs.defaultChannel)
+            ? modulePrefs.defaultChannel
+            : channels[0];
+    }
     select.innerHTML = channels.map(key => {
-        const channel = POS_CHANNELS.find(entry => entry.key === key);
+        const channel = getSaleChannel(key);
         return channel ? "<option value=\"" + esc(channel.key) + "\">" + esc(channel.label) + "</option>" : "";
     }).join("");
     if (channels.includes(selectedPOSChannelKey)) select.value = selectedPOSChannelKey;
     else {
-        selectedPOSChannelKey = modulePrefs.defaultChannel || channels[0];
+        selectedPOSChannelKey = channels.includes(modulePrefs.defaultChannel)
+            ? modulePrefs.defaultChannel
+            : channels[0];
         select.value = selectedPOSChannelKey;
     }
+    updateBillingChannelLabels();
 }
 
 function clearNewOrderDraft() {
@@ -1689,24 +1824,34 @@ async function selectBillingSaleChannel(channelKey) {
     const preferences = getPOSChannelPreferences();
     const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
     if (!modulePrefs.channels.includes(channelKey)) return;
-    const channel = POS_CHANNELS.find(entry => entry.key === channelKey);
+    const channel = getSaleChannel(channelKey);
     if (!channel) return;
     selectedPOSChannelKey = channelKey;
     if (channel.orderType !== orderType) setOrderType(channel.orderType, true);
     renderBillingSaleChannelOptions();
     renderBillingAdjustmentSelectors();
     await loadMenu();
+    const unavailable = cart.filter(entry => {
+        const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
+        return item && !isMenuItemAvailableOnSaleChannel(item, channelKey);
+    });
     cart = cart.map(entry => {
         const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
+        if (item && !isMenuItemAvailableOnSaleChannel(item, channelKey)) return null;
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
         const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
         const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
         return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
-    });
+    }).filter(Boolean);
+    if (unavailable.length) showProfileToast(unavailable.length === 1 ? `${unavailable[0].name} is unavailable on ${channel.label} and was removed.` : `${unavailable.length} unavailable items were removed for ${channel.label}.`);
     updateCart();
 }
 function currentSaleChannelKey() {
-    return selectedPOSChannelKey || (orderType === "Dine-in" ? "dine_in" : "takeaway");
+    return selectedPOSChannelKey || POS_CHANNELS.find(channel=>channel.orderType===orderType)?.key || "";
+}
+function isMenuItemAvailableOnSaleChannel(item, channelKey = currentSaleChannelKey()) {
+    const channels = item?.sales_channels;
+    return !Array.isArray(channels) || channels.map(value => String(value).toLowerCase()).includes(String(channelKey).toLowerCase());
 }
 function resolveMenuPrice(item, variant=null) {
     const channel = currentSaleChannelKey();
@@ -1727,11 +1872,12 @@ function repriceCartForCurrentChannel() {
     if (!cart.length || !currentMenu.length) return;
     cart = cart.map(entry => {
         const item = currentMenu.find(candidate => Number(candidate.id) === Number(entry.id));
+        if (item && !isMenuItemAvailableOnSaleChannel(item)) return null;
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
         const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
         const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
         return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
-    });
+    }).filter(Boolean);
     updateCart();
 }
 function menuTaxLabel(item){ return item?.tax_label || (Number(item?.tax_rate||0) ? `GST ${Number(item.tax_rate)}%` : 'Tax 0%'); }
@@ -1754,6 +1900,10 @@ async function loadMenuOptionSets(){
     return menuOptionSetsLoadPromise;
 }
 async function selectBillingMenuItem(item) {
+    if (!isMenuItemAvailableOnSaleChannel(item)) {
+        showProfileToast("This item is not available on the selected sale channel.");
+        return;
+    }
     try{
         await loadMenuOptionSets();
     }catch(error){
@@ -1987,7 +2137,12 @@ async function loadMenu() {
 }
 
         grid.innerHTML = "";
-        currentMenu.filter(x => x.available !== false).forEach(item => {
+        const channelMenu = currentMenu.filter(item => item.available !== false && isMenuItemAvailableOnSaleChannel(item));
+        if (!channelMenu.length) {
+            grid.innerHTML = `<div class="menu-empty-state">No items are available on the ${esc(getSaleChannel(currentSaleChannelKey())?.label || "selected")} channel. Update item channel availability in Menu Management.</div>`;
+            return;
+        }
+        channelMenu.forEach(item => {
             const card = document.createElement("div");
             card.className = "food-card modern-food-card";
             card.dataset.category = String(item.category || "").trim();
@@ -2083,7 +2238,7 @@ async function openPayment() {
     previousPaymentAllocations = [];
     if (currentOpenOrderId) {
         try {
-            const summary = currentOpenOrderData?.paymentSummary || await api(`/orders/${currentOpenOrderId}/payment-summary`);
+            const summary = await api(`/orders/${currentOpenOrderId}/payment-summary`);
             paymentCollectedSoFar = Math.max(0, Number(summary.amountCollected || 0));
             previousPaymentAllocations = Array.isArray(summary.allocations) ? summary.allocations : [];
             if (currentOpenOrderData) currentOpenOrderData.paymentSummary = summary;
@@ -2201,6 +2356,7 @@ function updatePaymentSummary() {
     setMoney("paymentSubtotal", b.subtotal);
     setMoney("paymentCharges", b.serviceCharge);
     setMoney("paymentTax", b.gst);
+    renderLiveTaxBreakdown("paymentTaxBreakdown", b.taxBreakdown);
     setMoney("paymentDiscount", b.discount);
     const roundingRow = document.getElementById("paymentRoundingRow");
     if (roundingRow) roundingRow.hidden = Math.abs(Number(b.roundingAdjustment || 0)) < 0.005;
@@ -2236,23 +2392,23 @@ async function confirmPOSPayment() {
     if (paymentCategory === "non-chargeable") {
         const nonChargeableReason = document.getElementById("paymentNonChargeableReason")?.value || "";
         if (!nonChargeableReason) return alert("Choose a non-chargeable reason before continuing.");
-        return completeOrder("Non-chargeable", { nonChargeable: true, nonChargeableReason, amountDue: due, keepOpen: false });
+        return completeOrder("Non-chargeable", { paymentMode: "non-chargeable", nonChargeable: true, nonChargeableReason, amountDue: due, keepOpen: false });
     }
     if (paymentCategory === "partial") {
         const amount = Math.round(Number(document.getElementById("cashReceived")?.value || 0) * 100) / 100;
         if (!Number.isFinite(amount) || amount <= 0 || amount >= due) return alert("Enter an amount greater than zero and less than the remaining balance. Use Full Payment to settle the full balance.");
         if (isCashPaymentMethod(selectedPaymentMethod) && Number(document.getElementById("cashReceived")?.value || 0) < amount) return alert("Cash received is less than the payment amount.");
-        return completeOrder(selectedPaymentMethod, { payments: [{ method: selectedPaymentMethod, amount }], amountDue: due, keepOpen: true });
+        return completeOrder(selectedPaymentMethod, { paymentMode: "partial", payments: [{ method: selectedPaymentMethod, amount }], amountDue: due, keepOpen: true });
     }
     if (paymentCategory === "split") {
         const amount = Math.round(splitPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
         if (splitPayments.length < 2) return alert("Add at least two payment methods for a split payment.");
         if (Math.abs(amount - due) > 0.01) return alert("Split payments must add up to the remaining balance of " + money(due) + ".");
-        return completeOrder(splitPayments.map(payment => payment.method).join(" + "), { payments: splitPayments.slice(), amountDue: due, keepOpen: false });
+        return completeOrder(splitPayments.map(payment => payment.method).join(" + "), { paymentMode: "split", payments: splitPayments.slice(), amountDue: due, keepOpen: false });
     }
     const tendered = Number(document.getElementById("cashReceived")?.value || 0);
     if (isCashPaymentMethod(selectedPaymentMethod) && tendered < due) return alert("Cash received is less than the remaining bill amount.");
-    return completeOrder(selectedPaymentMethod, { payments: [{ method: selectedPaymentMethod, amount: due }], amountDue: due, keepOpen: false });
+    return completeOrder(selectedPaymentMethod, { paymentMode: "full", payments: [{ method: selectedPaymentMethod, amount: due }], amountDue: due, keepOpen: false });
 }
 
 let completingOrder = false;
@@ -2285,7 +2441,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             cacheBillingCustomer(billingCustomer);
         }
         const orderPayload = {
-            orderType, tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
+            orderType, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null,
             discount: b.discount, serviceCharge: b.serviceCharge,
             discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
@@ -2298,10 +2454,11 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         let order;
         let orderNumber;
         const isNewOrder = !currentOpenOrderId;
-        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), options: item.options || [] }));
+        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), options: item.options || [], taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0), taxMode: item.taxMode || "exclusive" }));
         const kotEnabled = appSettings.kotEnabled !== false;
         const checkoutPayload = {
             payments: paymentsToRecord,
+            paymentMode: paymentOptions.paymentMode || (paymentOptions.nonChargeable ? "non-chargeable" : paymentOptions.keepOpen ? "partial" : "full"),
             paymentMethod,
             keepOpen: Boolean(paymentOptions.keepOpen),
             nonChargeable: Boolean(paymentOptions.nonChargeable),
@@ -2354,6 +2511,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             serviceCharge: Number(completedOrder.service_charge ?? b.serviceCharge),
             chargeName: b.chargeName,
             gst: Number(completedOrder.gst ?? gst),
+            taxBreakdown: b.taxBreakdown,
             total: Number(completedOrder.total ?? total),
             roundingAdjustment: b.roundingAdjustment,
             paymentMethod,
@@ -2436,7 +2594,7 @@ async function saveOpenOrder() {
             const result = await api(`/orders/${openOrderId}`, {
                 method: "PUT",
                 body: JSON.stringify({
-                    orderType: orderTypeToSave, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
+                    orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
                     paymentMethod: openOrderData?.order?.payment_method || null,
                     customerId: billingCustomer?.id || openOrderData?.order?.customer_id || null,
                     discount: b.discount,
@@ -2467,7 +2625,7 @@ async function saveOpenOrder() {
         const result = await api("/orders", {
             method: "POST",
             body: JSON.stringify({
-                orderNumber, orderType: orderTypeToSave, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
+                orderNumber, orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
                 gst: b.gst, total: b.total, paymentMethod: null,
                 customerId: billingCustomer?.id || null,
                 discount: b.discount, serviceCharge: b.serviceCharge,
@@ -2515,6 +2673,12 @@ async function payOpenOrder(orderId) {
         }));
         orderType = order.order_type || "Dine-in";
         setOrderType(orderType);
+        if (getSaleChannel(order.sales_channel_key)?.orderType === orderType) {
+            selectedPOSChannelKey=order.sales_channel_key;
+            renderBillingSaleChannelOptions();
+            renderBillingAdjustmentSelectors();
+            await loadMenu();
+        }
         const tableSelect = document.getElementById("tableNumber");
         if (tableSelect) tableSelect.value = order.table_number || tableSelect.value;
         setBillingPaxForTable(order.table_number, order.pax || 1);
@@ -2549,7 +2713,7 @@ window.openBillPreview = function(data) {
     modal?.classList.toggle("bill-preview-clean", isCleanPreview);
 
     const restaurantName = document.getElementById("billRestaurantName");
-    if (restaurantName) restaurantName.textContent = isCleanPreview ? "Order" : (appSettings.restaurantName || "CAFE POS");
+    if (restaurantName) restaurantName.textContent = isCleanPreview ? "Order" : (appSettings.restaurantName || "SLASH POS");
     const restaurantAddress = document.getElementById("billRestaurantAddress");
     if (restaurantAddress) restaurantAddress.textContent = appSettings.address || "Cafe Management System";
     const restaurantPhone = document.getElementById("billRestaurantPhone");
@@ -2563,7 +2727,7 @@ window.openBillPreview = function(data) {
     if (customFooter) customFooter.textContent = String(appSettings.footer || "Thank You!\nVisit Again 😊");
     const poweredBy = document.getElementById("billPoweredBy");
     if (poweredBy) {
-        poweredBy.textContent = "Powered by Cafe Pilot";
+        poweredBy.textContent = "Powered by Slash";
         poweredBy.hidden = appSettings.showPoweredByCafePilot === false;
     }
     const statusBadge = document.getElementById("billStatusBadge");
@@ -2585,7 +2749,8 @@ window.openBillPreview = function(data) {
         ? currentOrderForDetails.order
         : { order_number: data?.orderNumber, total: data?.total, subtotal: data?.subtotal, gst: data?.gst };
     const items = normalizeOrderBillItems(sourceItems, billOrder);
-    window.currentBillData = { ...data, items };
+    const taxBreakdown = Array.isArray(data?.taxBreakdown) ? data.taxBreakdown : buildBillTaxBreakdown(items, data.discount, data.gst);
+    window.currentBillData = { ...data, items, taxBreakdown };
     const itemCount = document.getElementById("billQuickItemCount");
     if (itemCount) itemCount.textContent = `${items.length} ${items.length === 1 ? "item" : "items"}`;
     const subtotalLabel = document.getElementById("billSubtotalLabel");
@@ -2729,6 +2894,13 @@ window.openBillPreview = function(data) {
         money(data.gst || 0);
     const billGstRow = document.getElementById("billGstRow");
     if (billGstRow) billGstRow.style.display = isCleanPreview && Number(data.gst || 0) <= 0 ? "none" : "";
+    const billTaxBreakdown = document.getElementById("billTaxBreakdown");
+    if (billTaxBreakdown) {
+        billTaxBreakdown.innerHTML = taxBreakdown.map(row =>
+            `<div><span>${esc(row.component)} ${esc(formatBillTaxRate(row.rate))}% on ${esc(money(row.taxableBase))}</span><strong>${esc(money(row.taxAmount))}</strong></div>`
+        ).join("");
+        billTaxBreakdown.style.display = taxBreakdown.length ? "block" : "none";
+    }
 
     document.getElementById("billTotal").textContent =
         money(data.total || 0);
@@ -2871,7 +3043,7 @@ window.printThermalBill = async function(options = {}) {
     };
     const source=data.orderId?"?source=order":"";
     try {
-        // LOCAL = Windows installed printer. Print directly through the local Cafe POS Printer Service.
+        // LOCAL = Windows installed printer. Print directly through the local Slash POS Printer Service.
         if (defaultPrinter.connection_type === "local") {
             const receipt = printerReceiptText(data);
             if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(defaultPrinter.name)) {
@@ -3421,7 +3593,9 @@ async function printCurrentOrder() {
                 name: item.item_name || item.name || "-",
                 quantity: Number(item.quantity || 0),
                 price: Number(item.price || 0),
-                options: item.options || []
+                options: item.options || [],
+                taxRate: Number(item.taxRate ?? item.tax_rate ?? 0),
+                taxMode: item.taxMode || item.tax_mode || "exclusive"
             };
         }),
         subtotal: Number(order.subtotal || 0),
@@ -3531,7 +3705,7 @@ async function loadTables() {
                                     </button>
                                     <button type="button" class="table-action-btn table-delete-btn"
                                         aria-label="Delete table ${esc(table.table_number)}"
-                                        onclick="deleteTable(${table.id}, '${esc(table.table_number)}')">
+                                        onclick="deleteTable(${Number(table.id)})">
                                         Delete
                                     </button>
                                 </div>
@@ -3906,11 +4080,11 @@ async function updateTable() {
 }
 
 
-async function deleteTable(id, number) {
+async function deleteTable(id) {
 
     if (
         !confirm(
-            `Delete ${number}?\n\nThis cannot be undone.`
+            `Delete this table?\n\nThis cannot be undone.`
         )
     ) {
 
@@ -3933,7 +4107,7 @@ async function deleteTable(id, number) {
 
 
         alert(
-            `${number} deleted successfully! 🗑️`
+            `Table deleted successfully! 🗑️`
         );
 
 
@@ -4631,425 +4805,6 @@ async function updateKOTOrder(orderId,status){
 // PRINT KOT
 // ==========================================
 
-async function printKOT(orderId) {
-
-    try {
-
-        const items =
-            await api("/kot");
-
-
-        const kotItems =
-            items.filter(
-                function(item) {
-
-                    return Number(
-                        item.order_id
-                    ) === Number(orderId);
-
-                }
-            );
-
-
-        if (!kotItems.length) {
-
-            return alert(
-                "KOT not found."
-            );
-
-        }
-
-
-        const first =
-            kotItems[0];
-
-
-        const printWindow =
-            window.open(
-                "",
-                "_blank",
-                "width=420,height=700"
-            );
-
-
-        if (!printWindow) {
-
-            return alert(
-                "Please allow pop-ups to print KOT."
-            );
-
-        }
-
-
-        printWindow.document.write(`
-
-            <!DOCTYPE html>
-
-            <html>
-
-            <head>
-
-                <title>
-                    KOT - ${esc(
-                        first.order_number
-                    )}
-                </title>
-
-
-                <style>
-
-                    * {
-                        box-sizing: border-box;
-                    }
-
-
-                    body {
-
-                        font-family:
-                            Arial,
-                            sans-serif;
-
-                        width: 300px;
-
-                        margin: 0 auto;
-
-                        padding: 15px;
-
-                        color: #000;
-
-                    }
-
-
-                    h2 {
-
-                        text-align: center;
-
-                        margin: 0;
-
-                        font-size: 22px;
-
-                    }
-
-
-                    .subtitle {
-
-                        text-align: center;
-
-                        font-size: 14px;
-
-                        font-weight: bold;
-
-                        margin-top: 4px;
-
-                    }
-
-
-                    .line {
-
-                        border-top:
-                            1px dashed #000;
-
-                        margin: 10px 0;
-
-                    }
-
-
-                    .row {
-
-                        display: flex;
-
-                        justify-content:
-                            space-between;
-
-                        margin: 6px 0;
-
-                        font-size: 14px;
-
-                    }
-
-
-                    .item-header {
-
-                        display: flex;
-
-                        justify-content:
-                            space-between;
-
-                        font-weight: bold;
-
-                        font-size: 14px;
-
-                        margin-bottom: 8px;
-
-                    }
-
-
-                    .item {
-
-                        display: flex;
-
-                        justify-content:
-                            space-between;
-
-                        font-size: 17px;
-
-                        font-weight: bold;
-
-                        margin: 10px 0;
-
-                    }
-
-
-                    .item-name {
-
-                        max-width: 220px;
-
-                    }
-
-
-                    .qty {
-
-                        font-size: 18px;
-
-                    }
-
-
-                    .footer {
-
-                        text-align: center;
-
-                        font-weight: bold;
-
-                        margin-top: 15px;
-
-                        font-size: 14px;
-
-                    }
-
-
-                    .kot-number {
-
-                        text-align: center;
-
-                        font-size: 18px;
-
-                        font-weight: bold;
-
-                        margin-top: 8px;
-
-                    }
-
-
-                    @media print {
-
-                        body {
-
-                            width: 300px;
-
-                            margin: 0;
-
-                        }
-
-                    }
-
-                </style>
-
-            </head>
-
-
-            <body>
-
-                <h2>
-                    ☕ CAFE POS
-                </h2>
-
-
-                <div class="subtitle">
-                    KITCHEN ORDER TICKET
-                </div>
-
-
-                <div class="kot-number">
-
-                    KOT #${first.id}
-
-                </div>
-
-
-                <div class="line"></div>
-
-
-                <div class="row">
-
-                    <span>
-                        Order
-                    </span>
-
-                    <strong>
-                        ${esc(
-                            first.order_number
-                        )}
-                    </strong>
-
-                </div>
-
-
-                <div class="row">
-
-                    <span>
-                        Order Type
-                    </span>
-
-                    <strong>
-                        ${esc(
-                            first.order_type
-                        )}
-                    </strong>
-
-                </div>
-
-
-                <div class="row">
-
-                    <span>
-                        Table
-                    </span>
-
-                    <strong>
-                        ${esc(
-                            first.table_number || "-"
-                        )}
-                    </strong>
-
-                </div>
-
-
-                <div class="row">
-
-                    <span>
-                        Time
-                    </span>
-
-                    <strong>
-                        ${new Date(
-                            first.created_at
-                        ).toLocaleString()}
-                    </strong>
-
-                </div>
-
-
-                <div class="line"></div>
-
-
-                <div class="item-header">
-
-                    <span>
-                        ITEM
-                    </span>
-
-                    <span>
-                        QTY
-                    </span>
-
-                </div>
-
-
-                ${
-                    kotItems
-                        .map(function(item) {
-
-                            return `
-
-                                <div class="item">
-
-                                    <span class="item-name">
-
-                                        ${esc(
-                                            item.item_name
-                                        )}
-
-                                    </span>
-
-
-                                    <span class="qty">
-
-                                        ×
-                                        ${item.quantity}
-
-                                    </span>
-
-                                </div>
-
-                            `;
-
-                        })
-                        .join("")
-                }
-
-
-                <div class="line"></div>
-
-
-                <div class="row">
-
-                    <span>
-                        Status
-                    </span>
-
-                    <strong>
-                        ${esc(
-                            first.status
-                        )}
-                    </strong>
-
-                </div>
-
-
-                <div class="footer">
-                    KITCHEN COPY
-                </div>
-
-
-                <script>
-
-                    window.onload = function() {
-
-                        window.print();
-
-                    };
-
-                <\/script>
-
-
-            </body>
-
-            </html>
-
-        `);
-
-
-        printWindow.document.close();
-
-
-    } catch (error) {
-
-        console.error(
-            "Print KOT failed:",
-            error
-        );
-
-
-        alert(
-            "Unable to print KOT: " +
-            error.message
-        );
-
-    }
-
-}
-
-
 async function printOpenOrder(orderId){
     if(!hasPermission("orders","print_open"))return alert("You do not have permission to print open orders.");
     try{
@@ -5057,7 +4812,7 @@ async function printOpenOrder(orderId){
         const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
-        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[]}))};
+        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
         window.openBillPreview(bill);
         await window.printThermalBill({ manual: true });
     }catch(error){alert("Unable to print open order: "+error.message);}
@@ -5105,14 +4860,13 @@ async function viewOrderBill(orderId){
 
 async function printKOT(orderId){
     try{
-        const all=await api("/kot?range=all");
-        const tickets=all.filter(item=>Number(item.order_id)===Number(orderId));
+        const tickets=await api(`/kot?orderId=${encodeURIComponent(Number(orderId))}&print=1`);
         if(!tickets.length)return alert("KOT not found.");
         const buckets=new Map();
         tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
         for(const [groupId,groupTickets] of buckets){
             const first=groupTickets[0],groupName=first.kot_group_name||"Kitchen";
-            const receipt=[appSettings.restaurantName||"CAFE POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Time: ${new Date(first.created_at||Date.now()).toLocaleString()}`,"--------------------------------"];
+            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Time: ${new Date(first.created_at||Date.now()).toLocaleString()}`,"--------------------------------"];
             groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options);receipt.push(`${item.item_name||"Item"} x${Number(item.quantity||0)}`);if(options)receipt.push(`  + ${options}`);});
             receipt.push("--------------------------------", "KITCHEN COPY", "", "");
             const text=receipt.join("\n");
@@ -5128,7 +4882,7 @@ async function printKOT(orderId){
                 const win=window.open("","_blank","width=420,height=700");
                 if(!win)return alert("Please allow pop-ups to print KOT.");
                 const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options);return `<div class="item"><span>${esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>× ${Number(item.quantity||0)}</strong></div>`;}).join("");
-                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"CAFE POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>${esc(new Date(first.created_at||Date.now()).toLocaleString())}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>${esc(new Date(first.created_at||Date.now()).toLocaleString())}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
                 win.document.close();
             }
         }
@@ -5171,15 +4925,16 @@ function renderMenuManagementCards(){
     const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
     const nature=String(document.getElementById('menuManagementNature')?.value||'');
     const items=currentMenu.filter(item=>{
-        const hay=`${item.name} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
+        const hay=`${item.name} ${item.sku||''} ${item.description||''} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
         return(!q||hay.includes(q))&&(!nature||item.nature===nature);
     });
     grid.innerHTML=items.length?items.map(item=>{
         const channel=item.channel_prices||{},variants=item.variants||[],available=item.available!==false;
         return `<article class="menu-admin-card ${available?'':'disabled'}">
           <div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
+          <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}</div>
           <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div><div><small>KOT</small><strong>${esc(item.kot_group_name||'Not routed')}</strong></div></div>
-          <div class="menu-channel-chips"><span>Dine-in ${money(channel.dine_in??item.price)}</span><span>Takeaway ${money(channel.takeaway??item.price)}</span><span>Delivery ${money(channel.delivery??item.price)}</span><span>Online ${money(channel.online??item.price)}</span></div>
+          <div class="menu-channel-chips">${POS_CHANNELS.filter(saleChannel=>!Array.isArray(item.sales_channels)||item.sales_channels.includes(saleChannel.key)).map(saleChannel=>`<span>${esc(saleChannel.label)} ${money(channel[saleChannel.key]??item.price)}</span>`).join('')}</div>
           ${variants.length?`<div class="menu-variant-list"><strong>Variants</strong>${variants.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}
           <div class="menu-admin-actions"><button type="button" class="table-action-btn" onclick="openMenuPriceEditor(${Number(item.id)})">💰 Manage prices</button><button type="button" class="table-action-btn" onclick="editMenuItem(${Number(item.id)})">Edit details</button><label class="menu-availability-toggle"><input type="checkbox" ${available?'checked':''} onchange="setMenuItemAvailability(${Number(item.id)},this.checked)" aria-label="Enable ${esc(item.name)} in the POS"><span>${available?'POS On':'POS Off'}</span></label></div>
         </article>`;
@@ -5194,21 +4949,20 @@ function openMenuPriceEditor(id){
     const prices=item.channel_prices||{};
     document.getElementById('menuPriceModalTitle').textContent=`Manage prices · ${item.name}`;
     document.getElementById('managedMenuBasePrice').value=item.price??0;
-    document.getElementById('managedMenuPriceOnline').value=prices.online??item.price??0;
-    document.getElementById('managedMenuPriceDineIn').value=prices.dine_in??item.price??0;
-    document.getElementById('managedMenuPriceTakeaway').value=prices.takeaway??item.price??0;
-    document.getElementById('managedMenuPriceDelivery').value=prices.delivery??item.price??0;
+    document.getElementById('managedMenuChannelPrices').innerHTML=POS_CHANNELS.map(channel=>`<div class="form-group"><label for="managedMenuPrice_${channel.key}">${esc(channel.label)} price</label><input id="managedMenuPrice_${channel.key}" type="number" min="0" step="0.01" value="${Number(prices[channel.key]??item.price??0)}"></div>`).join('');
     document.getElementById('menuVariantPriceEditor').innerHTML=(item.variants||[]).map(variant=>`<label class="menu-price-variant-row"><span>${esc(variant.name)}${variant.unit?' · '+esc(variant.unit):''}</span><input class="managed-menu-variant-price" type="number" min="0" step="0.01" data-id="${Number(variant.id)}" value="${Number(variant.price||0)}" aria-label="${esc(variant.name)} price"></label>`).join('')||'<p class="access-muted">This item has no size variants.</p>';
     document.getElementById('menuPriceModal').style.display='flex';
 }
 function closeMenuPriceEditor(){document.getElementById('menuPriceModal').style.display='none';menuPriceEditingId=null;}
 async function saveMenuPriceEditor(){
     if(!menuPriceEditingId)return;
-    const fields={price:document.getElementById('managedMenuBasePrice').value,online:document.getElementById('managedMenuPriceOnline').value,dine_in:document.getElementById('managedMenuPriceDineIn').value,takeaway:document.getElementById('managedMenuPriceTakeaway').value,delivery:document.getElementById('managedMenuPriceDelivery').value};
+    const fields={price:document.getElementById('managedMenuBasePrice').value};
+    const channelPrices={};
+    for(const channel of POS_CHANNELS){const value=document.getElementById('managedMenuPrice_'+channel.key)?.value;if(value===''||!Number.isFinite(Number(value))||Number(value)<0)return alert(`Enter a valid ${channel.label} price.`);channelPrices[channel.key]=Number(value);}
     if(Object.values(fields).some(value=>value===''||!Number.isFinite(Number(value))||Number(value)<0))return alert('Enter a valid price in every field.');
     const variantInputs=[...document.querySelectorAll('.managed-menu-variant-price')];
     if(variantInputs.some(input=>input.value===''||!Number.isFinite(Number(input.value))||Number(input.value)<0))return alert('Enter a valid price for every size variant.');
-    const payload={price:Number(fields.price),channelPrices:{online:Number(fields.online),dine_in:Number(fields.dine_in),takeaway:Number(fields.takeaway),delivery:Number(fields.delivery)},variants:variantInputs.map(input=>({id:Number(input.dataset.id),price:Number(input.value)}))};
+    const payload={price:Number(fields.price),channelPrices,variants:variantInputs.map(input=>({id:Number(input.dataset.id),price:Number(input.value)}))};
     try{await api(`/menu/${menuPriceEditingId}/prices`,{method:'PATCH',body:JSON.stringify(payload)});closeMenuPriceEditor();await loadMenuManagement();await loadMenu();showProfileToast('Menu prices updated.');}
     catch(error){alert(error.message||'Could not update menu prices.');}
 }
@@ -5225,104 +4979,50 @@ async function setMenuItemAvailability(id,available){
     }
 }
 
-async function setQrMenuStock(id,inStock){
-    try{
-        await api(`/menu/${id}/qr-stock`,{method:'PATCH',body:JSON.stringify({inStock})});
-        await loadMenuManagement();
-        showProfileToast(inStock?'Item marked in stock on the QR menu.':'Item marked sold out on the QR menu.');
-    }catch(error){
-        alert(error.message||'Could not update the QR menu stock status.');
-        await loadMenuManagement();
-    }
-}
-
 let restaurantMenuPublication=null;
-let restaurantMenuQrDataUrl='';
-async function loadRestaurantMenuSettings(){
-    try{
-        restaurantMenuPublication=await api('/menu/public-settings');
-        const enabled=document.getElementById('publicMenuEnabled'),channel=document.getElementById('publicMenuPriceChannel'),url=document.getElementById('publicMenuUrl'),status=document.getElementById('publicMenuStatus');
-        if(enabled)enabled.checked=restaurantMenuPublication.enabled===true;
-        if(channel)channel.value=restaurantMenuPublication.priceChannel||'online';
-        if(url)url.value=`${window.location.origin}/restaurant/${restaurantMenuPublication.token}`;
-        if(status)status.textContent=restaurantMenuPublication.enabled?'Your cafe or restaurant menu is published.':"Your menu is private until you turn publishing on.";
-        await generateRestaurantMenuQr();
-    }catch(error){
-        const status=document.getElementById('publicMenuStatus');
-        if(status)status.textContent='Guest menu settings are unavailable. Apply the latest POS database update, then reopen Menu.';
-        console.warn('Restaurant menu settings unavailable:',error);
-    }
-}
-async function saveRestaurantMenuSettings(){
-    const enabled=document.getElementById('publicMenuEnabled')?.checked===true,priceChannel=document.getElementById('publicMenuPriceChannel')?.value||'online';
-    try{
-        restaurantMenuPublication=await api('/menu/public-settings',{method:'PUT',body:JSON.stringify({enabled,priceChannel})});
-        const url=document.getElementById('publicMenuUrl');
-        if(url)url.value=`${window.location.origin}/restaurant/${restaurantMenuPublication.token}`;
-        document.getElementById('publicMenuStatus').textContent=enabled?'Published. The guest menu now shows available POS items and this price list.':'Publishing is off. Guests cannot open the menu.';
-        await generateRestaurantMenuQr();
-        showProfileToast(enabled?'Guest menu published.':'Guest menu turned off.');
-    }catch(error){
-        document.getElementById('publicMenuStatus').textContent=error.message||'Could not save menu settings.';
-    }
-}
-async function generateRestaurantMenuQr(){
-    const image=document.getElementById('restaurantMenuQrImage'),placeholder=document.getElementById('restaurantMenuQrPlaceholder'),status=document.getElementById('restaurantMenuQrStatus'),downloadButton=document.getElementById('downloadRestaurantMenuQrButton'),printButton=document.getElementById('printRestaurantMenuQrButton'),url=document.getElementById('publicMenuUrl')?.value||'';
-    if(!image||!status)return;
-    restaurantMenuQrDataUrl='';
-    if(downloadButton)downloadButton.disabled=true;
-    if(printButton)printButton.disabled=true;
-    image.hidden=true;
-    if(placeholder)placeholder.hidden=false;
-    if(!url){status.textContent='Save your guest menu settings to create its QR code.';return;}
-    status.textContent='Generating your QR code…';
-    try{
-        const result=await api('/menu/public-settings/qr',{method:'POST',body:JSON.stringify({url})});
-        restaurantMenuQrDataUrl=result.dataUrl||'';
-        if(!restaurantMenuQrDataUrl)throw new Error('QR image was not returned.');
-        image.src=restaurantMenuQrDataUrl;
-        image.hidden=false;
-        if(placeholder)placeholder.hidden=true;
-        if(downloadButton)downloadButton.disabled=false;
-        if(printButton)printButton.disabled=false;
-        const localHost=['localhost','127.0.0.1','::1'].includes(window.location.hostname);
-        status.textContent=localHost?'This local QR link works on this computer; deploy the POS to let customers scan it.':restaurantMenuPublication?.enabled?'Ready. Your published guest menu link is encoded in this QR code.':'QR is ready; publish the guest menu before sharing it.';
-    }catch(error){
-        status.textContent=error.message||'Could not generate the guest menu QR code.';
-    }
-}
-function downloadRestaurantMenuQr(){
-    if(!restaurantMenuQrDataUrl)return;
-    const link=document.createElement('a');link.href=restaurantMenuQrDataUrl;link.download='cafe-restaurant-menu-qr.png';document.body.appendChild(link);link.click();link.remove();
-}
-function printRestaurantMenuQr(){
-    if(!restaurantMenuQrDataUrl)return;
-    const url=document.getElementById('publicMenuUrl')?.value||'';
-    const printWindow=window.open('','_blank','width=760,height=900');
-    if(!printWindow){alert('Allow pop-ups for this POS page to print the menu QR.');return;}
-    printWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Cafe menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.link{margin-top:20px;font-size:12px;color:#66717d;overflow-wrap:anywhere}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>Scan to view our menu</h1><p>Freshly prepared. Ready to explore.</p><img src="${restaurantMenuQrDataUrl}" alt="Guest menu QR code"><div class="link">${esc(url)}</div></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));</script></body></html>`);
-    printWindow.document.close();
-}
-async function copyRestaurantMenuUrl(){
-    const value=document.getElementById('publicMenuUrl')?.value||'';
-    if(!value)return;
-    try{await navigator.clipboard.writeText(value);showProfileToast('Guest menu link copied.');}
-    catch(_){const input=document.getElementById('publicMenuUrl');input.select();document.execCommand('copy');showProfileToast('Guest menu link copied.');}
-}
-function openAddMenuModal(item=null){editingMenuItemId=item?.id||null;currentMenuImageData=item?.image_url||item?.imageUrl||null;populateKOTGroupSelect();populateMenuCategorySelect(item?.category||'');document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';document.getElementById('menuName').value=item?.name||'';document.getElementById('menuPrice').value=item?.price??'';document.getElementById('menuCategory').value=item?.category||'';document.getElementById('menuNature').value=item?.nature||'Goods';document.getElementById('menuUnit').value=item?.unit||'ea';document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';const cp=item?.channel_prices||{};for(const k of ['dine_in','takeaway','delivery','online'])document.getElementById('menuPrice_'+k).value=cp[k]??item?.price??'';const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();renderMenuOptionSetPicker(item?.option_set_ids||[]);renderMenuVariantsEditor(item?.variants||[]);document.getElementById('addMenuModal').style.display='flex';}
-function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;currentMenuImageData=null;}
-function menuVariantEditorRow(v={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(v.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(v.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${v.price??''}"><select class="variant-unit"><option value="ea" ${v.unit==='ea'?'selected':''}>ea</option><option value="g" ${v.unit==='g'?'selected':''}>g</option><option value="kg" ${v.unit==='kg'?'selected':''}>kg</option><option value="ml" ${v.unit==='ml'?'selected':''}>ml</option><option value="lt" ${v.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
-function renderMenuVariantsEditor(vs){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(vs||[]).map(menuVariantEditorRow).join('');}
-function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
-async function addMenuItem(){const name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');const taxMap={0:{rate:0,cgst:0,sgst:0,igst:0,label:'Tax 0%'},5:{rate:5,cgst:2.5,sgst:2.5,igst:5,label:'GST 5%'},18:{rate:18,cgst:9,sgst:9,igst:18,label:'GST 18%'},28:{rate:28,cgst:14,sgst:14,igst:28,label:'GST 28%'}};const t=taxMap[document.getElementById('menuTaxProfile').value]||taxMap[5];const channelPrices={};for(const k of ['dine_in','takeaway','delivery','online']){const raw=String(document.getElementById('menuPrice_'+k)?.value||'').trim();if(raw!==''){const n=Number(raw);if(Number.isFinite(n)&&n>=0)channelPrices[k]=n;}}const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(r=>({name:r.querySelector('.variant-name')?.value.trim(),sku:r.querySelector('.variant-sku')?.value.trim(),price:Number(r.querySelector('.variant-price')?.value),unit:r.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);const existingMenu=editingMenuItemId?currentMenu.find(x=>Number(x.id)===Number(editingMenuItemId)):null;const payload={name,price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,variants,available:existingMenu?existingMenu.available!==false:true};try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(editingMenuItemId?'Menu item updated! ✅':'Menu item added! 🍔');}catch(e){alert(e.message);}}
 async function editMenuItem(id){const item=currentMenu.find(x=>Number(x.id)===Number(id));if(item)openAddMenuModal(item);}
+function renderMenuChannelFields(selectedChannels=null, channelPrices={}, basePrice=0){
+    const availability=document.getElementById('menuChannelAvailability'),prices=document.getElementById('menuChannelPriceGrid');
+    const selected=new Set(Array.isArray(selectedChannels)?selectedChannels.map(String):POS_CHANNELS.map(channel=>channel.key));
+    if(availability)availability.innerHTML=POS_CHANNELS.map(channel=>`<label class="menu-channel-availability-choice"><input type="checkbox" value="${esc(channel.key)}" ${selected.has(channel.key)?'checked':''}><span><strong>${esc(channel.label)}</strong>${channel.qrMenu?'<small>Guest QR ordering</small>':''}</span></label>`).join('');
+    if(prices)prices.innerHTML=POS_CHANNELS.map(channel=>`<div class="form-group"><label for="menuPrice_${channel.key}">${esc(channel.label)} price</label><input id="menuPrice_${channel.key}" type="number" min="0" step="0.01" value="${Number(channelPrices[channel.key]??basePrice??0)}"></div>`).join('');
+}
+function openAddMenuModal(item=null){
+    editingMenuItemId=item?.id||null;
+    currentMenuImageData=item?.image_url||item?.imageUrl||null;
+    populateKOTGroupSelect();
+    populateMenuCategorySelect(item?.category||'');
+    document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';
+    document.getElementById('menuName').value=item?.name||'';
+    document.getElementById('menuSku').value=item?.sku||'';
+    document.getElementById('menuDescription').value=item?.description||'';
+    document.getElementById('menuPrice').value=item?.price??'';
+    document.getElementById('menuCategory').value=item?.category||'';
+    document.getElementById('menuNature').value=item?.nature||'Goods';
+    document.getElementById('menuUnit').value=item?.unit||'ea';
+    document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';
+    document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';
+    document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';
+    const channelPrices=item?.channel_prices||{};
+    renderMenuChannelFields(item?.sales_channels,channelPrices,item?.price||0);
+    const file=document.getElementById('menuImageFile');
+    if(file)file.value='';
+    renderMenuItemImagePreview();
+    renderMenuOptionSetPicker(item?.option_set_ids||[]);
+    renderMenuVariantsEditor(item?.variants||[]);
+    document.getElementById('addMenuModal').style.display='flex';
+}
+function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;currentMenuImageData=null;}
+function menuVariantEditorRow(variant={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
+function renderMenuVariantsEditor(variants=[]){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(variants||[]).map(menuVariantEditorRow).join('');}
+function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
 function renderMenuItemImagePreview(){const box=document.getElementById('menuImagePreview');if(!box)return;box.innerHTML=currentMenuImageData?`<img src="${esc(currentMenuImageData)}" alt="Menu item preview">`:'<span>No image selected</span>';}
 async function previewMenuItemImage(file){
     if(!file)return;
     if(!['image/jpeg','image/png','image/webp'].includes(file.type))return alert('Choose a JPG, PNG or WebP image.');
     if(file.size>8*1024*1024)return alert('Choose an image smaller than 8 MB before compression.');
     try{
-        const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),limit=200*1024;
+        const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),limit=60*1024;
         let longest=Math.min(1600,Math.max(bitmap.width,bitmap.height)),quality=0.86,encoded='';
         for(let attempt=0;attempt<24;attempt++){
             const scale=Math.min(1,longest/Math.max(bitmap.width,bitmap.height));
@@ -5333,7 +5033,7 @@ async function previewMenuItemImage(file){
             if(quality>0.52)quality=Math.max(0.5,quality-0.08);else longest=Math.max(240,Math.floor(longest*0.84));
         }
         bitmap.close?.();
-        if(atob(encoded.split(',')[1]).length>limit)throw new Error('Could not compress this image below 200 KB. Choose a smaller image.');
+        if(atob(encoded.split(',')[1]).length>limit)throw new Error('Could not compress this image below 60 KB. Choose a smaller image.');
         currentMenuImageData=encoded;renderMenuItemImagePreview();
     }catch(error){alert(error.message||'Unable to read this image.');}
 }
@@ -5344,10 +5044,12 @@ async function saveMenuItemV2(){
     if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');
     const taxMap={0:{rate:0,cgst:0,sgst:0,igst:0,label:'Tax 0%'},5:{rate:5,cgst:2.5,sgst:2.5,igst:5,label:'GST 5%'},18:{rate:18,cgst:9,sgst:9,igst:18,label:'GST 18%'},28:{rate:28,cgst:14,sgst:14,igst:28,label:'GST 28%'}};
     const t=taxMap[document.getElementById('menuTaxProfile').value]||taxMap[5],channelPrices={};
-    for(const key of ['dine_in','takeaway','delivery','online']){const raw=String(document.getElementById('menuPrice_'+key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[key]=value;}}
+    const salesChannels=[...document.querySelectorAll('#menuChannelAvailability input:checked')].map(input=>input.value);
+    if(!salesChannels.length)return alert('Choose at least one sale channel for this item.');
+    for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
     const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
-    const payload={name,price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
     try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(wasEditing?'Menu item updated.':'Menu item added.');}catch(error){alert(error.message);}
 }
 
@@ -5415,7 +5117,7 @@ function openMenuImportModal() {
     const file = document.getElementById("menuImportFile");
     if (file) file.value = "";
     document.getElementById("menuImportFileName").textContent = "No file selected";
-    document.getElementById("menuImportStatus").textContent = "Required columns: Item Name, Category, Price. Optional columns support channel prices, tax, unit, availability and KOT group.";
+    document.getElementById("menuImportStatus").textContent = "Required columns: Item Name, Category, Price. Optional columns include SKU, Description, channel prices, tax, unit, availability and KOT group.";
     document.getElementById("menuImportPreview").innerHTML = "";
     document.getElementById("menuImportSubmit").disabled = true;
     document.getElementById("menuImportModal").style.display = "flex";
@@ -5426,8 +5128,8 @@ function closeMenuImportModal() {
 }
 
 function downloadMenuImportTemplate() {
-    const headers = ["Item Name", "Category", "Price", "Dine-in Price", "Takeaway Price", "Delivery Price", "Online Price", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
-    const example = ["Masala Chai", "Hot Drinks", "80", "80", "85", "90", "90", "TRUE", "Goods", "cup", "5", "exclusive", "Main Kitchen"];
+    const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
+    const example = ["Masala Chai", "", "Freshly brewed spiced tea.", "Hot Drinks", "80", ...POS_CHANNELS.map(()=>"80"), POS_CHANNELS.map(channel=>channel.label).join("; "), "TRUE", "Goods", "cup", "5", "exclusive", "Main Kitchen"];
     const csv = "\uFEFF" + [headers, example].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -5443,12 +5145,13 @@ async function downloadExistingMenuSpreadsheet() {
             alert("No existing menu items were found to export.");
             return;
         }
-        const headers = ["Item Name", "Category", "Price", "Dine-in Price", "Takeaway Price", "Delivery Price", "Online Price", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
+        const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
         const rows = items.map(item => {
             const channelPrices = item.channel_prices || {};
             return [
-                item.name || "", item.category || "", item.price ?? "",
-                channelPrices.dine_in ?? "", channelPrices.takeaway ?? "", channelPrices.delivery ?? "", channelPrices.online ?? "",
+                item.name || "", item.sku || "", item.description || "", item.category || "", item.price ?? "",
+                ...POS_CHANNELS.map(channel=>channelPrices[channel.key]??""),
+                (Array.isArray(item.sales_channels)?item.sales_channels:POS_CHANNELS.map(channel=>channel.key)).map(key=>getSaleChannel(key)?.label||key).join("; "),
                 item.available === false ? "FALSE" : "TRUE", item.nature || "Goods", item.unit || "ea",
                 item.tax_rate ?? "", item.tax_mode || "exclusive", item.kot_group_name || ""
             ];
@@ -5587,12 +5290,10 @@ function mapMenuImportRows(matrix) {
     const findColumn = (...names) => headers.findIndex(header => names.map(normalize).includes(header));
     const columns = {
         name: findColumn("Item Name", "Name", "Item", "Product Name"),
+        sku: findColumn("SKU", "SKU Code", "Product SKU"),
+        description: findColumn("Description", "Item Description", "Product Description"),
         category: findColumn("Category", "Menu Category"),
         price: findColumn("Price", "Base Price", "Selling Price"),
-        dine_in: findColumn("Dine-in Price", "Dine In Price"),
-        takeaway: findColumn("Takeaway Price", "Take Away Price"),
-        delivery: findColumn("Delivery Price"),
-        online: findColumn("Online Price"),
         available: findColumn("Available", "Availability", "Active"),
         nature: findColumn("Nature", "Item Nature"),
         unit: findColumn("Unit", "UOM"),
@@ -5600,6 +5301,8 @@ function mapMenuImportRows(matrix) {
         taxMode: findColumn("Tax Mode"),
         kotGroup: findColumn("KOT Group", "Kitchen Station")
     };
+    const channelPriceColumns=POS_CHANNELS.map(channel=>({key:channel.key,column:findColumn(`${channel.label} Price`,`${channel.key} Price`,channel.key==="online"?"Online Price":"")}));
+    const salesChannelsColumn=findColumn("Sale Channels","Sales Channels","Available Channels");
     if (columns.name < 0 || columns.category < 0 || columns.price < 0) throw new Error("The sheet must include Item Name, Category and Price columns.");
     const valueAt = (row, column) => column < 0 ? "" : String(row[column] ?? "").trim();
     const optionalNumber = (row, column) => {
@@ -5608,21 +5311,27 @@ function mapMenuImportRows(matrix) {
     };
     return matrix.slice(1).map((row, index) => {
         const name = valueAt(row, columns.name);
+        const sku = valueAt(row, columns.sku);
         const category = valueAt(row, columns.category);
         const price = optionalNumber(row, columns.price);
-        const reason = !name ? "Item name is missing." : !category ? "Category is missing." : !Number.isFinite(price) || price < 0 ? "Price must be a non-negative number." : "";
+        const invalidSku = sku && (sku.length > 80 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(sku));
+        let reason = !name ? "Item name is missing." : !category ? "Category is missing." : !Number.isFinite(price) || price < 0 ? "Price must be a non-negative number." : invalidSku ? "SKU must be up to 80 characters and use letters, numbers, dots, underscores, slashes or hyphens." : "";
         const channelPrices = {};
-        for (const key of ["dine_in", "takeaway", "delivery", "online"]) {
-            const amount = optionalNumber(row, columns[key]);
+        for (const {key,column} of channelPriceColumns) {
+            const amount = optionalNumber(row, column);
             if (amount !== null && Number.isFinite(amount) && amount >= 0) channelPrices[key] = amount;
         }
+        const rawSalesChannels=valueAt(row,salesChannelsColumn);
+        const salesChannels=rawSalesChannels?rawSalesChannels.split(/[;,|]/).map(value=>value.trim()).filter(Boolean).map(value=>POS_CHANNELS.find(channel=>channel.key===value||channel.label.toLocaleLowerCase()===value.toLocaleLowerCase())?.key||value):null;
+        const unknownSalesChannels=salesChannels?.filter(key=>!POS_CHANNELS.some(channel=>channel.key===key))||[];
+        if(!reason&&unknownSalesChannels.length)reason=`Unknown sale channel: ${unknownSalesChannels.join(", ")}.`;
         const rawTax = optionalNumber(row, columns.taxRate);
         const rawAvailable = valueAt(row, columns.available).toLocaleLowerCase();
         const rawNature = valueAt(row, columns.nature);
         const rawTaxMode = valueAt(row, columns.taxMode).toLocaleLowerCase();
         return {
-            rowNumber: index + 2, name, category, price,
-            channelPrices,
+            rowNumber: index + 2, name, sku, description: valueAt(row, columns.description), category, price,
+            channelPrices, salesChannels,
             available: rawAvailable === "" ? null : !["false", "no", "0", "inactive", "disabled"].includes(rawAvailable),
             nature: ["goods", "service"].includes(rawNature.toLocaleLowerCase()) ? rawNature[0].toUpperCase() + rawNature.slice(1).toLowerCase() : null,
             unit: valueAt(row, columns.unit) || null,
@@ -5653,9 +5362,9 @@ async function readMenuImportFile(file) {
         const valid = menuImportRows.filter(row => !row.error);
         const invalid = menuImportRows.length - valid.length;
         const limited = menuImportRows.length > 500;
-        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Blank optional columns keep current values on matching items.`;
+        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Blank optional columns keep current values on matching items; blank SKU creates one for new items.`;
         const sample = menuImportRows.slice(0, 8);
-        preview.innerHTML = sample.length ? `<div class="table-container"><table><thead><tr><th>Item</th><th>Category</th><th>Price</th><th>Check</th></tr></thead><tbody>${sample.map(row => `<tr><td>${esc(row.name || "-")}</td><td>${esc(row.category || "-")}</td><td>${Number.isFinite(row.price) ? money(row.price) : "-"}</td><td>${row.error ? `<span class="menu-import-error">${esc(row.error)}</span>` : "Ready"}</td></tr>`).join("")}</tbody></table></div>${menuImportRows.length > sample.length ? `<small>Showing 8 of ${menuImportRows.length} rows.</small>` : ""}` : '<p class="access-muted">No menu rows found.</p>';
+        preview.innerHTML = sample.length ? `<div class="table-container"><table><thead><tr><th>Item</th><th>SKU</th><th>Description</th><th>Category</th><th>Price</th><th>Check</th></tr></thead><tbody>${sample.map(row => `<tr><td>${esc(row.name || "-")}</td><td>${esc(row.sku || "Auto")}</td><td>${esc(row.description || "-")}</td><td>${esc(row.category || "-")}</td><td>${Number.isFinite(row.price) ? money(row.price) : "-"}</td><td>${row.error ? `<span class="menu-import-error">${esc(row.error)}</span>` : "Ready"}</td></tr>`).join("")}</tbody></table></div>${menuImportRows.length > sample.length ? `<small>Showing 8 of ${menuImportRows.length} rows.</small>` : ""}` : '<p class="access-muted">No menu rows found.</p>';
         submit.disabled = !valid.length || limited;
     } catch (error) {
         menuImportRows = [];
@@ -6041,14 +5750,14 @@ function normalizeBillingAdjustments(items) {
         ...item,
         kind: item.kind || item.type || "discount",
         calculation: item.calculation || (item.value_type === "percent" ? "percent" : "fixed"),
-        applies_to: item.applies_to === "dine_in" ? "dine-in" : (item.applies_to || "all")
+        applies_to: String(item.applies_to || "all").toLowerCase().replace(/[\s-]+/g, "_")
     }));
 }
 
 function renderBillingAdjustmentSelectors() {
     const discount = document.getElementById("billingDiscountSelect");
     const charge = document.getElementById("billingChargeSelect");
-    const channel = selectedPOSChannelKey === "online" ? "online" : orderType === "Dine-in" ? "dine-in" : orderType === "Takeaway" ? "takeaway" : String(orderType || "").toLowerCase();
+    const channel = currentSaleChannelKey();
 
     const visibleRule = x => {
         if (x.active === false) return false;
@@ -6141,6 +5850,12 @@ async function editOpenOrder(orderId) {
         }));
         orderType = data.order.order_type || "Dine-in";
         setOrderType(orderType);
+        if (getSaleChannel(data.order.sales_channel_key)?.orderType === orderType) {
+            selectedPOSChannelKey=data.order.sales_channel_key;
+            renderBillingSaleChannelOptions();
+            renderBillingAdjustmentSelectors();
+            await loadMenu();
+        }
         const table = document.getElementById("tableNumber");
         if (table) table.value = data.order.table_number || "";
         setBillingPaxForTable(data.order.table_number, data.order.pax || 1);
@@ -6170,12 +5885,20 @@ function openBillingAdjustmentModal(id=null) {
     document.getElementById("billingAdjustmentCalculation").value=item?.calculation||"percent";
     document.getElementById("billingAdjustmentValue").value=item?.value??"";
     document.getElementById("billingAdjustmentModalTitle").textContent = item ? "Edit Discount / Charge" : "Create Discount / Charge";
-    document.getElementById("billingAdjustmentApplies").value=item?.applies_to||"all";
+    renderBillingAdjustmentAppliesOptions(item?.applies_to||"all");
     document.getElementById("billingAdjustmentDescription").value=item?.description||"";
     document.getElementById("billingAdjustmentModal").style.display="flex";
 }
 
 function closeBillingAdjustmentModal(){document.getElementById("billingAdjustmentModal")?.style.setProperty("display","none");}
+
+function renderBillingAdjustmentAppliesOptions(selected="all"){
+    const select=document.getElementById("billingAdjustmentApplies");
+    if(!select)return;
+    const key=String(selected||"all").toLowerCase().replace(/[\s-]+/g,"_");
+    select.innerHTML='<option value="all">All Channels</option>'+POS_CHANNELS.map(channel=>`<option value="${esc(channel.key)}">${esc(channel.label)}</option>`).join("");
+    select.value=[...select.options].some(option=>option.value===key)?key:"all";
+}
 
 async function saveBillingAdjustment(){
     const id=document.getElementById("billingAdjustmentEditingId")?.value;
@@ -6184,7 +5907,7 @@ async function saveBillingAdjustment(){
         type:document.getElementById("billingAdjustmentKind")?.value,
         valueType:document.getElementById("billingAdjustmentCalculation")?.value==="percent"?"percent":"amount",
         value:Number(document.getElementById("billingAdjustmentValue")?.value||0),
-        appliesTo:(document.getElementById("billingAdjustmentApplies")?.value||"all")==="dine-in"?"dine_in":(document.getElementById("billingAdjustmentApplies")?.value||"all"),
+        appliesTo:document.getElementById("billingAdjustmentApplies")?.value||"all",
         description:document.getElementById("billingAdjustmentDescription")?.value.trim()||""
     };
     if(!payload.name||!Number.isFinite(payload.value)||payload.value<0)return alert("Enter a valid name and amount.");
@@ -6207,7 +5930,7 @@ function renderBillingAdjustmentMaster() {
             <td><strong>${esc(x.name)}</strong><br><small>${esc(x.description||"")}</small></td>
             <td>${x.kind==="discount"?"Discount":"Charge"}</td>
             <td>${x.calculation==="percent"?esc(x.value)+"%":money(x.value)}</td>
-            <td>${esc(x.applies_to||"all")}</td>
+            <td>${esc(x.applies_to==="all"?"All Channels":getSaleChannel(x.applies_to)?.label||x.applies_to)}</td>
             <td><span class="adjustment-status ${x.active?"active":"inactive"}">${x.active?"Active":"Inactive"}</span></td>
             <td class="table-actions">
                 <button onclick="openBillingAdjustmentModal(${x.id})">✏️ Edit</button>
@@ -6269,6 +5992,10 @@ async function sendMarketingPushCampaign(){const title=document.getElementById("
 let marketingDeals = [];
 let editingMarketingDealId = null;
 const MARKETING_DEAL_TYPES = ["Discount", "Buy X", "Buy X Get X", "Buy X Get Y", "Voucher", "Payment Deals", "Meal Deals", "Slab-Based Discount"];
+const MARKETING_WEEKDAYS = [
+    { key: "mon", label: "Mon" }, { key: "tue", label: "Tue" }, { key: "wed", label: "Wed" },
+    { key: "thu", label: "Thu" }, { key: "fri", label: "Fri" }, { key: "sat", label: "Sat" }, { key: "sun", label: "Sun" }
+];
 
 async function loadMarketingDeals() {
     const grid = document.getElementById("marketingDealsGrid");
@@ -6300,10 +6027,14 @@ function renderMarketingDeals() {
     }
     grid.innerHTML = shown.map(deal => {
         const schedule = [deal.startDate, deal.endDate].filter(Boolean).join(" – ") || "No date limit";
+        const dealDays = Array.isArray(deal.days) && deal.days.length ? deal.days : MARKETING_WEEKDAYS.map(day => day.key);
+        const daySummary = dealDays.length === 7 ? "Every day" : MARKETING_WEEKDAYS.filter(day => dealDays.includes(day.key)).map(day => day.label).join(", ");
+        const hourSummary = deal.startTime && deal.endTime ? deal.startTime + "–" + deal.endTime : "All day";
         const offer = deal.type && deal.type.startsWith("Buy") ? `Buy ${Number(deal.buyQuantity || 1)} · Get ${Number(deal.getQuantity || 1)}` : deal.value ? `${deal.valueType === "percentage" ? `${deal.value}% off` : money(deal.value)}` : "Custom offer";
         const channels = (deal.channels || []).map(key => POS_CHANNELS.find(channel => channel.key === key)?.label).filter(Boolean).join(", ") || "All channels";
         const itemSummary=deal.itemName||(deal.itemNames||[]).join(", ");
-        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${itemSummary ? ` · ${esc(itemSummary)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm('${esc(deal.id)}')">Edit</button><button type="button" onclick="toggleMarketingDeal('${esc(deal.id)}')">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal('${esc(deal.id)}')">Delete</button></div></article>`;
+        const safeDealId = esc(JSON.stringify(String(deal.id || "")));
+        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${itemSummary ? ` · ${esc(itemSummary)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🗓️ ${esc(daySummary)} · ${esc(hourSummary)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm(${safeDealId})">Edit</button><button type="button" onclick="toggleMarketingDeal(${safeDealId})">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal(${safeDealId})">Delete</button></div></article>`;
     }).join("");
 }
 function populateMarketingDealOptions(selected = {}) {
@@ -6341,6 +6072,7 @@ async function openMarketingDealForm(id = null) {
     const deal = id === null ? null : marketingDeals.find(item => String(item.id) === String(id));
     document.getElementById("marketingDealModalTitle").textContent = deal ? "Edit Deal" : "Create Deal";
     document.getElementById("marketingDealName").value = deal?.name || "";
+    document.getElementById("marketingDealDescription").value = deal?.description || "";
     document.getElementById("marketingDealType").value = deal?.type || "Discount";
     populateMarketingDealOptions(deal || {category:"",itemIds:[]});
     document.getElementById("marketingBuyQuantity").value = deal?.buyQuantity || 1;
@@ -6349,6 +6081,11 @@ async function openMarketingDealForm(id = null) {
     document.getElementById("marketingDealValue").value = deal?.value ?? "";
     document.getElementById("marketingDealStart").value = deal?.startDate || "";
     document.getElementById("marketingDealEnd").value = deal?.endDate || "";
+    document.getElementById("marketingDealStartTime").value = deal?.startTime || "";
+    document.getElementById("marketingDealEndTime").value = deal?.endTime || "";
+    const selectedDays = new Set(Array.isArray(deal?.days) && deal.days.length ? deal.days : MARKETING_WEEKDAYS.map(day => day.key));
+    const daysBox = document.getElementById("marketingDealDays");
+    if (daysBox) daysBox.innerHTML = MARKETING_WEEKDAYS.map(day => `<label><input type="checkbox" value="${day.key}" ${selectedDays.has(day.key) ? "checked" : ""}>${day.label}</label>`).join("");
     document.getElementById("marketingMaxOccurrences").value = deal?.maxOccurrences ?? "";
     document.getElementById("marketingMinGroupSize").value = deal?.minGroupSize ?? "";
     document.getElementById("marketingRecurringPeriod").value = deal?.recurringPeriod || "None";
@@ -6376,11 +6113,17 @@ async function saveMarketingDeal() {
     if (!name) return alert("Enter a name for this deal.");
     const type = document.getElementById("marketingDealType").value;
     if (!MARKETING_DEAL_TYPES.includes(type)) return alert("Choose a valid deal type.");
+    const selectedDays = [...document.querySelectorAll("#marketingDealDays input:checked")].map(input => input.value);
+    if (!selectedDays.length) return alert("Choose at least one deal day.");
+    const startTime = document.getElementById("marketingDealStartTime").value || null;
+    const endTime = document.getElementById("marketingDealEndTime").value || null;
+    if (Boolean(startTime) !== Boolean(endTime)) return alert("Set both the start and end time, or leave both empty for all-day deals.");
+    if (startTime && startTime === endTime) return alert("Deal start and end times must be different.");
     const prior = editingMarketingDealId === null ? null : marketingDeals.find(item => String(item.id) === String(editingMarketingDealId));
     const selectedItemIds=[...document.getElementById("marketingDealItem").selectedOptions].map(option=>option.value).filter(Boolean);
     const selectedItems=currentMenu.filter(item=>selectedItemIds.includes(String(item.id)));
     const deal = {
-        id: prior?.id || String(Date.now()), name, type,
+        id: prior?.id || String(Date.now()), name, description: document.getElementById("marketingDealDescription").value.trim().slice(0, 240), type,
         category: document.getElementById("marketingDealCategory").value,
         itemIds: selectedItemIds,
         itemNames: selectedItems.map(item=>item.name),
@@ -6393,6 +6136,9 @@ async function saveMarketingDeal() {
         value: Math.max(0, Number(document.getElementById("marketingDealValue").value || 0)),
         startDate: document.getElementById("marketingDealStart").value || null,
         endDate: document.getElementById("marketingDealEnd").value || null,
+        days: selectedDays,
+        startTime,
+        endTime,
         maxOccurrences: Number(document.getElementById("marketingMaxOccurrences").value || 0) || null,
         minGroupSize: Number(document.getElementById("marketingMinGroupSize").value || 0) || null,
         recurringPeriod: document.getElementById("marketingRecurringPeriod").value,
@@ -6455,7 +6201,7 @@ async function selectBillingTable(tableNumber, status) {
         }
     }
 
-    selectedPOSChannelKey = "dine_in";
+    selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
     setOrderType("Dine-in", true);
     setBillingPaxForTable(tableNumber, document.getElementById("billingPax")?.value || 1);
     updateBillingTableSelection();
@@ -6487,16 +6233,96 @@ function renderPOSPreferences() {
         return "<div class=\"pos-preferences-row\"><strong>" + esc(module.label) + "</strong><div class=\"pos-channel-checks\">" + checks + "</div><select id=\"posDefault_" + module.key + "\" aria-label=\"" + esc(module.label) + " default channel\">" + options + "</select></div>";
     }).join("");
 }
+function renderSalesChannels() {
+    const list = document.getElementById("salesChannelsList");
+    if (!list) return;
+    list.innerHTML = POS_CHANNELS.map(channel => `<article class="sales-channel-card">
+        <div class="sales-channel-card-top"><div><h4>${esc(channel.label)}</h4><p>${channel.orderType === "Dine-in" ? "Dine-in / table flow" : "Takeaway / delivery flow"}</p></div><span class="sales-channel-badge">${channel.qrMenu ? "QR Menu" : "POS channel"}</span></div>
+        <div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>
+    </article>`).join("");
+}
+function openSalesChannelModal(key = "") {
+    const channel = getSaleChannel(key);
+    document.getElementById("salesChannelEditingKey").value = channel?.key || "";
+    document.getElementById("salesChannelModalTitle").textContent = channel ? "Edit sale channel" : "Create sale channel";
+    const nameInput = document.getElementById("salesChannelName");
+    nameInput.value = channel?.label || "";
+    const isBuiltInChannel = ["dine_in", "takeaway", "delivery", "online"].includes(channel?.key);
+    nameInput.readOnly = isBuiltInChannel;
+    nameInput.title = isBuiltInChannel ? "Built-in channel names are fixed." : "";
+    const type = document.getElementById("salesChannelOrderType");
+    type.value = channel?.orderType || "Takeaway";
+    type.disabled = false;
+    document.getElementById("salesChannelQrMenu").checked = channel?.qrMenu === true;
+    document.getElementById("salesChannelModal").style.display = "flex";
+}
+function closeSalesChannelModal() { document.getElementById("salesChannelModal")?.style.setProperty("display", "none"); }
+function salesChannelKeyFromLabel(label) {
+    let key = String(label || "").trim().toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40);
+    if (!/^[a-z]/.test(key)) key = "channel_" + key;
+    return key.slice(0, 20);
+}
+async function persistSalesChannels(nextChannels) {
+    const response = await api("/settings/sales-channels", { method: "PUT", body: JSON.stringify({ channels: nextChannels }) });
+    if (response.settings) appSettings = { ...appSettings, ...response.settings };
+    else appSettings.posSalesChannels = response.channels || nextChannels;
+    syncPOSChannelsFromSettings();
+    appSettings.posChannelPreferences = normalizePOSChannelPreferences(appSettings.posChannelPreferences);
+    if (!getSaleChannel(selectedPOSChannelKey) || getSaleChannel(selectedPOSChannelKey).orderType !== orderType) {
+        selectedPOSChannelKey = getPOSChannelPreferences()[orderType === "Dine-in" ? "tableView" : "newOrder"].defaultChannel;
+    }
+    renderSalesChannels();
+    renderPOSPreferences();
+    renderBillingSaleChannelOptions();
+    renderBillingAdjustmentAppliesOptions();
+    renderBillingAdjustmentSelectors();
+    if (response.marketingDeals) marketingDeals = response.marketingDeals;
+    await loadMenu();
+    await loadMenuManagement();
+    renderMarketingDeals();
+    localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
+}
+async function saveSalesChannel() {
+    const editingKey = document.getElementById("salesChannelEditingKey").value;
+    const label = document.getElementById("salesChannelName").value.trim();
+    const orderType = document.getElementById("salesChannelOrderType").value;
+    const qrMenu = document.getElementById("salesChannelQrMenu").checked;
+    if (!label || !["Dine-in", "Takeaway"].includes(orderType)) return alert("Enter a channel name and choose its order flow.");
+    let key = editingKey || salesChannelKeyFromLabel(label);
+    if (!editingKey) {
+        if (!key) return alert("Enter a channel name that includes letters or numbers.");
+        if (POS_CHANNELS.some(channel => channel.key === key)) key = `${key.slice(0, 14)}_${Date.now().toString(36).slice(-5)}`;
+    }
+    const next = editingKey
+        ? POS_CHANNELS.map(channel => channel.key === editingKey ? { ...channel, label, orderType, qrMenu } : channel)
+        : [...POS_CHANNELS, { key, label, orderType, qrMenu }];
+    if (!next.some(channel => channel.orderType === "Dine-in") || !next.some(channel => channel.orderType === "Takeaway")) return alert("Keep at least one Dine-in channel and one Takeaway / delivery channel active.");
+    if (!next.some(channel => channel.qrMenu)) return alert("Keep at least one channel connected to the QR Menu.");
+    try { closeSalesChannelModal(); await persistSalesChannels(next); showProfileToast("Sale channel saved and applied."); }
+    catch (error) { alert(error.message || "Could not save the sale channel."); }
+}
+async function deleteSalesChannel(key) {
+    const channel = getSaleChannel(key);
+    if (!channel) return;
+    if (!confirm(`Remove ${channel.label}? Items, discounts and deals assigned only to this channel will no longer be available there.`)) return;
+    const next = POS_CHANNELS.filter(entry => entry.key !== key);
+    if (!next.some(entry => entry.orderType === "Dine-in") || !next.some(entry => entry.orderType === "Takeaway")) return alert("Keep at least one Dine-in channel and one Takeaway / delivery channel active.");
+    if (!next.some(entry => entry.qrMenu)) return alert("Connect another sale channel to the QR Menu before deleting this one.");
+    try { await persistSalesChannels(next); showProfileToast("Sale channel removed."); }
+    catch (error) { alert(error.message || "Could not remove the sale channel."); }
+}
 function updatePOSDefaultOptions(moduleKey) {
     const selected = [...document.querySelectorAll("[data-pos-module=\"" + moduleKey + "\"]:checked")].map(input => input.dataset.posChannel);
-    if (moduleKey === "newOrder" && !selected.some(key => POS_CHANNELS.find(channel => channel.key === key)?.orderType === "Takeaway")) {
-        const fallback = document.getElementById("posChannel_newOrder_takeaway");
+    if (moduleKey === "newOrder" && !selected.some(key => getSaleChannel(key)?.orderType === "Takeaway")) {
+        const fallbackKey = POS_CHANNELS.find(channel => channel.orderType === "Takeaway")?.key;
+        const fallback = document.getElementById("posChannel_newOrder_" + fallbackKey);
         if (fallback) fallback.checked = true;
-        if (!selected.includes("takeaway")) selected.push("takeaway");
+        if (fallbackKey && !selected.includes(fallbackKey)) selected.push(fallbackKey);
     }
     if (!selected.length) {
-        const fallback = moduleKey === "tableView" ? "dine_in" : "takeaway";
-        const input = document.getElementById("posChannel_" + moduleKey + "_" + fallback) || document.getElementById("posChannel_" + moduleKey + "_dine_in");
+        const fallbackType = moduleKey === "tableView" ? "Dine-in" : "Takeaway";
+        const fallback = POS_CHANNELS.find(channel => channel.orderType === fallbackType)?.key;
+        const input = document.getElementById("posChannel_" + moduleKey + "_" + fallback);
         if (input) input.checked = true;
         selected.push(input?.dataset.posChannel || "dine_in");
     }
@@ -6504,7 +6330,7 @@ function updatePOSDefaultOptions(moduleKey) {
     if (!select) return;
     const prior = select.value;
     select.innerHTML = selected.map(key => {
-        const channel = POS_CHANNELS.find(entry => entry.key === key);
+        const channel = getSaleChannel(key);
         return channel ? "<option value=\"" + esc(key) + "\">" + esc(channel.label) + "</option>" : "";
     }).join("");
     select.value = selected.includes(prior) ? prior : selected[0];
@@ -6513,8 +6339,8 @@ function readPOSPreferencesFromForm() {
     const result = {};
     ["newOrder", "tableView"].forEach(moduleKey => {
         const channels = [...document.querySelectorAll("[data-pos-module=\"" + moduleKey + "\"]:checked")].map(input => input.dataset.posChannel);
-        const fallback = moduleKey === "tableView" ? "dine_in" : "takeaway";
-        const selectedChannels = channels.length ? channels : [fallback];
+        const fallback = POS_CHANNELS.find(channel => channel.orderType === (moduleKey === "tableView" ? "Dine-in" : "Takeaway"))?.key;
+        const selectedChannels = channels.length ? channels : fallback ? [fallback] : [];
         const select = document.getElementById("posDefault_" + moduleKey);
         result[moduleKey] = { channels: selectedChannels, defaultChannel: selectedChannels.includes(select?.value) ? select.value : selectedChannels[0] };
     });
@@ -6552,6 +6378,8 @@ async function loadSettings() {
         console.warn("Settings API unavailable:", error.message);
     }
 
+    syncPOSChannelsFromSettings();
+    appSettings.posChannelPreferences=normalizePOSChannelPreferences(appSettings.posChannelPreferences);
     appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
     appSettings.defaultPayment = preferredPaymentMethod();
 
@@ -6599,13 +6427,15 @@ async function loadSettings() {
     setSettingValue("settingKOTEnabled", appSettings.kotEnabled !== false); setSettingValue("settingKOTDisabledBehavior", appSettings.kotDisabledBehavior || "hide");
     renderPaymentModeManager();
     renderPOSPreferences();
+    renderSalesChannels();
     renderBillingSaleChannelOptions();
+    renderBillingAdjustmentAppliesOptions();
     applyPermissionsToUI();
 }
 
 async function saveSettings() {
     const next = {
-        restaurantName: readSettingValue("settingRestaurantName") || "CAFE POS",
+        restaurantName: readSettingValue("settingRestaurantName") || "SLASH POS",
         address: readSettingValue("settingAddress") || "",
         phone: readSettingValue("settingPhone") || "",
         gstin: readSettingValue("settingGstin") || "",
@@ -6647,7 +6477,7 @@ async function saveSettings() {
         customerMessage: readSettingValue("settingCustomerMessage") || "Thank you for visiting!", enableNotifications: readSettingValue("settingEnableNotifications"), enableKOTSound: readSettingValue("settingEnableKOTSound"), kotAlertInterval: Math.min(60, Math.max(3, Number(readSettingValue("settingKOTAlertInterval")) || 5)),
         sessionTimeout: Number(readSettingValue("settingSessionTimeout")) || 12, auditLog: readSettingValue("settingAuditLog"),
         uiDensity: readSettingValue("settingUiDensity") || "comfortable", accentLabel: readSettingValue("settingAccentLabel") || "", largeBilling: readSettingValue("settingLargeBilling"),
-        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm()
+        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm(), posSalesChannels: POS_CHANNELS.map(channel=>({...channel}))
     };
 
     appSettings = { ...appSettings, ...next };
@@ -6671,7 +6501,7 @@ async function saveSettings() {
 function resetSettings() {
     if (!confirm("Reset all settings to defaults?")) return;
     appSettings = {
-        restaurantName: "CAFE POS", address: "", phone: "", gstin: "",
+        restaurantName: "SLASH POS", address: "", phone: "", gstin: "",
         header: "Cafe Management System", footer: "Thank You!\nVisit Again 😊",
         showInvoice: true, showCustomer: true, showCustomerPhone: true,
         showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
@@ -8349,7 +8179,7 @@ window.exportCompleteReportCSV = function() {
     const to =
         document.getElementById("reportToDate")?.value || "";
 
-    csv += csvEscape("CAFE POS COMPLETE REPORT") + "\r\n";
+    csv += csvEscape("SLASH POS COMPLETE REPORT") + "\r\n";
     csv += csvEscape("Report Range") + "," + csvEscape(filter) + "\r\n";
 
     if (from) {
@@ -8567,13 +8397,9 @@ async function saveLoyaltySettings(){try{await api('/loyalty/settings',{method:'
 async function loadLoyaltyCustomers(){try{const rows=await api('/customers');const s=document.getElementById('loyaltyCustomerSelect');if(s)s.innerHTML='<option value="">Select customer…</option>'+rows.map(c=>`<option value="${c.id}">${esc(c.name)} · ${esc(c.phone||'')}</option>`).join('');}catch(e){}}
 async function loadSelectedLoyaltyCustomer(){const id=document.getElementById('loyaltyCustomerSelect')?.value;if(!id)return;try{const r=await api('/loyalty/customers/'+id);setText('loyaltyBalance',r.balance);const b=document.getElementById('loyaltyHistoryBody');if(b)b.innerHTML=r.history.length?r.history.map(h=>`<tr><td>${esc(new Date(h.created_at).toLocaleString())}</td><td>${esc(h.transaction_type)}</td><td>${h.points>0?'+':''}${h.points}</td><td>${esc(h.note||'')}</td></tr>`).join(''):'<tr><td colspan="4">No loyalty transactions.</td></tr>';}catch(e){alert(e.message);}}
 
-async function runBackupHealth(){try{const r=await api('/backup/health');const box=document.getElementById('backupHealth');if(box)box.innerHTML=`<div class="health-grid"><div><b>Database</b><br>${esc(r.database||'-')}</div><div><b>Host</b><br>${esc(r.host||'-')}</div><div><b>pg_dump</b><br>${r.pgDumpBinary&&r.ready?'Configured':'Check environment'}</div><div><b>Node</b><br>${esc(r.node)}</div></div>`;}catch(e){alert(e.message);}}
-async function downloadDatabaseBackup(){try{const response=await fetch(API+'/backup/export',{headers:{'Authorization':'Bearer '+authToken}});if(!response.ok){const j=await response.json().catch(()=>({}));throw new Error(j.error||'Backup failed');}const blob=await response.blob();const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='cafe-pos-backup-'+new Date().toISOString().slice(0,10)+'.sql';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}catch(e){alert(e.message);}}
-function restoreBackupFile(){document.getElementById('restoreBackupInput')?.click();}
-async function handleRestoreBackup(input){const file=input.files?.[0];if(!file)return;if(!confirm('Restore this SQL backup? This may modify existing data.')){input.value='';return;}try{const sql=await file.text();await api('/backup/restore',{method:'POST',body:JSON.stringify({sql})});alert('Restore completed. Reload the application.');location.reload();}catch(e){alert(e.message);}finally{input.value='';}}
 
 function saveInvoiceDesigner(){appSettings.accentLabel=document.getElementById('designerAccent')?.value||'';appSettings.logoUrl=document.getElementById('designerLogo')?.value||'';appSettings.receiptFont=document.getElementById('designerFontSize')?.value||'13';appSettings.designerShowNotes=document.getElementById('designerShowNotes')?.checked!==false;appSettings.designerShowInvoiceMeta=document.getElementById('designerShowInvoiceMeta')?.checked!==false;appSettings.designerCompact=document.getElementById('designerCompact')?.checked===true;localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));renderInvoiceDesignerPreview();api('/settings',{method:'PUT',body:JSON.stringify(appSettings)}).then(()=>alert('Invoice design saved.')).catch(()=>alert('Saved locally; server settings unavailable.'));}
-function renderInvoiceDesignerPreview(){const p=document.getElementById('invoiceDesignerPreview');if(!p)return;const font=document.getElementById('designerFontSize')?.value||'13';const logo=document.getElementById('designerLogo')?.value||appSettings.logoUrl;const name=appSettings.restaurantName||'CAFE POS';p.innerHTML=`${logo?`<img src="${esc(logo)}" alt="logo" class="invoice-preview-logo">`:''}<div class="invoice-preview-name">${esc(name)}</div><div>${esc(document.getElementById('designerAccent')?.value||'Cafe Receipt')}</div><hr><div class="preview-row"><span>Invoice</span><b>INV-000123</b></div><div class="preview-row"><span>Order</span><b>ORD-00123</b></div><hr><div class="preview-line"><span>☕ Cappuccino ×2</span><b>₹240.00</b></div><div class="preview-line"><span>🥪 Sandwich ×1</span><b>₹180.00</b></div><hr><div class="preview-row"><span>Subtotal</span><span>₹420.00</span></div><div class="preview-row"><span>GST</span><span>₹21.00</span></div><div class="preview-row preview-total"><span>Total</span><b>₹441.00</b></div><p style="margin-top:12px">${esc(appSettings.customerMessage||'Thank you for visiting!')}</p>`;p.style.fontSize=font+'px';}
+function renderInvoiceDesignerPreview(){const p=document.getElementById('invoiceDesignerPreview');if(!p)return;const font=document.getElementById('designerFontSize')?.value||'13';const logo=document.getElementById('designerLogo')?.value||appSettings.logoUrl;const name=appSettings.restaurantName||'SLASH POS';p.innerHTML=`${logo?`<img src="${esc(logo)}" alt="logo" class="invoice-preview-logo">`:''}<div class="invoice-preview-name">${esc(name)}</div><div>${esc(document.getElementById('designerAccent')?.value||'Cafe Receipt')}</div><hr><div class="preview-row"><span>Invoice</span><b>INV-000123</b></div><div class="preview-row"><span>Order</span><b>ORD-00123</b></div><hr><div class="preview-line"><span>☕ Cappuccino ×2</span><b>₹240.00</b></div><div class="preview-line"><span>🥪 Sandwich ×1</span><b>₹180.00</b></div><hr><div class="preview-row"><span>Subtotal</span><span>₹420.00</span></div><div class="preview-row"><span>GST</span><span>₹21.00</span></div><div class="preview-row preview-total"><span>Total</span><b>₹441.00</b></div><p style="margin-top:12px">${esc(appSettings.customerMessage||'Thank you for visiting!')}</p>`;p.style.fontSize=font+'px';}
 
 async function discoverWindowsPrinters(){
     const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
@@ -8620,20 +8446,22 @@ function printerReceiptText(data){
     const currency=appSettings.currency||"₹";
     const moneyValue=value=>currency+Number(value||0).toFixed(2);
     const allocations=Array.isArray(data.paymentAllocations)?data.paymentAllocations:[];
+    const taxBreakdown=Array.isArray(data.taxBreakdown)?data.taxBreakdown:buildBillTaxBreakdown(data.items,data.discount,data.gst);
     const amountCollected=data.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(data.amountCollected||0);
     const amountDue=data.amountDue===undefined?Math.max(0,Number(data.total||0)-amountCollected):Number(data.amountDue||0);
-    const lines=[appSettings.restaurantName||"CAFE POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------",data.isOpenOrder?"OPEN ORDER / PROFORMA":"Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber+(Number(data.pax)>0?" · "+Number(data.pax)+" PAX":""):"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"",data.customerPhone?"Phone: "+data.customerPhone:"",data.customerEmail?"Email: "+data.customerEmail:"",data.customerGstin?"Customer GSTIN: "+data.customerGstin:"",data.customerBirthDate?"Customer DOB: "+data.customerBirthDate:"",data.customerAddress?"Address: "+data.customerAddress:"",data.customerCity?"City: "+data.customerCity:"",data.customerState?"State: "+data.customerState:"","--------------------------------","ITEM / QTY / AMOUNT"];
+    const lines=[appSettings.restaurantName||"SLASH POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------",data.isOpenOrder?"OPEN ORDER / PROFORMA":"Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber+(Number(data.pax)>0?" · "+Number(data.pax)+" PAX":""):"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"",data.customerPhone?"Phone: "+data.customerPhone:"",data.customerEmail?"Email: "+data.customerEmail:"",data.customerGstin?"Customer GSTIN: "+data.customerGstin:"",data.customerBirthDate?"Customer DOB: "+data.customerBirthDate:"",data.customerAddress?"Address: "+data.customerAddress:"",data.customerCity?"City: "+data.customerCity:"",data.customerState?"State: "+data.customerState:"","--------------------------------","ITEM / QTY / AMOUNT"];
     (Array.isArray(data.items)?data.items:[]).forEach(function(item){lines.push((appSettings.uppercaseItems?String(item.name||"-").toUpperCase():(item.name||"-"))+" x"+Number(item.quantity||0)+"  "+moneyValue(Number(item.price||0)*Number(item.quantity||0)));const options=formatItemOptionNames(item.options);if(options)lines.push("  + "+options)});
     lines.push("--------------------------------","Subtotal: "+moneyValue(data.subtotal||0));
     if(Number(data.discount||0)>0)lines.push((data.discountName?"Discount · "+data.discountName:"Discount")+": -"+moneyValue(data.discount));
     if(Number(data.serviceCharge||0)>0)lines.push((data.chargeName?"Charge · "+data.chargeName:"Charges")+": "+moneyValue(data.serviceCharge));
+    taxBreakdown.forEach(row=>lines.push(row.component+" "+formatBillTaxRate(row.rate)+"% on "+moneyValue(row.taxableBase)+": "+moneyValue(row.taxAmount)));
     lines.push("GST: "+moneyValue(data.gst||0));
     if(Math.abs(Number(data.roundingAdjustment||0))>=0.005)lines.push("Rounding: "+moneyValue(data.roundingAdjustment));
     lines.push("TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"));
     allocations.forEach(payment=>lines.push("  "+String(payment.method||"Payment")+": "+moneyValue(payment.amount||0)));
     lines.push("Amount collected: "+moneyValue(amountCollected),"Amount due: "+moneyValue(amountDue),"--------------------------------",appSettings.footer||"Thank you!");
     lines.splice(4,0,...String(appSettings.header||"").split(/\r?\n/).map(line=>line.trim()).filter(Boolean));
-    if(appSettings.showPoweredByCafePilot!==false)lines.push("Powered by Cafe Pilot");
+    if(appSettings.showPoweredByCafePilot!==false)lines.push("Powered by Slash");
     return lines.filter(Boolean).join("\n")+"\n\n\n";
 }
 function isBluetoothSelectionCancelled(error){return /user cancell?ed the requestdevice\(\) chooser|bluetooth.*selection.*cancell?ed/i.test(String(error?.message||error||""))}
@@ -8695,7 +8523,7 @@ async function sendBluetoothPrinterText(printer,text){
 }
 async function pairBluetoothFromForm(){
     try{
-        if(!navigator.bluetooth)throw new Error("Bluetooth setup is unavailable in this desktop app. Update Cafe Pilot and try again.");
+        if(!navigator.bluetooth)throw new Error("Bluetooth setup is unavailable in this desktop app. Update Slash and try again.");
         const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";
         const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});
         const name=device.name||"Bluetooth Printer";
@@ -8709,7 +8537,7 @@ async function printLocalPrinterTest(name){
         if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(name)) {
             const result = await window.cafePOSDesktop.saveReceiptPdf({
                 kind: "test",
-                receipt: "CAFE POS\nPRINTER TEST\n" + name + "\n" + new Date().toLocaleString() + "\n\n\n"
+                receipt: "SLASH POS\nPRINTER TEST\n" + name + "\n" + new Date().toLocaleString() + "\n\n\n"
             });
             if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the test PDF.");
             showPrinterMessage("Test PDF saved to " + result.outputFile);
@@ -8731,7 +8559,7 @@ async function printLocalPrinterTest(name){
             : "Windows printer test failed: " + e.message, true);
     }
 }
-async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"CAFE POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
+async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"SLASH POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
 function orderCategoryReportQuery(includeExport = false, notify = false) {
     const range = document.getElementById("reportDateFilter")?.value || "today";
     const params = new URLSearchParams({ range });
@@ -8861,7 +8689,7 @@ async function loadAdvancedReports(){
         if(weekdayBody)weekdayBody.innerHTML=weekday.length?weekday.map(x=>`<tr><td>${esc(String(x.day||'').trim())}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(daypartBody)daypartBody.innerHTML=dayparts.length?dayparts.map(x=>`<tr><td>${esc(x.daypart)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(customersBody)customersBody.innerHTML=customers.length?customers.map(x=>`<tr><td>${esc(x.customer)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
-        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?new Date(x.cancelled_at).toLocaleString():'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${x.cancelled_by_user_id==null?'—':esc(x.cancelled_by_user_id)}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
+        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?new Date(x.cancelled_at).toLocaleString():'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${esc(x.cancelled_by_user_name||'Unknown user')}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
         if(discountBody)discountBody.innerHTML=discounts.length?discounts.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${money(x.discount)}</td><td>${esc(x.discount_name||'Discount')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'—')}</td></tr>`).join(''):'<tr><td colspan="7">No discounted orders in this period.</td></tr>';
         if(nonChargeableBody)nonChargeableBody.innerHTML=nonChargeable.length?nonChargeable.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'Non-chargeable')}</td></tr>`).join(''):'<tr><td colspan="6">No non-chargeable orders in this period.</td></tr>';
         const canExport=hasPermission('advanced_reports','export');
@@ -8888,7 +8716,7 @@ async function downloadAdvancedReport(reportType){
             'weekday-sales':{title:'Sales by Weekday',rows:Array.isArray(data.weekday)?data.weekday:[],columns:[['Weekday',x=>String(x.day||'').trim()],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
             'daypart-sales':{title:'Sales by Daypart',rows:Array.isArray(data.dayparts)?data.dayparts:[],columns:[['Daypart',x=>x.daypart],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
             'top-customers':{title:'Top Customers',rows:Array.isArray(data.customers)?data.customers:[],columns:[['Customer',x=>x.customer],['Orders',x=>x.orders],['Sales',x=>x.sales]]},
-            cancelled:{title:'Cancelled Orders',rows:Array.isArray(data.cancelled)?data.cancelled:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Cancelled At',x=>x.cancelled_at],['Reason',x=>x.reason||'Not recorded'],['Cancelled By User ID',x=>x.cancelled_by_user_id??''],['Order Value',x=>x.value]]},
+            cancelled:{title:'Cancelled Orders',rows:Array.isArray(data.cancelled)?data.cancelled:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Cancelled At',x=>x.cancelled_at],['Reason',x=>x.reason||'Not recorded'],['Cancelled By',x=>x.cancelled_by_user_name||'Unknown user'],['Order Value',x=>x.value]]},
             discounts:{title:'Discounted Orders',rows:Array.isArray(data.discountOrders)?data.discountOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Discount',x=>x.discount],['Discount Rule',x=>x.discount_name],['Payment',x=>x.payment_method],['Total',x=>x.total]]},
             'non-chargeable':{title:'Non-chargeable Orders',rows:Array.isArray(data.nonChargeableOrders)?data.nonChargeableOrders:[],columns:[['Order',x=>x.order_number||`#${x.order_id}`],['Order ID',x=>x.order_id],['Date',x=>x.created_at],['Order Type',x=>x.order_type],['Table',x=>x.table_number],['Reason',x=>x.reason||'Not recorded'],['Order Value',x=>x.total],['Payment',x=>x.payment_method]]}
         };
@@ -8905,7 +8733,7 @@ async function downloadAdvancedReport(reportType){
 }
 
 async function loadDeploymentChecks(){try{const r=await api('/system/deployment-check');const box=document.getElementById('deploymentChecks');box.innerHTML=r.checks.map(c=>`<div class="deployment-check ${c.ok?'ok':'bad'}"><span>${c.ok?'✅':'⚠️'}</span><div><b>${esc(c.label)}</b><br><small>${esc(c.detail|| (c.ok?'Ready':'Needs attention'))}</small></div></div>`).join('');}catch(e){document.getElementById('deploymentChecks').textContent=e.message;}}
-function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDB_USER=your_postgres_user\nDB_HOST=127.0.0.1\nDB_NAME=cafe_pos\nDB_PASSWORD=your_postgres_password\nDB_PORT=5432\nPG_DUMP_PATH=pg_dump\nPSQL_PATH=psql\n`;const blob=new Blob([text],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='.env.example';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);}
+function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE\nDATABASE_SSL_CA=\nDB_POOL_MAX=2\nCORS_ALLOWED_ORIGINS=https://your-pos-domain.example\nVAPID_PUBLIC_KEY=\nVAPID_PRIVATE_KEY=\nVAPID_SUBJECT=mailto:admin@example.com\nSUPPORT_USERNAME=\nSUPPORT_PASSWORD=\nPUBLIC_BUSINESS_REGISTRATION_ENABLED=false\nPUBLIC_BUSINESS_REGISTRATION_KEY=\n`;const blob=new Blob([text],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='.env.example';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);}
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
@@ -8955,7 +8783,7 @@ window.addEventListener(
     "DOMContentLoaded",
     async function() {
 
-        console.log("🚀 Cafe POS started");
+        console.log("🚀 Slash POS started");
         await loadLoginBusinessWelcome();
 
         // Settings are loaded after session validation.
@@ -9020,7 +8848,7 @@ window.addEventListener(
 
         await checkSession();
 
-        console.log("✅ Cafe POS initialized successfully");
+        console.log("✅ Slash POS initialized successfully");
 
     }
 );
@@ -9062,50 +8890,6 @@ function updateRestaurantMenuLinkPreview(){
     }catch(error){if(status)status.textContent=error.message;}
 }
 
-async function loadTableQrMenuModule(){
-    const grid=document.getElementById("tableQrGrid"),stock=document.getElementById("qrStockGrid");
-    if(grid)grid.innerHTML='<div class="table-qr-empty">Loading your POS tables…</div>';
-    if(stock)stock.innerHTML='<div class="qr-stock-empty">Loading menu items…</div>';
-    try{
-        const [tables,items,publication]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings")]);
-        tableQrMenuTables=Array.isArray(tables)?tables:[];
-        tableQrMenuItems=Array.isArray(items)?items:[];
-        restaurantMenuPublication=publication;
-        const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),status=document.getElementById("publicMenuStatus");
-        if(enabled)enabled.checked=publication.enabled===true;
-        if(channel)channel.value=publication.priceChannel||"online";
-        if(url)url.value=window.location.origin+"/restaurant/"+publication.token;
-        const hostNote=document.getElementById("publicMenuHostNote");
-        if(hostNote)hostNote.hidden=!(["localhost","127.0.0.1","::1"].includes(window.location.hostname));
-        if(status)status.textContent=publication.enabled?"Your QR menu is live. Guests enter their details, then open the published menu.":"Your QR menu is private until you turn publishing on.";
-        renderQrStockItems();
-        await renderTableQrCards();
-    }catch(error){
-        if(grid)grid.innerHTML='<div class="table-qr-empty">Could not load your table QR setup. '+esc(error.message||"Refresh and try again.")+'</div>';
-        if(stock)stock.innerHTML='<div class="qr-stock-empty">Could not load menu items.</div>';
-        const status=document.getElementById("publicMenuStatus");
-        if(status)status.textContent=error.message||"Guest menu settings are unavailable.";
-    }
-}
-async function saveRestaurantMenuSettings(){
-    const enabled=document.getElementById("publicMenuEnabled")?.checked===true,priceChannel=document.getElementById("publicMenuPriceChannel")?.value||"online";
-    try{
-        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel})});
-        await loadTableQrMenuModule();
-        showProfileToast(enabled?"QR menu published.":"QR menu turned off.");
-    }catch(error){const status=document.getElementById("publicMenuStatus");if(status)status.textContent=error.message||"Could not save menu settings.";}
-}
-async function setQrMenuStock(id,inStock){
-    try{
-        await api("/menu/"+Number(id)+"/qr-stock",{method:"PATCH",body:JSON.stringify({inStock})});
-        tableQrMenuItems=await api("/menu");renderQrStockItems();
-        showProfileToast(inStock?"Item marked in stock on the QR menu.":"Item marked sold out on the QR menu.");
-    }catch(error){alert(error.message||"Could not update the QR menu stock status.");try{tableQrMenuItems=await api("/menu");renderQrStockItems();}catch(_){}}
-}
-function qrMenuTableUrl(table){
-    const url=new URL(getQrMenuBaseUrl()+"/restaurant/"+restaurantMenuPublication.token);
-    url.searchParams.set("table",String(table.table_number||""));return url.toString();
-}
 function qrTableDisplayName(value){
     const label=String(value||"").trim();
     if(/^t\d+$/i.test(label))return label.toUpperCase();
@@ -9153,54 +8937,6 @@ async function createGenzTableQrPoster(table,qrDataUrl){
     context.font="700 22px Arial, sans-serif";context.fillStyle="#d8d1e6";context.fillText(brand||"YOUR CAFE",600,1490,1000);
     return canvas.toDataURL("image/png");
 }
-async function renderTableQrCards(){
-    const grid=document.getElementById("tableQrGrid");if(!grid)return;
-    tableQrMenuQrData=new Map();
-    if(!tableQrMenuTables.length){grid.innerHTML='<div class="table-qr-empty">No POS tables yet. Add tables in <button type="button" class="table-action-btn" onclick="showPage(\'tables\')">Tables</button> to create their QR codes.</div>';return;}
-    grid.innerHTML=tableQrMenuTables.map(table=>{
-        const id=Number(table.id),label="Table "+qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
-        return '<article class="table-qr-card"><div class="table-qr-card-head"><h4>'+esc(label)+'</h4><span>'+esc(table.status||"Available")+'</span></div>'
-            +'<div class="table-qr-preview"><img id="tableQrImage'+id+'" alt="QR code for '+esc(label)+'" hidden><div id="tableQrPlaceholder'+id+'" class="table-qr-placeholder">Generating QR…</div></div>'
-            +'<span class="table-qr-link" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span>'
-            +'<div class="table-qr-actions"><button id="tableQrDownload'+id+'" type="button" class="table-action-btn" onclick="downloadTableMenuQr('+id+')" disabled>↓ Download PNG</button><button id="tableQrPrint'+id+'" type="button" class="big-btn" onclick="printTableMenuQr('+id+')" disabled>Print</button></div></article>';
-    }).join("");
-    await Promise.all(tableQrMenuTables.map(generateTableMenuQr));
-}
-async function generateTableMenuQr(table){
-    const id=Number(table.id),image=document.getElementById("tableQrImage"+id),placeholder=document.getElementById("tableQrPlaceholder"+id);
-    const download=document.getElementById("tableQrDownload"+id),print=document.getElementById("tableQrPrint"+id);
-    try{
-        const result=await api("/menu/public-settings/qr",{method:"POST",body:JSON.stringify({url:qrMenuTableUrl(table)})});
-        if(!result.dataUrl)throw new Error("QR image was not returned.");
-        tableQrMenuQrData.set(String(id),result.dataUrl);image.src=result.dataUrl;image.hidden=false;
-        if(placeholder)placeholder.hidden=true;if(download)download.disabled=false;if(print)print.disabled=false;
-    }catch(error){if(placeholder)placeholder.textContent=error.message||"Could not generate this QR code.";}
-}
-function downloadTableMenuQr(tableId){
-    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));if(!table||!dataUrl)return;
-    const safeName=qrTableDisplayName(table.table_number||table.id).replace(/[^a-z0-9_-]+/gi,"-");
-    const link=document.createElement("a");link.href=dataUrl;link.download="table-"+safeName+"-menu-qr.png";document.body.appendChild(link);link.click();link.remove();
-}
-function printTableMenuQr(tableId){
-    const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuQrData.get(String(tableId));if(!table||!dataUrl)return;
-    const tableLabel="Table "+String(table.table_number||""),win=window.open("","_blank","width=760,height=900");if(!win)return alert("Allow pop-ups for this POS page to print a table QR.");
-    win.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#17212b;text-align:center}.sheet{min-height:250mm;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16mm}.brand{font-size:13px;letter-spacing:.16em;text-transform:uppercase;color:#66717d;font-weight:700}.sheet h1{font-size:34px;margin:14px 0 8px}.sheet p{font-size:17px;color:#586575;margin:0 0 22px}.sheet img{width:115mm;height:115mm;image-rendering:pixelated}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:8px;background:#136f63;color:#fff;font-weight:700;cursor:pointer}@media print{.print-action{display:none}}</style></head><body><main class="sheet"><div class="brand">Cafe &amp; Restaurant</div><h1>'+esc(tableLabel)+'</h1><p>Scan to view our menu and order</p><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' QR code"></main><button class="print-action" onclick="window.print()">Print</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),250));</script></body></html>');win.document.close();
-}
-function renderQrStockItems(){
-    const grid=document.getElementById("qrStockGrid");if(!grid)return;
-    const term=String(document.getElementById("qrStockSearch")?.value||"").trim().toLowerCase();
-    const items=tableQrMenuItems.filter(item=>!term||String(item.name||"").toLowerCase().includes(term)||String(item.category||"").toLowerCase().includes(term));
-    if(!items.length){grid.innerHTML=tableQrMenuItems.length?'<div class="qr-stock-empty">No menu items match that search.</div>':'<div class="qr-stock-empty">No menu items yet. Add them in the Menu module first.</div>';return;}
-    grid.innerHTML=items.map(item=>{
-        const inStock=item.qr_available!==false;
-        return '<article class="qr-stock-card"><div><strong>'+esc(item.name)+'</strong><small>'+esc(item.category||"Menu item")+' · '+(item.available===false?"POS off":"POS on")+'</small></div><label class="menu-availability-toggle"><input type="checkbox" '+(inStock?"checked":"")+' onchange="setQrMenuStock('+Number(item.id)+',this.checked)" aria-label="Mark '+esc(item.name)+' as in stock for QR"><span>'+(inStock?"In Stock":"Sold Out")+'</span></label></article>';
-    }).join("");
-}
-async function printOrderKOT(orderId){
-    try{await api("/orders/"+Number(orderId)+"/kot",{method:"POST"});await printKOT(orderId);}
-    catch(error){alert("Unable to print KOT: "+(error.message||"Check the order and try again."));}
-}
-
 tableQrMenuTables=[];
 tableQrMenuItems=[];
 tableQrMenuQrData=new Map();
@@ -9216,7 +8952,7 @@ async function loadTableQrMenuModule(){
         restaurantMenuPublication=publication;
         const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),baseField=document.getElementById("publicMenuBaseUrl"),status=document.getElementById("publicMenuStatus");
         if(enabled)enabled.checked=publication.enabled===true;
-        if(channel)channel.value=publication.priceChannel||"online";
+        if(channel){const choices=Array.isArray(publication.qrMenuChannels)?publication.qrMenuChannels:POS_CHANNELS.filter(entry=>entry.qrMenu);channel.innerHTML=choices.map(entry=>`<option value="${esc(entry.key)}">${esc(entry.label)}</option>`).join("");channel.value=choices.some(entry=>entry.key===publication.priceChannel)?publication.priceChannel:choices[0]?.key||"online";}
         const isLoopback=["localhost","127.0.0.1","::1"].includes(window.location.hostname.toLowerCase());
         const suggestedBase=publication.publicBaseUrl||(isLoopback&&publication.localNetworkUrl)||window.location.origin;
         if(baseField)baseField.value=suggestedBase;

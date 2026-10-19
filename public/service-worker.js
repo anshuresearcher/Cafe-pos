@@ -3,7 +3,7 @@ self.addEventListener('activate', event => { event.waitUntil(self.clients.claim(
 self.addEventListener('push', event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (_) { data = { body: event.data ? event.data.text() : '' }; }
-  event.waitUntil(self.registration.showNotification(data.title || 'Cafe update', {
+  event.waitUntil(self.registration.showNotification(data.title || 'Slash update', {
     body: data.body || 'There is a new update from your cafe.', icon: '/qr-menu-icon-192.png', badge: '/qr-menu-icon-192.png',
     tag: data.tag || 'cafe-promotion', data: { url: data.url || '/' }
   }));

@@ -1,10 +1,13 @@
 {
-  "name": "cafe-pilot-pos",
+  "name": "slash-pos",
   "version": "1.0.0",
   "private": true,
-  "description": "Cafe Pilot point of sale web and Windows desktop app",
-  "author": "Cafe Pilot",
+  "description": "Slash point of sale web and Windows desktop app",
+  "author": "Slash",
   "main": "desktop/main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "node server.js",
     "desktop:dev": "electron .",
@@ -24,14 +27,15 @@
   },
   "build": {
     "appId": "com.cafepilot.pos",
-    "productName": "Cafe Pilot POS",
+    "productName": "Slash POS",
     "asar": true,
     "directories": {
       "output": "desktop-dist"
     },
     "files": [
       "desktop/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/**"
     ],
     "extraResources": [
       {

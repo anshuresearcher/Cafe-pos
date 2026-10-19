@@ -39,7 +39,7 @@ function runPowerShell(script) {
                     return reject(new Error("Windows denied access to this printer. Check that your Windows account can print to it."));
                 }
                 if (!diagnostic && /Preparing modules for first use/i.test(stderr || "")) {
-                    return reject(new Error("Windows printer support is initializing. Close and reopen Cafe POS, then try printing again."));
+                    return reject(new Error("Windows printer support is initializing. Close and reopen Slash POS, then try printing again."));
                 }
                 return reject(new Error(diagnostic || "Windows could not send the print job. Check that the selected printer is installed and online, then retry."));
             }
@@ -94,7 +94,7 @@ public class CafePosRawPrinter {
         IntPtr handle;
         if (!OpenPrinter(printer, out handle, IntPtr.Zero)) throw new Exception("Could not open printer. Windows error: " + Marshal.GetLastWin32Error());
         try {
-            DOCINFO info = new DOCINFO(); info.pDocName = "Cafe POS Receipt"; info.pDataType = "RAW";
+            DOCINFO info = new DOCINFO(); info.pDocName = "Slash POS Receipt"; info.pDataType = "RAW";
             if (!StartDocPrinter(handle, 1, info)) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
             try {
                 if (!StartPagePrinter(handle)) throw new Exception("StartPagePrinter failed: " + Marshal.GetLastWin32Error());
@@ -133,7 +133,7 @@ public class CafePosDriverPrinter {
         PrintDocument document = new PrintDocument();
         document.PrinterSettings.PrinterName = printer;
         if (!document.PrinterSettings.IsValid) throw new Exception("Windows could not find that printer (error 1801).");
-        document.DocumentName = "Cafe POS Print Job";
+        document.DocumentName = "Slash POS Print Job";
         document.DefaultPageSettings.Margins = new Margins(35, 35, 35, 35);
         document.PrintController = new StandardPrintController();
         Font font = new Font("Consolas", 10);
@@ -207,7 +207,7 @@ function start() {
 
         try {
             if (req.method === "GET" && req.url === "/health") {
-                return sendJson(req, res, 200, { ok: true, service: "Cafe POS Windows printer bridge", port: PORT }, origin);
+                return sendJson(req, res, 200, { ok: true, service: "Slash POS Windows printer bridge", port: PORT }, origin);
             }
             if (req.method === "GET" && req.url === "/printers") {
                 return sendJson(req, res, 200, { printers: await listPrinters() }, origin);
@@ -220,7 +220,7 @@ function start() {
                 const printer = printers.find(item => item.name.toLowerCase() === printerName.toLowerCase());
                 if (!printer) return sendJson(req, res, 404, { error: `Windows printer not found: ${printerName}` }, origin);
                 const receipt = req.url === "/test"
-                    ? `CAFE POS\nPRINTER TEST\n${printer.name}\n${new Date().toLocaleString()}\n\n\n`
+                    ? `SLASH POS\nPRINTER TEST\n${printer.name}\n${new Date().toLocaleString()}\n\n\n`
                     : String(body.receipt || "");
                 if (!receipt) return sendJson(req, res, 400, { error: "receipt is required." }, origin);
                 if (usesWindowsDriver(printer)) await driverPrint(printer.name, receipt);
@@ -229,7 +229,7 @@ function start() {
             }
             return sendJson(req, res, 404, { error: "Not found." }, origin);
         } catch (error) {
-            console.error("Cafe POS printer bridge:", error);
+            console.error("Slash POS printer bridge:", error);
             return sendJson(req, res, 500, { error: error.message || "Printer service error." }, origin);
         }
     });
@@ -245,7 +245,7 @@ function start() {
             reject(error);
         });
         server.listen(PORT, HOST, () => {
-            console.log(`Cafe POS Windows printer bridge listening on http://${HOST}:${PORT}`);
+            console.log(`Slash POS Windows printer bridge listening on http://${HOST}:${PORT}`);
             resolve();
         });
     });

@@ -1,18 +1,19 @@
 require("dotenv").config();
 
+const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
-const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
-const { execFile } = require("child_process");
 const net = require("net");
 
 const app = express();
+// Trust only the single Vercel proxy hop so rate limits use the visitor IP.
+app.set("trust proxy", process.env.VERCEL ? 1 : false);
 const PORT = Number(process.env.PORT || 3000);
 
 function getLocalNetworkMenuUrl() {
@@ -58,7 +59,103 @@ app.use(cors({
     },
     credentials: true
 }));
-app.use(express.json({ limit: "25mb" }));
+const publicRateLimitBuckets = new Map();
+const loginLockoutFallback = new Map();
+let persistentPublicRateLimitAvailable = false;
+let persistentLoginLockoutAvailable = false;
+function createPublicRateLimiter(scope, windowMs, limit) {
+    return async (req, res, next) => {
+        const ip = String(req.ip || req.socket?.remoteAddress || 'unknown');
+        const key = crypto.createHash('sha256').update(scope + ':' + ip).digest('hex');
+        if (persistentPublicRateLimitAvailable) {
+            try {
+                const result = await rawPoolQuery(`
+                    INSERT INTO api_rate_limits(bucket_key,scope,window_started_at,hit_count)
+                    VALUES($1,$2,CURRENT_TIMESTAMP,1)
+                    ON CONFLICT(bucket_key) DO UPDATE SET
+                        window_started_at=CASE
+                            WHEN api_rate_limits.window_started_at <= CURRENT_TIMESTAMP - ($3::double precision * INTERVAL '1 millisecond') THEN CURRENT_TIMESTAMP
+                            ELSE api_rate_limits.window_started_at
+                        END,
+                        hit_count=CASE
+                            WHEN api_rate_limits.window_started_at <= CURRENT_TIMESTAMP - ($3::double precision * INTERVAL '1 millisecond') THEN 1
+                            ELSE api_rate_limits.hit_count+1
+                        END
+                    RETURNING hit_count,window_started_at
+                `, [key, scope, windowMs]);
+                const bucket = result.rows[0];
+                if (Number(bucket.hit_count) > limit) {
+                    const resetAt = new Date(bucket.window_started_at).getTime() + windowMs;
+                    res.setHeader('Retry-After', String(Math.max(1, Math.ceil((resetAt - Date.now()) / 1000))));
+                    return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+                }
+                return next();
+            } catch (error) {
+                persistentPublicRateLimitAvailable = false;
+                console.warn('Persistent rate limit unavailable; using process-local fallback:', error.message);
+            }
+        }
+        const now = Date.now();
+        const fallbackKey = scope + ':' + ip;
+        let bucket = publicRateLimitBuckets.get(fallbackKey);
+        if (!bucket || bucket.resetAt <= now) {
+            bucket = { count: 0, resetAt: now + windowMs };
+            publicRateLimitBuckets.set(fallbackKey, bucket);
+        }
+        bucket.count += 1;
+        if (publicRateLimitBuckets.size > 50000) {
+            for (const [entryKey, entry] of publicRateLimitBuckets) if (entry.resetAt <= now) publicRateLimitBuckets.delete(entryKey);
+        }
+        if (bucket.count > limit) {
+            res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+            return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+        }
+        return next();
+    };
+}
+const publicRateLimiters = {
+    login: createPublicRateLimiter('login', 15 * 60 * 1000, 10),
+    supportLogin: createPublicRateLimiter('support-login', 15 * 60 * 1000, 5),
+    registration: createPublicRateLimiter('registration', 60 * 60 * 1000, 5),
+    qrOrder: createPublicRateLimiter('qr-order', 10 * 60 * 1000, 20),
+    qrCustomer: createPublicRateLimiter('qr-customer', 10 * 60 * 1000, 10),
+    qrTracking: createPublicRateLimiter('qr-tracking', 60 * 1000, 60),
+    deviceRegistration: createPublicRateLimiter('device-registration', 60 * 60 * 1000, 10)
+};
+const publicRateLimitCleanup = setInterval(() => {
+    const now = Date.now();
+    for (const [key, bucket] of publicRateLimitBuckets) if (bucket.resetAt <= now) publicRateLimitBuckets.delete(key);
+    for (const [key, bucket] of loginLockoutFallback) if (bucket.lockedUntil <= now && bucket.windowStartedAt <= now - 15 * 60 * 1000) loginLockoutFallback.delete(key);
+    rawPoolQuery("DELETE FROM api_rate_limits WHERE window_started_at < CURRENT_TIMESTAMP - INTERVAL '2 days'").catch(() => {});
+    rawPoolQuery("DELETE FROM auth_login_attempts WHERE updated_at < CURRENT_TIMESTAMP - INTERVAL '30 days'").catch(() => {});
+}, 5 * 60 * 1000);
+publicRateLimitCleanup.unref?.();
+app.use((req, res, next) => {
+    const method = req.method.toUpperCase();
+    const route = req.path;
+    let limiter = null;
+    if (method === 'POST' && route === '/api/auth/login') limiter = publicRateLimiters.login;
+    else if (method === 'POST' && route === '/api/support/login') limiter = publicRateLimiters.supportLogin;
+    else if (method === 'POST' && route === '/api/public/register-business') limiter = publicRateLimiters.registration;
+    else if (method === 'POST' && route === '/api/public/device/register') limiter = publicRateLimiters.deviceRegistration;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/orders$/i.test(route)) limiter = publicRateLimiters.qrOrder;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/customers$/i.test(route)) limiter = publicRateLimiters.qrCustomer;
+    else if (method === 'GET' && /^\/public-menu\/[a-f0-9]{48}\/orders\/\d+$/i.test(route)) limiter = publicRateLimiters.qrTracking;
+    return limiter ? limiter(req, res, next) : next();
+});
+app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=15552000');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https: wss: http://127.0.0.1:18181 http://localhost:18181; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'");
+    next();
+});
+const standardJsonParser = express.json({ limit: "100kb" });
+const menuImportJsonParser = express.json({ limit: "25mb" });
+app.use((req, res, next) => (req.path === "/api/menu/import" ? menuImportJsonParser : standardJsonParser)(req, res, next));
 app.use(express.static(path.join(__dirname, "public")));
 
 
@@ -67,19 +164,34 @@ app.use(express.static(path.join(__dirname, "public")));
 // =====================================================
 
 const poolOptions = {
-    max: Number(process.env.DB_POOL_MAX || 2),
+    max: Number(process.env.DB_POOL_MAX || (process.env.VERCEL ? 2 : 10)),
     min: 0,
-    idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 5000),
+    idleTimeoutMillis: Number(process.env.DB_IDLE_TIMEOUT_MS || 30000),
     connectionTimeoutMillis: Number(process.env.DB_CONNECTION_TIMEOUT_MS || 8000),
     allowExitOnIdle: true
 };
 
+function loadDatabaseSslCa() {
+    const certificatePath = String(process.env.DATABASE_SSL_CA_FILE || "").trim();
+    if (certificatePath) {
+        try {
+            return fs.readFileSync(path.resolve(certificatePath), "utf8");
+        } catch (error) {
+            throw new Error(`Unable to read DATABASE_SSL_CA_FILE: ${error.message}`);
+        }
+    }
+    const certificate = String(process.env.DATABASE_SSL_CA || "").trim();
+    return certificate ? certificate.replace(/\\n/g, "\n") : undefined;
+}
+
+const databaseSslCa = loadDatabaseSslCa();
 const poolConfig = process.env.DATABASE_URL
     ? {
         ...poolOptions,
         connectionString: process.env.DATABASE_URL,
         ssl: {
-            rejectUnauthorized: false
+            ...(databaseSslCa ? { ca: databaseSslCa } : {}),
+            rejectUnauthorized: true
         }
     }
     : {
@@ -97,14 +209,13 @@ const pool = new Pool(poolConfig);
 // MULTI-BUSINESS TENANT CONTEXT (PHASE 2A)
 // =====================================================
 const tenantContext = new AsyncLocalStorage();
-let tenantSystemMode = true;
+let tenantSystemMode = false;
 let systemBusinessId = null;
 
 const rawPoolConnect = pool.connect.bind(pool);
 
 const rawPoolQuery = async function (text, values) {
     const client = await rawPoolConnect();
-
     try {
         return await client.query(text, values);
     } finally {
@@ -112,29 +223,72 @@ const rawPoolQuery = async function (text, values) {
     }
 };
 
-async function applyTenantDbContext(client) {
-    const store = tenantContext.getStore();
+function tenantDatabaseContext(store = tenantContext.getStore()) {
     const requestBusinessId = store?.businessId ? Number(store.businessId) : null;
     const requestSystemMode = store?.systemMode === true;
     const effectiveSystemMode = requestSystemMode || tenantSystemMode;
     const effectiveBusinessId = requestBusinessId || (effectiveSystemMode ? Number(systemBusinessId || 0) : null);
-    const businessValue = effectiveBusinessId ? String(effectiveBusinessId) : '';
-    const systemValue = effectiveSystemMode ? 'on' : 'off';
-    const contextKey = `${businessValue}|${systemValue}`;
+    return {
+        businessId: effectiveBusinessId ? String(effectiveBusinessId) : '',
+        systemMode: effectiveSystemMode ? 'on' : 'off'
+    };
+}
 
-    // A pooled connection can be reused by many requests. Avoid issuing the
-    // extra SET_CONFIG round-trip when this connection already has the exact
-    // same tenant context. The key is stored on the client itself, so changing
-    // from Business A to Business B still forces a fresh context update.
-    if (client.__cafeTenantContextKey === contextKey) return;
-
+async function applyTenantDbContext(client, store = tenantContext.getStore()) {
+    const context = tenantDatabaseContext(store);
     await client.query(
-        `SELECT
-            set_config('app.business_id', $1, false),
-            set_config('app.system_mode', $2, false)`,
-        [businessValue, systemValue]
+        "SELECT set_config('app.business_id', $1, true), set_config('app.system_mode', $2, true)",
+        [context.businessId, context.systemMode]
     );
-    client.__cafeTenantContextKey = contextKey;
+}
+
+function queryCommand(query) {
+    const sql = typeof query === 'string' ? query : String(query?.text || '');
+    return sql.trim().match(/^(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK)\b/i)?.[1]?.toUpperCase() || '';
+}
+
+function wrapTenantAwareClient(client, store) {
+    const rawQuery = client.query.bind(client);
+    const rawRelease = client.release.bind(client);
+    let transactionOpen = false;
+
+    client.query = async (...args) => {
+        const sql = typeof args[0] === 'string' ? args[0] : String(args[0]?.text || '');
+        const command = queryCommand(args[0]);
+        if (command === 'BEGIN' || command.startsWith('START')) {
+            const result = await rawQuery(...args);
+            transactionOpen = true;
+            await applyTenantDbContext({ query: (...contextArgs) => rawQuery(...contextArgs) }, store);
+            return result;
+        }
+        if ((command === 'COMMIT' || command === 'END' || command === 'ROLLBACK') && !/^ROLLBACK\s+TO\b/i.test(sql)) {
+            const result = await rawQuery(...args);
+            transactionOpen = false;
+            return result;
+        }
+        if (transactionOpen) return rawQuery(...args);
+
+        await rawQuery('BEGIN');
+        transactionOpen = true;
+        try {
+            await applyTenantDbContext({ query: (...contextArgs) => rawQuery(...contextArgs) }, store);
+            const result = await rawQuery(...args);
+            await rawQuery('COMMIT');
+            transactionOpen = false;
+            return result;
+        } catch (error) {
+            try { await rawQuery('ROLLBACK'); } catch (_) {}
+            transactionOpen = false;
+            throw error;
+        }
+    };
+
+    client.release = error => {
+        if (!transactionOpen) return rawRelease(error);
+        transactionOpen = false;
+        rawQuery('ROLLBACK').then(() => rawRelease(error), () => rawRelease(error || new Error('Could not roll back tenant transaction')));
+    };
+    return client;
 }
 
 function runSystemContext(fn) {
@@ -144,8 +298,14 @@ function runSystemContext(fn) {
 pool.query = async function (text, values) {
     const client = await rawPoolConnect();
     try {
+        await client.query('BEGIN');
         await applyTenantDbContext(client);
-        return await client.query(text, values);
+        const result = await client.query(text, values);
+        await client.query('COMMIT');
+        return result;
+    } catch (error) {
+        try { await client.query('ROLLBACK'); } catch (_) {}
+        throw error;
     } finally {
         client.release();
     }
@@ -153,18 +313,19 @@ pool.query = async function (text, values) {
 
 pool.connect = async function () {
     const client = await rawPoolConnect();
-    try {
-        await applyTenantDbContext(client);
-        return client;
-    } catch (error) {
-        client.release();
-        throw error;
-    }
+    return wrapTenantAwareClient(client, tenantContext.getStore());
 };
-pool.on(
-    "connect",
-    () => console.log("✅ PostgreSQL connected")
-);
+
+pool.on("connect", client => {
+    // Keep an error listener on checked-out clients too. node-postgres removes
+    // its idle-client listener while a client is checked out, so a dropped
+    // socket could otherwise emit an unhandled EventEmitter error and crash
+    // the POS process even when the query itself is caught by its caller.
+    client.on("error", error => {
+        console.error("❌ PostgreSQL client connection error:", error.message);
+    });
+    console.log("✅ PostgreSQL connected");
+});
 
 pool.on(
     "error",
@@ -179,11 +340,15 @@ pool.on(
 // =====================================================
 
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+function hashSessionToken(token) {
+    return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
 
 async function ensureSessionTable() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS app_sessions (
             token VARCHAR(128) PRIMARY KEY,
+            token_hash VARCHAR(64),
             user_id INTEGER NOT NULL,
             business_id INTEGER,
             device_id VARCHAR(128),
@@ -194,6 +359,15 @@ async function ensureSessionTable() {
 
     await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS business_id INTEGER`);
     await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS device_id VARCHAR(128)`);
+    await pool.query(`ALTER TABLE app_sessions ADD COLUMN IF NOT EXISTS token_hash VARCHAR(64)`);
+
+    const legacySessions = await pool.query(`SELECT token FROM app_sessions WHERE token_hash IS NULL`);
+    for (const row of legacySessions.rows) {
+        const tokenHash = hashSessionToken(row.token);
+        await pool.query(`UPDATE app_sessions SET token=$1,token_hash=$1 WHERE token=$2`, [tokenHash, row.token]);
+    }
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_sessions_token_hash ON app_sessions(token_hash)`);
+    await pool.query(`ALTER TABLE app_sessions ALTER COLUMN token_hash SET NOT NULL`);
 
     await pool.query(`DELETE FROM app_sessions older USING app_sessions newer WHERE older.user_id=newer.user_id AND (older.created_at<newer.created_at OR (older.created_at=newer.created_at AND older.token<newer.token))`);
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_sessions_one_per_user ON app_sessions(user_id)`);
@@ -211,9 +385,17 @@ async function ensureSessionTable() {
     `);
 }
 
-function hashPassword(password) {
+function derivePasswordHash(password, salt) {
+    return new Promise((resolve, reject) => {
+        crypto.scrypt(String(password), salt, 64, (error, key) => error ? reject(error) : resolve(key));
+    });
+}
+
+async function hashPassword(password) {
+    const value = String(password);
+    if (value.length > 1024) throw new Error("Password must be 1024 characters or fewer");
     const salt = crypto.randomBytes(16).toString("hex");
-    const hash = crypto.scryptSync(String(password), salt, 64).toString("hex");
+    const hash = (await derivePasswordHash(value, salt)).toString("hex");
     return `${salt}:${hash}`;
 }
 
@@ -345,15 +527,104 @@ function cleanBusinessPayload(body = {}) {
     };
 }
 
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
     if (!stored || !String(stored).includes(":")) return false;
     const [salt, expectedHex] = String(stored).split(":");
     try {
-        const actual = crypto.scryptSync(String(password), salt, 64).toString("hex");
-        const a = Buffer.from(actual, "hex");
+        const a = await derivePasswordHash(password, salt);
         const b = Buffer.from(expectedHex, "hex");
         return a.length === b.length && crypto.timingSafeEqual(a, b);
     } catch (_) { return false; }
+}
+
+function loginIdentityKey(scope, businessId, username) {
+    return crypto.createHash("sha256").update(`${scope}:${Number(businessId) || 0}:${String(username || "").trim().toLowerCase()}`).digest("hex");
+}
+
+async function ensureLoginAttemptTable() {
+    await rawPoolQuery(`CREATE TABLE IF NOT EXISTS api_rate_limits (
+        bucket_key VARCHAR(64) PRIMARY KEY,
+        scope VARCHAR(80) NOT NULL,
+        window_started_at TIMESTAMPTZ NOT NULL,
+        hit_count INTEGER NOT NULL DEFAULT 0
+    )`);
+    await rawPoolQuery(`CREATE TABLE IF NOT EXISTS auth_login_attempts (
+        identity_key CHAR(64) PRIMARY KEY,
+        window_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        failure_count INTEGER NOT NULL DEFAULT 0,
+        locked_until TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await rawPoolQuery(`CREATE INDEX IF NOT EXISTS idx_auth_login_attempts_updated_at ON auth_login_attempts(updated_at)`);
+    persistentPublicRateLimitAvailable = true;
+    persistentLoginLockoutAvailable = true;
+}
+
+async function getLoginLockout(identityKey) {
+    if (!persistentLoginLockoutAvailable) {
+        const bucket = loginLockoutFallback.get(identityKey);
+        return bucket && bucket.lockedUntil > Date.now() ? bucket.lockedUntil : 0;
+    }
+    try {
+        const result = await rawPoolQuery(`SELECT locked_until FROM auth_login_attempts WHERE identity_key=$1`, [identityKey]);
+        const lockedUntil = result.rows[0]?.locked_until ? new Date(result.rows[0].locked_until).getTime() : 0;
+        return lockedUntil > Date.now() ? lockedUntil : 0;
+    } catch (error) {
+        persistentLoginLockoutAvailable = false;
+        console.warn("Persistent login lockout unavailable:", error.message);
+        const bucket = loginLockoutFallback.get(identityKey);
+        return bucket && bucket.lockedUntil > Date.now() ? bucket.lockedUntil : 0;
+    }
+}
+
+async function recordFailedLogin(identityKey) {
+    if (!persistentLoginLockoutAvailable) return recordFailedLoginLocally(identityKey);
+    try {
+        const result = await rawPoolQuery(`
+            INSERT INTO auth_login_attempts(identity_key,window_started_at,failure_count,locked_until,updated_at)
+            VALUES($1,CURRENT_TIMESTAMP,1,NULL,CURRENT_TIMESTAMP)
+            ON CONFLICT(identity_key) DO UPDATE SET
+                failure_count=CASE
+                    WHEN auth_login_attempts.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '15 minutes' THEN 1
+                    ELSE auth_login_attempts.failure_count+1
+                END,
+                window_started_at=CASE
+                    WHEN auth_login_attempts.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '15 minutes' THEN CURRENT_TIMESTAMP
+                    ELSE auth_login_attempts.window_started_at
+                END,
+                locked_until=CASE
+                    WHEN (CASE WHEN auth_login_attempts.window_started_at <= CURRENT_TIMESTAMP - INTERVAL '15 minutes' THEN 1 ELSE auth_login_attempts.failure_count+1 END) >= 5
+                        THEN CURRENT_TIMESTAMP + INTERVAL '15 minutes'
+                    ELSE NULL
+                END,
+                updated_at=CURRENT_TIMESTAMP
+            RETURNING locked_until
+        `, [identityKey]);
+        const lockedUntil = result.rows[0]?.locked_until ? new Date(result.rows[0].locked_until).getTime() : 0;
+        return lockedUntil > Date.now() ? lockedUntil : 0;
+    } catch (error) {
+        persistentLoginLockoutAvailable = false;
+        console.warn("Persistent login lockout unavailable:", error.message);
+        return recordFailedLoginLocally(identityKey);
+    }
+}
+
+function recordFailedLoginLocally(identityKey) {
+    const now = Date.now();
+    const bucket = loginLockoutFallback.get(identityKey);
+    const next = !bucket || bucket.windowStartedAt <= now - 15 * 60 * 1000
+        ? { windowStartedAt: now, failureCount: 1, lockedUntil: 0 }
+        : { ...bucket, failureCount: bucket.failureCount + 1 };
+    if (next.failureCount >= 5) next.lockedUntil = now + 15 * 60 * 1000;
+    loginLockoutFallback.set(identityKey, next);
+    return next.lockedUntil > now ? next.lockedUntil : 0;
+}
+
+async function clearLoginFailures(identityKey) {
+    loginLockoutFallback.delete(identityKey);
+    if (!persistentLoginLockoutAvailable) return;
+    try { await rawPoolQuery(`DELETE FROM auth_login_attempts WHERE identity_key=$1`, [identityKey]); }
+    catch (error) { persistentLoginLockoutAvailable = false; console.warn("Could not clear login failure state:", error.message); }
 }
 
 async function createSession(user, device) {
@@ -364,11 +635,11 @@ async function createSession(user, device) {
 
     await pool.query(
         `
-        INSERT INTO app_sessions (token, user_id, business_id, device_id, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (user_id) DO UPDATE SET token=EXCLUDED.token, business_id=EXCLUDED.business_id, device_id=EXCLUDED.device_id, expires_at=EXCLUDED.expires_at, created_at=CURRENT_TIMESTAMP
+        INSERT INTO app_sessions (token, token_hash, user_id, business_id, device_id, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (user_id) DO UPDATE SET token=EXCLUDED.token, token_hash=EXCLUDED.token_hash, business_id=EXCLUDED.business_id, device_id=EXCLUDED.device_id, expires_at=EXCLUDED.expires_at, created_at=CURRENT_TIMESTAMP
         `,
-        [token, user.id, businessId, deviceId, expiresAt]
+        [hashSessionToken(token), hashSessionToken(token), user.id, businessId, deviceId, expiresAt]
     );
 
     return {
@@ -415,10 +686,10 @@ async function getSessionUser(req) {
         `
         SELECT token, user_id, business_id, device_id, expires_at
         FROM app_sessions
-        WHERE token = $1
+        WHERE token_hash = $1
         LIMIT 1
         `,
-        [token]
+        [hashSessionToken(token)]
     );
 
     const session = result.rows[0];
@@ -426,7 +697,7 @@ async function getSessionUser(req) {
 
     const expiresAt = new Date(session.expires_at).getTime();
     if (expiresAt < Date.now()) {
-        await pool.query(`DELETE FROM app_sessions WHERE token = $1`, [token]);
+        await pool.query(`DELETE FROM app_sessions WHERE token_hash = $1`, [hashSessionToken(token)]);
         return null;
     }
 
@@ -446,6 +717,7 @@ async function loadSessionUser(session) {
     return tenantContext.run({ businessId }, async () => {
         const result = await pool.query(`
             SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,u.permissions_override,
+                   u.is_owner,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
                    b.logo_url, b.currency, b.active AS business_active,
@@ -603,61 +875,62 @@ async function assertActiveDeviceAndLicense(deviceId, expectedBusinessId = null)
 function permissionForRequest(req) {
     const path = req.path;
     const method = req.method.toUpperCase();
-    if (path.startsWith("/auth/")) return null;
-    if (path === "/dashboard/stats") return "dashboard.view";
-    if (path === "/reports/advanced") return req.query?.export === "1" ? "advanced_reports.export" : "advanced_reports.view";
-    if (path === "/reports/order-categories") return req.query?.export === "1" ? "reports.export" : "reports.view";
-    if (path === "/reports/sales-summary") return req.query?.export === "1" ? "reports.export" : "reports.view";
-    if (path === "/customers" && req.query?.export === "1") return "customers.export";
-    if (path.startsWith("/reports/")) return "reports.view";
-    if (path === "/settings") return method === "GET" ? "settings.view" : "settings.edit";
-    if (path === "/menu-option-sets") return method === "GET" ? "menu.view" : "menu.edit";
-    if (path === "/printers" || path.startsWith("/printers/")) {
-        if (path.endsWith("/test") || path.endsWith("/print")) return req.query?.source === "kot" ? "kitchen.print" : req.query?.source === "order" ? "orders.print_open" : "printer.print";
-        if (method === "GET") return req.query?.source === "order" ? "orders.print_open" : "printer.view";
-        if (method === "POST") return "printer.create";
-        if (["PUT","PATCH"].includes(method)) return "printer.edit";
-        if (method === "DELETE") return "printer.delete";
+    if (path.startsWith('/auth/')) return null;
+    if (path === '/dashboard/stats') return 'dashboard.view';
+    if (path === '/reports/advanced') return req.query?.export === '1' ? 'advanced_reports.export' : 'advanced_reports.view';
+    if (path === '/reports/order-categories') return req.query?.export === '1' ? 'reports.export' : 'reports.view';
+    if (path === '/reports/sales-summary') return req.query?.export === '1' ? 'reports.export' : 'reports.view';
+    if (path === '/customers' && req.query?.export === '1') return 'customers.export';
+    if (path.startsWith('/reports/')) return 'reports.view';
+    if (path === '/settings') return method === 'GET' ? 'settings.view' : 'settings.edit';
+    if (path === '/settings/sales-channels') return method === 'GET' ? 'settings.view' : 'settings.edit';
+    if (path === '/menu-option-sets') return method === 'GET' ? 'menu.view' : 'menu.edit';
+    if (path === '/billing-adjustments' || path.startsWith('/billing-adjustments/')) return method === 'GET' ? 'settings.view' : 'settings.edit';
+    if (path.startsWith('/system/')) return 'deployment.view';
+    if (path === '/license/status') return 'settings.view';
+    if (path === '/printers' || path.startsWith('/printers/')) {
+        if (path.endsWith('/test') || path.endsWith('/print')) return req.query?.source === 'kot' ? 'kitchen.print' : req.query?.source === 'order' ? 'orders.print_open' : 'printer.print';
+        if (method === 'GET') return req.query?.source === 'order' ? 'orders.print_open' : 'printer.view';
+        if (method === 'POST') return 'printer.create';
+        if (['PUT','PATCH'].includes(method)) return 'printer.edit';
+        if (method === 'DELETE') return 'printer.delete';
     }
-    if (path === "/access" || path.startsWith("/access/")) {
-        if (method === "GET") return "access.view";
-        if (method === "POST") return "access.create";
-        if (["PUT","PATCH"].includes(method)) return "access.edit";
-        if (method === "DELETE") return "access.delete";
+    if (path === '/access' || path.startsWith('/access/')) {
+        if (method === 'GET') return 'access.view';
+        if (method === 'POST') return 'access.create';
+        if (['PUT','PATCH'].includes(method)) return 'access.edit';
+        if (method === 'DELETE') return 'access.delete';
     }
     const groups = [
-        ["marketing","marketing"],
-        ["kot-groups","kot_groups"],["expenses","expenses"],["loyalty","loyalty"],["backup","backup"],["advanced-reports","advanced_reports"],["deployment","deployment"],
-        ["menu","menu"],["customers","customers"],["tables","tables"],["devices","devices"],
-        ["reservations","reservations"],["kot","kitchen"],["payments","payments"],
-        ["invoices","payments"]
+        ['marketing','marketing'], ['kot-groups','kot_groups'], ['expenses','expenses'], ['loyalty','loyalty'],
+        ['advanced-reports','advanced_reports'], ['deployment','deployment'], ['menu','menu'], ['customers','customers'],
+        ['tables','tables'], ['devices','devices'], ['reservations','reservations'], ['kot','kitchen'], ['payments','payments'], ['invoices','payments']
     ];
     for (const [prefix,module] of groups) {
-        if (path === `/${prefix}` || path.startsWith(`/${prefix}/`)) {
-            if (module === "kitchen") {
-                if (req.query?.print === "1") return "kitchen.print";
-                if (method === "GET" && req.query?.range === "all" && req.user?.permissions?.["orders.print_open"] === true) return "orders.print_open";
-                return method === "GET" ? "kitchen.view" : "kitchen.edit";
+        if (path === '/' + prefix || path.startsWith('/' + prefix + '/')) {
+            if (module === 'kitchen') {
+                if (req.query?.print === '1') return 'kitchen.print';
+                if (method === 'GET' && req.query?.range === 'all' && req.user?.permissions?.['orders.print_open'] === true) return 'orders.print_open';
+                return method === 'GET' ? 'kitchen.view' : 'kitchen.edit';
             }
-            if (method === "GET") return `${module}.view`;
-            if (method === "POST") return `${module}.create`;
-            if (["PUT","PATCH"].includes(method)) return `${module}.edit`;
-            if (method === "DELETE") return `${module}.delete`;
+            if (method === 'GET') return module + '.view';
+            if (method === 'POST') return module + '.create';
+            if (['PUT','PATCH'].includes(method)) return module + '.edit';
+            if (method === 'DELETE') return module + '.delete';
         }
     }
-    if (path.endsWith("/payment-summary")) return "payments.view";
-    if (path === "/orders" || path.startsWith("/orders/")) {
-        if (/^\/orders\/\d+\/cancel$/.test(path) && method === "PUT") return "orders.cancel";
-        if (/^\/orders\/\d+\/printed$/.test(path)) return "orders.print_open";
-        if (/^\/orders\/\d+\/kot$/.test(path)) return "orders.print_open";
-        if (method === "GET") return "orders.view";
-        if (method === "POST") return "new_order.create";
-        if (["PUT","PATCH"].includes(method)) return /^\/orders\/\d+$/.test(path) ? "orders.edit_open" : "orders.edit";
-        if (method === "DELETE") return "orders.delete";
+    if (path.endsWith('/payment-summary')) return 'payments.view';
+    if (path === '/orders' || path.startsWith('/orders/')) {
+        if (/^\/orders\/\d+\/cancel$/.test(path) && method === 'PUT') return 'orders.cancel';
+        if (/^\/orders\/\d+\/printed$/.test(path)) return 'orders.print_open';
+        if (/^\/orders\/\d+\/kot$/.test(path)) return 'kitchen.print';
+        if (method === 'GET') return 'orders.view';
+        if (method === 'POST') return 'new_order.create';
+        if (['PUT','PATCH'].includes(method)) return /^\/orders\/\d+$/.test(path) ? 'orders.edit_open' : 'orders.edit';
+        if (method === 'DELETE') return 'orders.delete';
     }
     return null;
 }
-
 async function requireAuth(req, res, next) {
     try {
         if (req.path === "/public/device/register" || req.path.startsWith("/support/")) return next();
@@ -670,13 +943,13 @@ async function requireAuth(req, res, next) {
             WITH device_activity AS (
                 UPDATE registered_devices
                 SET last_seen_at=CURRENT_TIMESTAMP
-                WHERE device_id=(SELECT device_id FROM app_sessions WHERE token=$1 AND expires_at>CURRENT_TIMESTAMP LIMIT 1)
+                WHERE device_id=(SELECT device_id FROM app_sessions WHERE token_hash=$1 AND expires_at>CURRENT_TIMESTAMP LIMIT 1)
                   AND (last_seen_at IS NULL OR last_seen_at < CURRENT_TIMESTAMP - INTERVAL '1 minute')
                 RETURNING id
             )
-            SELECT s.token, s.user_id, s.business_id, s.device_id, s.expires_at,
+            SELECT s.token_hash AS token, s.user_id, s.business_id, s.device_id, s.expires_at,
                    u.id, u.display_name, u.username, u.profile_id, u.business_id AS user_business_id,
-                   u.active, u.permissions_override,
+                   u.active, u.permissions_override, u.is_owner,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
                    b.logo_url, b.currency, b.active AS business_active,
@@ -689,17 +962,17 @@ async function requireAuth(req, res, next) {
             LEFT JOIN registered_devices d ON d.device_id=s.device_id
             LEFT JOIN business_licenses l ON l.id=d.license_id
             CROSS JOIN (SELECT COUNT(*) FROM device_activity) activity_touch
-            WHERE s.token=$1
+            WHERE s.token_hash=$1
             LIMIT 1
-        `, [token]));
+        `, [hashSessionToken(token)]));
         const row = result.rows[0];
         if (!row || new Date(row.expires_at).getTime() < Date.now()) {
-            if (row) await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token=$1", [token]));
+            if (row) await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token_hash=$1", [hashSessionToken(token)]));
             return res.status(401).json({ error: "Authentication required" });
         }
         const user = {
             id: row.id, display_name: row.display_name, username: row.username, profile_id: row.profile_id,
-            business_id: row.user_business_id, active: row.active, permissions_override: row.permissions_override,
+            business_id: row.user_business_id, active: row.active, permissions_override: row.permissions_override, is_owner: row.is_owner === true,
             business_name: row.business_name, business_type: row.business_type, owner_name: row.owner_name,
             business_phone: row.business_phone, business_email: row.business_email, business_address: row.business_address,
             city: row.city, state: row.state, gstin: row.gstin, logo_url: row.logo_url, currency: row.currency,
@@ -748,12 +1021,13 @@ async function requireAuth(req, res, next) {
         }
         return tenantContext.run({ businessId: Number(user.business_id) }, () => {
             const required = permissionForRequest(req);
-            if (!required) return next();
+            if (!required) return res.status(403).json({ error: 'Permission denied: no permission mapping exists for this endpoint' });
             const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
             const hasRequestedPermission = required === "orders.cancel"
                 ? ["orders.edit_open", "orders.edit", "orders.cancel_closed"].some(key => permissions[key] === true)
                 : permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
-            if ((user.profile_name !== "Admin" || user.permissions_override !== null) && !hasRequestedPermission) {
+            const ownerDefaults = user.is_owner === true && user.permissions_override === null;
+            if (!ownerDefaults && !hasRequestedPermission) {
                 return res.status(403).json({ error: "Permission denied: " + required });
             }
             return next();
@@ -769,6 +1043,12 @@ async function requireAuth(req, res, next) {
 
 async function ensureInvoiceTables() {
     console.log("2/7 ensureInvoiceTables");
+
+    await pool.query(`CREATE TABLE IF NOT EXISTS invoice_number_counters (
+        business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+        next_number BIGINT NOT NULL DEFAULT 1 CHECK(next_number > 0),
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
 
     const check = await pool.query(`
         SELECT
@@ -795,7 +1075,7 @@ async function ensureInvoiceTables() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS invoices (
             id SERIAL PRIMARY KEY,
-            invoice_number VARCHAR(50) NOT NULL UNIQUE,
+            invoice_number VARCHAR(50) NOT NULL,
             order_id INTEGER NOT NULL UNIQUE
                 REFERENCES orders(id)
                 ON DELETE RESTRICT,
@@ -831,6 +1111,8 @@ async function ensureBusinessTables() {
     
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_id INTEGER REFERENCES customers(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS pax INTEGER`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS sales_channel_key VARCHAR(64)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS sales_channel_name VARCHAR(120)`);
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS gstin VARCHAR(40)`);
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS birth_date DATE`);
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS address TEXT`);
@@ -847,9 +1129,16 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tax_mode VARCHAR(20) NOT NULL DEFAULT 'exclusive'`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tax_label VARCHAR(60) NOT NULL DEFAULT 'GST 5%'`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS channel_prices JSONB NOT NULL DEFAULT '{}'::jsonb`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS sales_channels JSONB`);
+    await pool.query(`UPDATE menu m SET sales_channels=COALESCE((SELECT jsonb_agg(channel->>'key') FROM app_settings s CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(s.settings->'posSalesChannels')='array' THEN s.settings->'posSalesChannels' ELSE '[]'::jsonb END) channel WHERE s.business_id=m.business_id),'["dine_in","takeaway","delivery","online"]'::jsonb) WHERE m.sales_channels IS NULL`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS image_url TEXT`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS option_set_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS qr_available BOOLEAN NOT NULL DEFAULT TRUE`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS sku VARCHAR(80)`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`);
+    await pool.query(`UPDATE menu SET sku='SKU-' || LPAD(id::text,8,'0') WHERE sku IS NULL OR BTRIM(sku)=''`);
+    await pool.query(`ALTER TABLE menu ALTER COLUMN sku SET NOT NULL`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_business_sku_unique ON menu(business_id, upper(sku))`);
     await pool.query(`CREATE TABLE IF NOT EXISTS menu_variants (
         id SERIAL PRIMARY KEY,
         menu_id INTEGER NOT NULL REFERENCES menu(id) ON DELETE CASCADE,
@@ -867,10 +1156,11 @@ async function ensureBusinessTables() {
         business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
         token VARCHAR(64) NOT NULL UNIQUE,
         enabled BOOLEAN NOT NULL DEFAULT FALSE,
-        price_channel VARCHAR(20) NOT NULL DEFAULT 'online',
+        price_channel VARCHAR(64) NOT NULL DEFAULT 'online',
         public_base_url TEXT,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`);
+    await pool.query(`ALTER TABLE public_menu_settings ALTER COLUMN price_channel TYPE VARCHAR(64)`);
     await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS public_base_url TEXT");
     await pool.query(`CREATE TABLE IF NOT EXISTS public_menu_push_subscriptions (
         id SERIAL PRIMARY KEY,
@@ -911,6 +1201,22 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS order_item_id INTEGER REFERENCES order_items(id) ON DELETE CASCADE`);
+    await pool.query(`
+        WITH ranked_kot AS (
+            SELECT id,order_id,item_name,quantity,
+                   ROW_NUMBER() OVER (PARTITION BY order_id,item_name,quantity ORDER BY id) AS rn
+            FROM kot WHERE order_item_id IS NULL
+        ), ranked_items AS (
+            SELECT id,order_id,item_name,quantity,
+                   ROW_NUMBER() OVER (PARTITION BY order_id,item_name,quantity ORDER BY id) AS rn
+            FROM order_items
+        )
+        UPDATE kot k SET order_item_id=oi.id
+        FROM ranked_kot rk JOIN ranked_items oi
+          ON oi.order_id=rk.order_id AND oi.item_name=rk.item_name AND oi.quantity=rk.quantity AND oi.rn=rk.rn
+        WHERE k.id=rk.id
+    `);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_printed_at TIMESTAMP`);
@@ -932,19 +1238,50 @@ async function ensureBusinessTables() {
     await pool.query(`
         UPDATE orders o
         SET cancelled_at = COALESCE(
-            (SELECT MAX(a.created_at) FROM order_activity a WHERE a.order_id=o.id AND a.business_id=o.business_id AND a.event_type='Order cancelled'),
+            (SELECT MAX(a.created_at) FROM order_activity a WHERE a.order_id=o.id AND a.event_type='Order cancelled'),
             o.updated_at,
             o.created_at
         )
         WHERE o.status='Cancelled' AND o.cancelled_at IS NULL
     `);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_cancelled_report ON orders(business_id,cancelled_at DESC) WHERE status='Cancelled'`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_id VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS marketing_deal_name VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_adjustment_id VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount_adjustment_name VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS charge_adjustment_id VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS charge_adjustment_name VARCHAR(120)`);
+    await pool.query(`UPDATE orders SET sales_channel_key=CASE WHEN public_tracking_token IS NOT NULL THEN 'online' WHEN LOWER(COALESCE(order_type,''))='dine-in' THEN 'dine_in' ELSE 'takeaway' END WHERE sales_channel_key IS NULL OR BTRIM(sales_channel_key)=''`);
+    await pool.query(`UPDATE orders SET sales_channel_name=CASE WHEN sales_channel_key='dine_in' THEN 'Dine' WHEN sales_channel_key='takeaway' THEN 'Takeaway' WHEN sales_channel_key='delivery' THEN 'Delivery' WHEN sales_channel_key='online' OR public_tracking_token IS NOT NULL THEN 'Slash' ELSE COALESCE(NULLIF(sales_channel_name,''),order_type) END WHERE sales_channel_name IS NULL OR BTRIM(sales_channel_name)='' OR public_tracking_token IS NOT NULL OR sales_channel_key IN ('dine_in','takeaway','delivery','online')`);
+    await pool.query(`
+        UPDATE app_settings AS s
+        SET settings=jsonb_set(
+            s.settings,
+            '{posSalesChannels}',
+            (
+                SELECT COALESCE(jsonb_agg(
+                    CASE channel->>'key'
+                        WHEN 'dine_in' THEN jsonb_set(channel, '{label}', '"Dine"'::jsonb, true)
+                        WHEN 'takeaway' THEN jsonb_set(channel, '{label}', '"Takeaway"'::jsonb, true)
+                        WHEN 'delivery' THEN jsonb_set(channel, '{label}', '"Delivery"'::jsonb, true)
+                        WHEN 'online' THEN jsonb_set(channel, '{label}', '"Slash"'::jsonb, true)
+                        ELSE channel
+                    END ORDER BY ordinal
+                ), '[]'::jsonb)
+                FROM jsonb_array_elements(s.settings->'posSalesChannels') WITH ORDINALITY AS saved(channel, ordinal)
+            ),
+            true
+        )
+        WHERE jsonb_typeof(s.settings->'posSalesChannels')='array'
+          AND EXISTS (
+              SELECT 1
+              FROM jsonb_array_elements(s.settings->'posSalesChannels') AS saved(channel)
+              WHERE (channel->>'key'='dine_in' AND channel->>'label' IS DISTINCT FROM 'Dine')
+                 OR (channel->>'key'='takeaway' AND channel->>'label' IS DISTINCT FROM 'Takeaway')
+                 OR (channel->>'key'='delivery' AND channel->>'label' IS DISTINCT FROM 'Delivery')
+                 OR (channel->>'key'='online' AND channel->>'label' IS DISTINCT FROM 'Slash')
+          )
+    `);
+
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS expense_categories (
@@ -966,10 +1303,12 @@ async function ensureBusinessTables() {
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    await pool.query(`ALTER TABLE expenses ALTER COLUMN expense_date SET DEFAULT ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date)`);
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS loyalty_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
+            id SERIAL PRIMARY KEY,
+            business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
             points_per_currency NUMERIC(10,4) NOT NULL DEFAULT 1,
             currency_per_point NUMERIC(10,4) NOT NULL DEFAULT 1,
             min_redeem_points INTEGER NOT NULL DEFAULT 100,
@@ -978,10 +1317,21 @@ async function ensureBusinessTables() {
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    await pool.query(`ALTER TABLE loyalty_settings ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
+    await pool.query(`ALTER TABLE loyalty_settings DROP CONSTRAINT IF EXISTS loyalty_settings_id_check`);
+    await pool.query(`CREATE SEQUENCE IF NOT EXISTS loyalty_settings_id_seq`);
+    await pool.query(`ALTER TABLE loyalty_settings ALTER COLUMN id SET DEFAULT nextval('loyalty_settings_id_seq')`);
+    await pool.query(`SELECT setval('loyalty_settings_id_seq', GREATEST(COALESCE((SELECT MAX(id) FROM loyalty_settings),1),1))`);
+    await pool.query(`UPDATE loyalty_settings SET business_id=$1 WHERE business_id IS NULL`, [Number(systemBusinessId)]);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_loyalty_settings_business_unique ON loyalty_settings(business_id)`);
     await pool.query(`
-        INSERT INTO loyalty_settings(id) VALUES(1)
-        ON CONFLICT(id) DO NOTHING
-    `);
+        INSERT INTO loyalty_settings(business_id,points_per_currency,currency_per_point,min_redeem_points,welcome_points,enabled)
+        SELECT b.id,source.points_per_currency,source.currency_per_point,source.min_redeem_points,source.welcome_points,source.enabled
+        FROM businesses b
+        CROSS JOIN (SELECT points_per_currency,currency_per_point,min_redeem_points,welcome_points,enabled
+                    FROM loyalty_settings WHERE business_id=$1 ORDER BY id LIMIT 1) source
+        ON CONFLICT(business_id) DO NOTHING
+    `, [Number(systemBusinessId)]);
     await pool.query(`
         CREATE TABLE IF NOT EXISTS loyalty_transactions (
             id SERIAL PRIMARY KEY,
@@ -1017,16 +1367,16 @@ async function ensureBusinessTables() {
     console.log('✅ Business extensions ready');
 }
 
-async function getLoyaltySettings() {
-    const r = await pool.query(`SELECT * FROM loyalty_settings WHERE id=1`);
+async function getLoyaltySettings(businessId) {
+    const r = await pool.query(`SELECT * FROM loyalty_settings WHERE business_id=$1 LIMIT 1`, [Number(businessId)]);
     return r.rows[0] || { points_per_currency: 1, currency_per_point: 1, min_redeem_points: 100, welcome_points: 0, enabled: true };
 }
 
 async function awardLoyaltyForPayment(paymentId, orderId, amount) {
     try {
-        const order = (await pool.query(`SELECT customer_id FROM orders WHERE id=$1`, [orderId])).rows[0];
+        const order = (await pool.query(`SELECT customer_id,business_id FROM orders WHERE id=$1`, [orderId])).rows[0];
         if (!order?.customer_id) return;
-        const settings = await getLoyaltySettings();
+        const settings = await getLoyaltySettings(order.business_id);
         if (!settings.enabled) return;
         const points = Math.max(0, Math.floor(Number(amount || 0) * Number(settings.points_per_currency || 0)));
         if (!points) return;
@@ -1040,81 +1390,6 @@ async function awardLoyaltyForPayment(paymentId, orderId, amount) {
     }
 }
 
-function resolvePgDumpBinary() {
-    const configured = String(process.env.PG_DUMP_PATH || "").trim();
-
-    if (configured) {
-        if (fs.existsSync(configured)) {
-            return configured;
-        }
-
-        console.warn("Configured PG_DUMP_PATH does not exist:", configured);
-    }
-
-    // Try PATH first.
-    const pathBinary = process.platform === "win32"
-        ? "pg_dump.exe"
-        : "pg_dump";
-
-    // Common Windows PostgreSQL installation locations.
-    if (process.platform === "win32") {
-        const roots = [
-            "C:\\Program Files\\PostgreSQL",
-            "C:\\Program Files (x86)\\PostgreSQL"
-        ];
-
-        for (const root of roots) {
-            if (!fs.existsSync(root)) continue;
-
-            try {
-                const versions = fs.readdirSync(root, { withFileTypes: true })
-                    .filter(entry => entry.isDirectory())
-                    .map(entry => entry.name)
-                    .sort()
-                    .reverse();
-
-                for (const version of versions) {
-                    const candidate = path.join(
-                        root,
-                        version,
-                        "bin",
-                        "pg_dump.exe"
-                    );
-
-                    if (fs.existsSync(candidate)) {
-                        return candidate;
-                    }
-                }
-            } catch (_) {}
-        }
-    }
-
-    return pathBinary;
-}
-
-function runPgDump(args, env, cb) {
-    const binary = resolvePgDumpBinary();
-
-    console.log("Using pg_dump:", binary);
-
-    execFile(
-        binary,
-        args,
-        {
-            env: env || process.env,
-            maxBuffer: 25 * 1024 * 1024,
-            windowsHide: true
-        },
-        cb
-    );
-}
-
-function databaseEnv() {
-    return { ...process.env, PGPASSWORD: process.env.DB_PASSWORD || '' };
-}
-
-
-// =====================================================
 // HOME
 // =====================================================
 
@@ -1144,11 +1419,15 @@ app.get("/register-business", (_, res) => res.sendFile(path.join(__dirname, "pub
 // BUSINESS / REGISTRATION
 // =====================================================
 app.post('/api/public/register-business', async (req, res) => {
+    if (process.env.PUBLIC_BUSINESS_REGISTRATION_ENABLED !== 'true') return res.status(404).json({ error: 'Public business registration is disabled' });
+    const registrationSecret = String(process.env.PUBLIC_BUSINESS_REGISTRATION_KEY || '');
+    const presentedSecret = String(req.get('x-business-registration-key') || '');
+    if (registrationSecret.length < 32 || presentedSecret.length !== registrationSecret.length ||
+        !crypto.timingSafeEqual(Buffer.from(presentedSecret), Buffer.from(registrationSecret))) {
+        return res.status(404).json({ error: 'Public business registration is disabled' });
+    }
     try {
         return await runSystemContext(async () => {
-            // Registration is public, but the startup migration should already have run.
-            // Keep this defensive check for manually invoked/embedded server startup.
-            await ensureBusinessTable();
             const client = await pool.connect();
             try {
                 const b = cleanBusinessPayload(req.body);
@@ -1174,10 +1453,10 @@ app.post('/api/public/register-business', async (req, res) => {
         const adminProfile = (await client.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name='Admin' LIMIT 1`, [business.id])).rows[0];
 
         const user = (await client.query(`
-            INSERT INTO app_users (display_name,username,password_hash,profile_id,business_id,active)
-            VALUES ($1,$2,$3,$4,$5,TRUE)
+            INSERT INTO app_users (display_name,username,password_hash,profile_id,business_id,active,is_owner)
+            VALUES ($1,$2,$3,$4,$5,TRUE,TRUE)
             RETURNING id,display_name,username,profile_id,business_id,active
-        `, [b.ownerName, username, hashPassword(password), adminProfile.id, business.id])).rows[0];
+        `, [b.ownerName, username, await hashPassword(password), adminProfile.id, business.id])).rows[0];
 
         await client.query('COMMIT');
         try { await seedTenantDefaults(business.id); }
@@ -1224,15 +1503,6 @@ app.get('/api/public/device-business', async (req,res)=>{
         res.status(500).json({error:'Could not load business name'});
     }
 });
-app.get('/api/public/business/:id', async (req,res)=>{
-    try {
-        const id=Number(req.params.id);
-        const r=await pool.query(`SELECT id,business_code,business_name,business_type,owner_name,phone,email,address,city,state,gstin,logo_url,currency,active FROM businesses WHERE id=$1`,[id]);
-        if(!r.rows.length) return res.status(404).json({error:'Business not found'});
-        res.json(r.rows[0]);
-    } catch(e){ res.status(500).json({error:'Failed to load business'}); }
-});
-
 // AUTH ROUTES
 // =====================================================
 app.post("/api/auth/login", async (req,res)=>{
@@ -1240,6 +1510,7 @@ app.post("/api/auth/login", async (req,res)=>{
         const username=String(req.body.username||"").trim().toLowerCase();
         const password=String(req.body.password||"");
         if(!username||!password) return res.status(400).json({error:"Username and password are required"});
+        if(password.length>1024) return res.status(400).json({error:"Password must be 1024 characters or fewer"});
 
         const deviceId = getCookie(req, "cafe_device_id");
         if (!deviceId) {
@@ -1257,8 +1528,14 @@ app.post("/api/auth/login", async (req,res)=>{
         }
 
         const businessId = Number(deviceLicense.device.business_id);
+        const identityKey = loginIdentityKey("business", businessId, username);
+        const existingLockout = await getLoginLockout(identityKey);
+        if (existingLockout) {
+            res.setHeader("Retry-After", String(Math.max(1, Math.ceil((existingLockout - Date.now()) / 1000))));
+            return res.status(429).json({ error: "Too many failed sign-in attempts. Try again later." });
+        }
         const r = await tenantContext.run({ businessId }, () => pool.query(`
-            SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,u.permissions_override,
+            SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,u.permissions_override,u.is_owner,
                 b.business_code,b.business_name,b.business_type,b.owner_name,b.phone AS business_phone,b.email AS business_email,
                 b.address AS business_address,b.city,b.state,b.gstin,b.logo_url,b.currency,b.active AS business_active,
                 p.name AS profile_name,COALESCE(u.permissions_override,p.permissions,'{}'::jsonb) AS permissions
@@ -1268,11 +1545,20 @@ app.post("/api/auth/login", async (req,res)=>{
             WHERE LOWER(u.username)=$1 AND u.business_id=$2
             LIMIT 1`,[username,businessId]));
         const user=r.rows[0];
-        if(!user||!user.active||!verifyPassword(password,user.password_hash)) return res.status(401).json({error:"Invalid username or password"});
+        const passwordValid = user?.active ? await verifyPassword(password,user.password_hash) : false;
+        if(!passwordValid) {
+            const lockedUntil = await recordFailedLogin(identityKey);
+            if (lockedUntil) {
+                res.setHeader("Retry-After", String(Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000))));
+                return res.status(429).json({error:"Too many failed sign-in attempts. Try again later."});
+            }
+            return res.status(401).json({error:"Invalid username or password"});
+        }
+        await clearLoginFailures(identityKey);
         delete user.password_hash;
         const session = await createSession(user, deviceLicense.device);
         setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "None", secure: true });
-        res.json({ success: true, token: session.token, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
+        res.json({ success: true, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
 });
 
@@ -1300,7 +1586,7 @@ app.get("/api/auth/me",async(req,res)=>{
 app.post("/api/auth/logout", async (req, res) => {
     try {
         const session = await getSessionUser(req);
-        if (session) await pool.query(`DELETE FROM app_sessions WHERE token = $1`, [session.token]);
+        if (session) await pool.query(`DELETE FROM app_sessions WHERE token_hash = $1`, [hashSessionToken(session.token)]);
         clearCookie(res, "cafe_session");
         res.json({ success: true });
     } catch (e) {
@@ -1328,9 +1614,9 @@ app.get("/restaurant/:token/manifest.webmanifest", async (req, res) => {
         const name = String(publication.business_name || "Cafe & Restaurant").slice(0, 80);
         res.set("Cache-Control", "public, max-age=0, must-revalidate").type("application/manifest+json").json({
             id: `/restaurant/${token}`,
-            name: `${name}  -  Menu`,
+            name: `${name} · Slash QR Menu`,
             short_name: name.slice(0, 30),
-            description: `Browse the menu at ${name}`,
+            description: `Browse the menu at ${name}, powered by Slash.`,
             start_url: `/restaurant/${token}`,
             scope: "/",
             display: "standalone",
@@ -1395,24 +1681,146 @@ app.post("/public-menu/:token/push-subscriptions", async (req, res) => {
         res.status(500).json({ error: "Could not save notification preference" });
     }
 });
-function publicOnlinePromotions(settings, adjustmentRows = []) {
-    const today = new Date().toISOString().slice(0, 10);
+const MARKETING_SCHEDULE_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+function marketingDealScheduleUnavailableReason(deal, now = new Date()) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+        weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(now);
+    const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+    const dayKey = ({ Mon: "mon", Tue: "tue", Wed: "wed", Thu: "thu", Fri: "fri", Sat: "sat", Sun: "sun" })[values.weekday];
+    const dayIndex = MARKETING_SCHEDULE_WEEKDAYS.indexOf(dayKey);
+    const previousDay = MARKETING_SCHEDULE_WEEKDAYS[(dayIndex + 6) % 7];
+    const today = values.year + "-" + values.month + "-" + values.day;
+    if (deal?.startDate && String(deal.startDate) > today) return "The deal has not started yet.";
+    if (deal?.endDate && String(deal.endDate) < today) return "The deal has ended.";
+
+    const days = Array.isArray(deal?.days) && deal.days.length
+        ? deal.days.map(day => String(day).toLowerCase()).filter(day => MARKETING_SCHEDULE_WEEKDAYS.includes(day))
+        : MARKETING_SCHEDULE_WEEKDAYS;
+    const startTime = String(deal?.startTime || "").trim();
+    const endTime = String(deal?.endTime || "").trim();
+    if (Boolean(startTime) !== Boolean(endTime)) return "Both deal times must be set.";
+    if (!startTime) return days.includes(dayKey) ? "" : "The deal is not available today.";
+
+    const parseTime = value => {
+        const match = /^([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(value);
+        return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+    };
+    const start = parseTime(startTime);
+    const end = parseTime(endTime);
+    if (start === null || end === null || start === end) return "Deal hours are invalid.";
+    const minute = Number(values.hour) * 60 + Number(values.minute);
+    const inWindow = start < end
+        ? days.includes(dayKey) && minute >= start && minute < end
+        : (days.includes(dayKey) && minute >= start) || (days.includes(previousDay) && minute < end);
+    return inWindow ? "" : "The deal is outside its available days or hours.";
+}
+
+const DEFAULT_SALES_CHANNELS = [
+    { key: "dine_in", label: "Dine", orderType: "Dine-in", qrMenu: false },
+    { key: "takeaway", label: "Takeaway", orderType: "Takeaway", qrMenu: false },
+    { key: "delivery", label: "Delivery", orderType: "Takeaway", qrMenu: false },
+    { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
+];
+
+function normalizeSalesChannels(value) {
+    const source = Array.isArray(value) ? value : DEFAULT_SALES_CHANNELS;
+    const fixedLabels = { dine_in: "Dine", takeaway: "Takeaway", delivery: "Delivery", online: "Slash" };
+    const channels = [];
+    const seen = new Set();
+    for (const entry of source.slice(0, 40)) {
+        const key = String(entry?.key || "").trim().toLowerCase();
+        const label = String(fixedLabels[key] || entry?.label || "").trim().slice(0, 60);
+        const orderType = entry?.orderType === "Dine-in" ? "Dine-in" : entry?.orderType === "Takeaway" ? "Takeaway" : "";
+        if (!/^[a-z][a-z0-9_]{1,19}$/.test(key) || !label || !orderType || seen.has(key)) continue;
+        seen.add(key);
+        channels.push({ key, label, orderType, qrMenu: entry?.qrMenu === true });
+    }
+    return channels;
+}
+
+function salesChannelsForSettings(settings) {
+    return normalizeSalesChannels(settings?.posSalesChannels);
+}
+
+function resolveSaleChannel(settings, channelKey, orderType = null) {
+    const channels = salesChannelsForSettings(settings);
+    const key = String(channelKey || "").trim().toLowerCase();
+    const channel = channels.find(entry => entry.key === key);
+    if (!channel) throw Object.assign(new Error("Choose an active sale channel."), { status: 400 });
+    if (orderType && channel.orderType !== orderType) {
+        throw Object.assign(new Error("This sale channel does not match the selected order type."), { status: 400 });
+    }
+    return channel;
+}
+
+function menuItemChannels(item, settings) {
+    return Array.isArray(item?.sales_channels)
+        ? item.sales_channels.map(value => String(value).trim().toLowerCase()).filter(Boolean)
+        : salesChannelsForSettings(settings).map(channel => channel.key);
+}
+
+function assertMenuItemAvailableOnChannel(item, settings, channelKey) {
+    if (!menuItemChannels(item, settings).includes(String(channelKey || "").toLowerCase())) {
+        throw Object.assign(new Error("This menu item is not available on the selected sale channel."), { status: 409 });
+    }
+}
+
+function assertMarketingDealAvailableForBilling(settings, dealId, channelKey) {
+    const id = String(dealId || "").replace(/^marketing:/, "");
+    const deal = (Array.isArray(settings?.marketingDeals) ? settings.marketingDeals : [])
+        .find(item => String(item?.id) === id);
+    if (!deal || deal.active === false) throw new Error("The selected marketing deal is no longer available.");
+    const dealChannels = Array.isArray(deal.channels) ? deal.channels.map(value => String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_")) : [];
+    if (dealChannels.length && !dealChannels.includes(String(channelKey || "").toLowerCase())) {
+        throw Object.assign(new Error("The selected marketing deal is not available on this sale channel."), { status: 400 });
+    }
+    const unavailable = marketingDealScheduleUnavailableReason(deal);
+    if (unavailable) throw new Error("The selected marketing deal cannot be used now. " + unavailable);
+}
+
+async function assertBillingAdjustmentAvailableForChannel(db, businessId, adjustmentId, channelKey) {
+    if (!adjustmentId) return;
+    const id = Number(adjustmentId);
+    if (!Number.isInteger(id) || id <= 0) throw Object.assign(new Error("The selected discount or charge is invalid."), { status: 400 });
+    const result = await db.query("SELECT applies_to,active FROM billing_adjustments WHERE id=$1 AND business_id=$2 LIMIT 1", [id, Number(businessId)]);
+    const rule = result.rows[0];
+    if (!rule || rule.active === false) throw Object.assign(new Error("The selected discount or charge is no longer active."), { status: 400 });
+    const applies = String(rule.applies_to || "all").toLowerCase().replace(/[\s-]+/g, "_");
+    if (applies !== "all" && applies !== String(channelKey || "").toLowerCase()) {
+        throw Object.assign(new Error("The selected discount or charge is not available on this sale channel."), { status: 400 });
+    }
+}
+
+function defaultSaleChannelForOrderType(settings, orderType) {
+    const channels = salesChannelsForSettings(settings).filter(channel => channel.orderType === orderType);
+    const preferenceKey = orderType === "Dine-in" ? "tableView" : "newOrder";
+    const preferred = settings?.posChannelPreferences?.[preferenceKey]?.defaultChannel;
+    return channels.find(channel => channel.key === preferred)?.key || channels.find(channel => channel.key === (orderType === "Dine-in" ? "dine_in" : "takeaway"))?.key || channels[0]?.key;
+}
+
+function publicOnlinePromotions(settings, adjustmentRows = [], channelKey = "online") {
     const marketing = (Array.isArray(settings?.marketingDeals) ? settings.marketingDeals : []).filter(deal => {
         const channels = Array.isArray(deal.channels) ? deal.channels.map(value => String(value).toLowerCase().replace(/[\s-]+/g, "_")) : [];
-        return deal?.active !== false && String(deal.type || "").toLowerCase() === "discount" &&
-            (!channels.length || channels.includes("online")) && (!deal.startDate || String(deal.startDate) <= today) && (!deal.endDate || String(deal.endDate) >= today) &&
-            Number.isFinite(Number(deal.value)) && Number(deal.value) > 0;
+        return String(deal?.id || "").trim() && deal?.active !== false && (!channels.length || channels.includes(String(channelKey).toLowerCase()));
     }).map(deal => ({
-        id: `marketing:${String(deal.id)}`, source: "marketing", sourceId: String(deal.id), name: String(deal.name || "Online offer").slice(0, 120),
-        description: String(deal.description || "").slice(0, 240), type: "discount", valueType: String(deal.valueType || "amount"), value: Number(deal.value),
-        category: String(deal.category || ""), itemId: deal.itemId || null, itemIds: Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : []
+        id: `marketing:${String(deal.id)}`, source: "marketing", sourceId: String(deal.id), name: String(deal.name || "QR Menu offer").slice(0, 120),
+        description: String(deal.description || "").slice(0, 240), type: String(deal.type || "Deal").slice(0, 80), valueType: String(deal.valueType || "amount"),
+        value: Number.isFinite(Number(deal.value)) ? Number(deal.value) : 0,
+        buyQuantity: Math.max(1, Number(deal.buyQuantity) || 1), getQuantity: Math.max(1, Number(deal.getQuantity) || 1),
+        category: String(deal.category || ""), itemId: deal.itemId || null, itemIds: Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : [],
+        startDate: deal.startDate || null, endDate: deal.endDate || null,
+        days: Array.isArray(deal.days) ? deal.days.map(day => String(day).toLowerCase()) : [],
+        startTime: deal.startTime || null, endTime: deal.endTime || null
     }));
     const adjustments = adjustmentRows.filter(rule => {
         const kind = String(rule.kind || rule.type || "discount").toLowerCase();
         const applies = String(rule.applies_to || "all").toLowerCase().replace(/-/g, "_");
-        return rule.active !== false && kind === "discount" && ["all", "online"].includes(applies) && Number(rule.value) > 0;
+        return rule.active !== false && kind === "discount" && ["all", String(channelKey).toLowerCase()].includes(applies) && Number(rule.value) > 0;
     }).map(rule => ({
-        id: `adjustment:${Number(rule.id)}`, source: "adjustment", sourceId: String(rule.id), name: String(rule.name || "Online discount").slice(0, 120),
+        id: `adjustment:${Number(rule.id)}`, source: "adjustment", sourceId: String(rule.id), name: String(rule.name || "QR Menu discount").slice(0, 120),
         description: String(rule.description || "").slice(0, 240), type: "discount",
         valueType: ["percent", "percentage"].includes(String(rule.calculation || rule.value_type || "").toLowerCase()) ? "percent" : "amount",
         value: Number(rule.value), category: "", itemId: null, itemIds: []
@@ -1431,28 +1839,31 @@ app.get("/public-menu/:token", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
         const businessId = Number(publication.business_id);
-        const priceChannel = ["dine_in", "takeaway", "delivery", "online"].includes(publication.price_channel)
-            ? publication.price_channel : "online";
         const data = await tenantContext.run({ businessId }, async () => {
             const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult, adjustmentResult] = await Promise.all([
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
-                pool.query("SELECT id, name, category, price, channel_prices, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
+                pool.query("SELECT id, name, description, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
                 pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
                 pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId]),
                 pool.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
             ]);
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
+            const qrChannels = salesChannelsForSettings(settings).filter(channel => channel.qrMenu);
+            const priceChannel = qrChannels.find(channel => channel.key === publication.price_channel)?.key || qrChannels.find(channel => channel.key === "online")?.key || qrChannels[0]?.key || "online";
             const configuredOptionSets = Array.isArray(settings.menuOptionSets) ? settings.menuOptionSets : [];
             const optionSetsById = new Map(configuredOptionSets.map(set => [String(set.id), set]));
             const itemsById = new Map();
             const items = menuResult.rows.map(item => {
+                if (!menuItemChannels(item, settings).includes(priceChannel)) return null;
                 const prices = item.channel_prices && typeof item.channel_prices === "object" ? item.channel_prices : {};
                 const entry = {
                     id: String(item.id),
                     name: item.name,
+
+                    description: String(item.description || ""),
                     category: item.category || "Menu",
                     price: Number(prices[priceChannel] ?? item.price ?? 0),
                     imageUrl: item.image_url || "",
@@ -1468,7 +1879,7 @@ app.get("/public-menu/:token", async (req, res) => {
                 };
                 itemsById.set(Number(item.id), entry);
                 return entry;
-            });
+            }).filter(Boolean);
             for (const variant of variantResult.rows) {
                 const item = itemsById.get(Number(variant.menu_id));
                 if (!item) continue;
@@ -1485,8 +1896,9 @@ app.get("/public-menu/:token", async (req, res) => {
                 logoUrl: String(settings.logoUrl || business.logo_url || ""),
                 currency: String(settings.currency || business.currency || "₹"),
                 priceChannel,
+            priceChannelLabel: qrChannels.find(channel => channel.key === priceChannel)?.label || "Slash",
                 gstCalculationEnabled: settings.gstCalculationEnabled !== false,
-                onlinePromotions: publicOnlinePromotions(settings, adjustmentResult.rows),
+                onlinePromotions: publicOnlinePromotions(settings, adjustmentResult.rows, priceChannel),
                 categories: categoryResult.rows.map(row => row.name),
                 items,
                 tables: tableResult.rows.map(row => String(row.table_number))
@@ -1522,7 +1934,7 @@ async function upsertQrGuestCustomer(queryable,businessId,customer){
     const phoneDigits=customer.phone.replace(/\D/g,"");
     const existing=await queryable.query("SELECT id FROM customers WHERE business_id=$1 AND regexp_replace(phone,'[^0-9]','','g')=$2 ORDER BY id LIMIT 1",[businessId,phoneDigits]);
     if(existing.rows.length){
-        const updated=await queryable.query(`UPDATE customers SET name=$1,email=COALESCE($2,email),birth_date=COALESCE($3,birth_date) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date`,[customer.name,customer.email,customer.birthDate,existing.rows[0].id,businessId]);
+        const updated=await queryable.query(`UPDATE customers SET name=COALESCE(NULLIF(BTRIM(name),''),$1),email=COALESCE(NULLIF(BTRIM(email),''),$2),birth_date=COALESCE(birth_date,$3) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date`,[customer.name,customer.email,customer.birthDate,existing.rows[0].id,businessId]);
         return updated.rows[0];
     }
     const created=await queryable.query("INSERT INTO customers(name,phone,email,birth_date,business_id) VALUES($1,$2,$3,$4,$5) RETURNING id,name,phone,email,birth_date",[customer.name,customer.phone,customer.email,customer.birthDate,businessId]);
@@ -1553,6 +1965,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
     const linkTableNumber = String(req.query?.table || "").trim();
     const tableNumber = String(req.body?.tableNumber || req.body?.table_number || "").trim();
     const requestedOrderType = String(req.body?.orderType || "dine-in").toLowerCase();
+    if (req.body?.promotionId || req.body?.marketingDealId || (req.body?.discount !== undefined && Number(req.body.discount) !== 0)) return res.status(400).json({ error: "Offers are display-only and cannot be applied to QR orders." });
     if (!['dine-in', 'takeaway'].includes(requestedOrderType)) return res.status(400).json({ error: "Choose Dine in or Takeaway" });
     const orderType = requestedOrderType === "takeaway" ? "Takeaway" : "Dine-in";
     const assignedTableNumber = orderType === "Dine-in" ? tableNumber : null;
@@ -1575,21 +1988,15 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
-        const priceChannel = ["dine_in", "takeaway", "delivery", "online"].includes(publication.price_channel)
-            ? publication.price_channel : "online";
         const result = await tenantContext.run({ businessId }, async () => {
             const client = await rawPoolConnect();
             try {
-                await applyTenantDbContext(client);
                 await client.query("BEGIN");
-                const [businessSettingsResult, adjustmentRowsResult] = await Promise.all([
-                    client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
-                    client.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
-                ]);
+                await applyTenantDbContext(client);
+                const businessSettingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
                 const businessSettings = businessSettingsResult.rows[0]?.settings || {};
-                const promotions = publicOnlinePromotions(businessSettings, adjustmentRowsResult.rows);
-                const selectedPromotion = req.body?.promotionId ? promotions.find(item => item.id === String(req.body.promotionId)) : null;
-                if (req.body?.promotionId && !selectedPromotion) throw Object.assign(new Error("That online offer is no longer available. Refresh the menu and try again."), { status: 409 });
+                const qrChannels = salesChannelsForSettings(businessSettings).filter(channel => channel.qrMenu);
+                const priceChannel = qrChannels.find(channel => channel.key === publication.price_channel)?.key || qrChannels.find(channel => channel.key === "online")?.key || qrChannels[0]?.key || "online";
                 const tableResult = await client.query(
                     "SELECT table_number FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 FOR UPDATE",
                     [businessId, tableNumber]
@@ -1617,7 +2024,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 const requestedLines = [...linesByKey.values()];
                 const itemIds = [...new Set(requestedLines.map(line => line.itemId))];
                 const menuResult = await client.query(
-                    "SELECT id,name,category,price,channel_prices,qr_available,unit,tax_rate,tax_mode,option_set_ids FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE AND qr_available=TRUE",
+                    "SELECT id,name,category,price,channel_prices,sales_channels,qr_available,unit,tax_rate,tax_mode,option_set_ids FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE AND qr_available=TRUE",
                     [businessId, itemIds]
                 );
                 const menuById = new Map(menuResult.rows.map(item => [Number(item.id), item]));
@@ -1633,6 +2040,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 const orderLines = [];
                 for (const line of requestedLines) {
                     const item = menuById.get(line.itemId);
+                    if (item) assertMenuItemAvailableOnChannel(item, businessSettings, priceChannel);
                     const variant = line.variantId ? variantById.get(line.variantId) : null;
                     if (!item || (line.variantId && (!variant || Number(variant.menu_id) !== line.itemId))) {
                         throw Object.assign(new Error("A selected size is no longer available"), { status: 409 });
@@ -1659,27 +2067,16 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 }
                 const lineNets = orderLines.map(line => { const gross = line.price * line.quantity; return line.taxMode === "inclusive" && line.taxRate ? gross / (1 + line.taxRate / 100) : gross; });
                 const subtotal = lineNets.reduce((sum, value) => sum + value, 0);
-                const eligibleIndexes = orderLines.map((line, index) => {
-                    if (!selectedPromotion) return index;
-                    if (selectedPromotion.source !== "marketing") return index;
-                    const ids = selectedPromotion.itemIds || [];
-                    if (ids.length) return ids.includes(String(line.menuId)) ? index : -1;
-                    if (selectedPromotion.itemId && String(selectedPromotion.itemId) !== String(line.menuId)) return -1;
-                    if (selectedPromotion.category && String(selectedPromotion.category).toLowerCase() !== String(line.category || "").toLowerCase()) return -1;
-                    return index;
-                }).filter(index => index >= 0);
-                const discountBase = eligibleIndexes.reduce((sum, index) => sum + lineNets[index], 0);
-                const discount = !selectedPromotion || discountBase <= 0 ? 0 : Math.min(discountBase, ["percent", "percentage"].includes(String(selectedPromotion.valueType).toLowerCase()) ? discountBase * Number(selectedPromotion.value || 0) / 100 : Number(selectedPromotion.value || 0));
+                const discount = 0;
                 const discounts = orderLines.map(() => 0);
-                let discountRemaining = discount;
-                eligibleIndexes.forEach((index, position) => { const amount = position === eligibleIndexes.length - 1 ? discountRemaining : discount * lineNets[index] / discountBase; discounts[index] = Math.min(lineNets[index], amount); discountRemaining = Math.max(0, discountRemaining - discounts[index]); });
-                const gst = orderLines.reduce((sum, line, index) => sum + Math.max(0, lineNets[index] - discounts[index]) * line.taxRate / 100, 0);
-                const total = orderLines.reduce((sum, line, index) => { const net = Math.max(0, lineNets[index] - discounts[index]); return sum + net + net * line.taxRate / 100; }, 0);
+                const gst = orderLines.reduce((sum, line, index) => sum + lineNets[index] * line.taxRate / 100, 0);
+                const total = orderLines.reduce((sum, line, index) => sum + lineNets[index] + lineNets[index] * line.taxRate / 100, 0);
                 const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
                 const note = String(req.body?.notes || "").trim().slice(0, 300);
+                const qrChannel = qrChannels.find(channel => channel.key === priceChannel);
                 const orderResult = await client.query(
-                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14) RETURNING id,order_number,table_number,total,status",
-                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, discount, selectedPromotion?.source === "marketing" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "marketing" ? selectedPromotion.name : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.sourceId : null, selectedPromotion?.source === "adjustment" ? selectedPromotion.name : null, guestCustomer.id]
+                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,order_number,table_number,total,status",
+                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash"]
                 );
                 const order = orderResult.rows[0];
                 const itemValues = [];
@@ -1771,11 +2168,16 @@ app.get("/api/menu/public-settings", async (req, res) => {
             [businessId]
         );
         const settings = result.rows[0];
+        const appSettingsResult = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const qrMenuChannels = salesChannelsForSettings(appSettingsResult.rows[0]?.settings || {}).filter(channel => channel.qrMenu);
+        const selectedQrChannel = qrMenuChannels.find(channel => channel.key === settings.price_channel) || qrMenuChannels.find(channel => channel.key === "online") || qrMenuChannels[0];
         const requestHost = String(req.hostname || "").toLowerCase();
         const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
         res.json({
             enabled: settings.enabled,
-            priceChannel: settings.price_channel,
+            priceChannel: selectedQrChannel?.key || "online",
+            priceChannelLabel: selectedQrChannel?.label || "Slash",
+            qrMenuChannels,
             token: settings.token,
             publicBaseUrl: settings.public_base_url || "",
             localNetworkUrl
@@ -1789,12 +2191,9 @@ app.get("/api/menu/public-settings", async (req, res) => {
 app.put("/api/menu/public-settings", async (req, res) => {
     const businessId = Number(req.user.business_id);
     const enabled = req.body.enabled === true;
-    const priceChannel = String(req.body.priceChannel || "online");
+    const requestedPriceChannel = String(req.body.priceChannel || "online").trim().toLowerCase();
     const hasPublicBaseUrl = Object.prototype.hasOwnProperty.call(req.body || {}, "publicBaseUrl");
     let publicBaseUrl = null;
-    if (!["dine_in", "takeaway", "delivery", "online"].includes(priceChannel)) {
-        return res.status(400).json({ error: "Choose a valid menu price channel" });
-    }
     if (hasPublicBaseUrl) {
         const rawBaseUrl = String(req.body.publicBaseUrl || "").trim();
         if (rawBaseUrl) {
@@ -1812,6 +2211,10 @@ app.put("/api/menu/public-settings", async (req, res) => {
         }
     }
     try {
+        const appSettingsResult = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const qrMenuChannels = salesChannelsForSettings(appSettingsResult.rows[0]?.settings || {}).filter(channel => channel.qrMenu);
+        if (!qrMenuChannels.some(channel => channel.key === requestedPriceChannel)) return res.status(400).json({ error: "Choose an active QR Menu sale channel." });
+        const priceChannel = requestedPriceChannel;
         const result = await pool.query(
             `INSERT INTO public_menu_settings(business_id, token, enabled, price_channel, public_base_url)
              VALUES($1,$2,$3,$4,CASE WHEN $5 THEN $6 ELSE NULL END)
@@ -1830,6 +2233,8 @@ app.put("/api/menu/public-settings", async (req, res) => {
             success: true,
             enabled: settings.enabled,
             priceChannel: settings.price_channel,
+            priceChannelLabel: qrMenuChannels.find(channel => channel.key === settings.price_channel)?.label || "Slash",
+            qrMenuChannels,
             token: settings.token,
             publicBaseUrl: settings.public_base_url || "",
             localNetworkUrl
@@ -2057,11 +2462,23 @@ function normaliseTaxPayload(body = {}) {
 function cleanChannelPrices(value) {
     const src = (value && typeof value === 'object') ? value : {};
     const result = {};
-    for (const key of ['dine_in', 'takeaway', 'delivery', 'online']) {
+    for (const key of Object.keys(src)) {
+        if (!/^[a-z][a-z0-9_]{1,19}$/.test(key)) continue;
         const n = Number(src[key]);
         if (Number.isFinite(n) && n >= 0) result[key] = n;
     }
     return result;
+}
+
+function cleanMenuSalesChannels(value, settings) {
+    const allowed = new Set(salesChannelsForSettings(settings).map(channel => channel.key));
+    if (value === undefined || value === null) return [...allowed];
+    if (!Array.isArray(value)) throw Object.assign(new Error("Choose at least one active sale channel for this item."), { status: 400 });
+    const selected = [...new Set(value.map(key => String(key || "").trim().toLowerCase()))];
+    if (!selected.length || selected.some(key => !allowed.has(key))) {
+        throw Object.assign(new Error("Choose one or more currently active sale channels for this item."), { status: 400 });
+    }
+    return selected;
 }
 
 function cleanVariants(value) {
@@ -2075,6 +2492,35 @@ function cleanVariants(value) {
         channelPrices: cleanChannelPrices(v.channelPrices || v.channel_prices),
         available: v.available !== false
     })).filter(v => v.name && Number.isFinite(v.price) && v.price >= 0);
+}
+
+function cleanMenuSku(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw) return null;
+    if (raw.length > 80 || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(raw)) {
+        throw Object.assign(new Error("SKU must be up to 80 characters and use letters, numbers, dots, underscores, slashes or hyphens."), { status: 400 });
+    }
+    return raw.toUpperCase();
+}
+
+function generateMenuSku() {
+    return `SKU-${crypto.randomBytes(8).toString("hex").toUpperCase()}`;
+}
+
+async function generateUniqueMenuSku(queryable, businessId) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+        const sku = generateMenuSku();
+        const existing = await queryable.query("SELECT 1 FROM menu WHERE business_id=$1 AND UPPER(sku)=UPPER($2) LIMIT 1", [businessId, sku]);
+        if (!existing.rows.length) return sku;
+    }
+    throw Object.assign(new Error("Could not generate a unique SKU. Try saving the item again."), { status: 503 });
+}
+
+function menuSkuErrorResponse(error, fallback) {
+    if (error?.code === "23505" && error?.constraint === "idx_menu_business_sku_unique") {
+        return { status: 409, message: "That SKU is already used by another menu item in this cafe. Choose a different SKU or leave it blank to generate one." };
+    }
+    return { status: error?.status || 500, message: error?.status ? error.message : fallback };
 }
 
 function cleanMenuImage(value, existingValue = null) {
@@ -2184,23 +2630,29 @@ app.post(
             const variants = cleanVariants(req.body.variants);
             const imageUrl = cleanMenuImage(req.body.imageUrl);
             const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
+            const requestedSku = cleanMenuSku(req.body.sku);
+            const sku = requestedSku || await generateUniqueMenuSku(client, Number(req.user.business_id));
+            const description = String(req.body.description || "").trim().slice(0, 2000);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
             }
             const businessId = Number(req.user.business_id);
+            const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+            const salesChannels = cleanMenuSalesChannels(req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const result = await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id,sku,description,sales_channels)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
                 RETURNING *
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId]);
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId, sku, description, JSON.stringify(salesChannels)]);
             await replaceMenuVariants(client, result.rows[0].id, variants);
             await client.query('COMMIT');
             res.status(201).json({ success: true, menu: result.rows[0] });
         } catch (e) {
             await client.query('ROLLBACK');
             console.error(e);
-            res.status(500).json({ error: "Failed to add menu item: " + e.message });
+            const failure = menuSkuErrorResponse(e, "Failed to add menu item");
+            res.status(failure.status).json({ error: failure.message });
         } finally { client.release(); }
     }
 );
@@ -2217,17 +2669,26 @@ app.post("/api/menu/import", async (req, res) => {
     const skipped = [];
     const warnings = [];
     const seenNames = new Set();
+    const seenSkus = new Set();
     let imported = 0;
     let updated = 0;
     let categoriesCreated = 0;
     try {
         await client.query("BEGIN");
         await client.query(`SELECT set_config('app.business_id',$1,TRUE),set_config('app.system_mode','off',TRUE)`, [String(businessId)]);
+        const channelSettingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const channelSettings = channelSettingsResult.rows[0]?.settings || {};
         for (let index = 0; index < rows.length; index += 1) {
             const source = rows[index] && typeof rows[index] === "object" ? rows[index] : {};
             const name = String(source.name || "").trim();
             const category = String(source.category || "").trim();
             const price = Number(source.price);
+            let requestedSku;
+            try { requestedSku = cleanMenuSku(source.sku); }
+            catch (error) {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: error.message });
+                continue;
+            }
             if (!name || !category || !Number.isFinite(price) || price < 0) {
                 skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "Item name, category and a non-negative price are required." });
                 continue;
@@ -2241,7 +2702,7 @@ app.post("/api/menu/import", async (req, res) => {
             seenNames.add(nameKey);
 
             const existing = await client.query(
-                `SELECT id,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices
+                `SELECT id,sku,description,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,sales_channels
                  FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
                 [businessId, name]
             );
@@ -2253,6 +2714,23 @@ app.post("/api/menu/import", async (req, res) => {
             if (!current && mode === "update") {
                 skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "No existing item with this name was found to update." });
                 continue;
+            }
+
+            const skuKey = requestedSku ? requestedSku.toLocaleUpperCase() : "";
+            if (skuKey && seenSkus.has(skuKey)) {
+                skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "This SKU appears more than once in the spreadsheet." });
+                continue;
+            }
+            if (skuKey) {
+                const duplicateSku = await client.query(
+                    "SELECT id FROM menu WHERE business_id=$1 AND UPPER(sku)=UPPER($2) AND ($3::int IS NULL OR id<>$3) LIMIT 1",
+                    [businessId, requestedSku, current?.id || null]
+                );
+                if (duplicateSku.rows.length) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "This SKU is already assigned to another item in this cafe." });
+                    continue;
+                }
+                seenSkus.add(skuKey);
             }
 
             const categoryResult = await client.query(
@@ -2291,18 +2769,21 @@ app.post("/api/menu/import", async (req, res) => {
             const tax = normaliseTaxPayload(taxSource);
             const taxMode = ["inclusive", "exclusive"].includes(source.taxMode) ? source.taxMode : current?.tax_mode || "exclusive";
             const channelPrices = cleanChannelPrices({ ...(current?.channel_prices || {}), ...(source.channelPrices || {}) });
+            const salesChannels = cleanMenuSalesChannels(source.salesChannels == null ? current?.sales_channels : source.salesChannels, channelSettings);
+            const sku = requestedSku || current?.sku || await generateUniqueMenuSku(client, businessId);
+            const description = String(source.description || current?.description || "").trim().slice(0, 2000);
             if (current) {
                 await client.query(`
                     UPDATE menu SET name=$1,price=$2,category=$3,available=$4,kot_group_id=$5,nature=$6,unit=$7,
-                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14
-                    WHERE id=$15 AND business_id=$16
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), current.id, businessId]);
+                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14,sku=$15,description=$16,sales_channels=$17
+                    WHERE id=$18 AND business_id=$19
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), sku, description, JSON.stringify(salesChannels), current.id, businessId]);
                 updated += 1;
             } else {
                 await client.query(`
-                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId]);
+                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id,sku,description,sales_channels)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId, sku, description, JSON.stringify(salesChannels)]);
                 imported += 1;
             }
         }
@@ -2311,7 +2792,8 @@ app.post("/api/menu/import", async (req, res) => {
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Menu import error:", error);
-        res.status(500).json({ error: "Menu import failed: " + error.message });
+        const failure = menuSkuErrorResponse(error, "Menu import failed");
+        res.status(failure.status).json({ error: failure.message });
     } finally {
         client.release();
     }
@@ -2333,10 +2815,14 @@ app.put(
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
-            const currentImage = await client.query("SELECT image_url FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
+            const currentImage = await client.query("SELECT image_url,sku,description,sales_channels FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
             if (!currentImage.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Menu item not found" }); }
+            const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
+            const salesChannels = cleanMenuSalesChannels(req.body.salesChannels === undefined ? currentImage.rows[0].sales_channels : req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const imageUrl = cleanMenuImage(req.body.imageUrl, currentImage.rows[0].image_url);
             const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
+            const sku = req.body.sku === undefined ? currentImage.rows[0].sku : cleanMenuSku(req.body.sku) || await generateUniqueMenuSku(client, Number(req.user.business_id));
+            const description = req.body.description === undefined ? currentImage.rows[0].description : String(req.body.description || "").trim().slice(0, 2000);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
@@ -2344,9 +2830,9 @@ app.put(
             const result = await client.query(`
                 UPDATE menu SET name=$1, price=$2, category=$3, kot_group_id=$4,
                     nature=$5, unit=$6, tax_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10,
-                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15
-                WHERE id=$16 AND business_id=$17 RETURNING *
-            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), req.params.id, Number(req.user.business_id)]);
+                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15, sku=$16, description=$17, sales_channels=$18
+                WHERE id=$19 AND business_id=$20 RETURNING *
+            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), sku, description, JSON.stringify(salesChannels), req.params.id, Number(req.user.business_id)]);
             if (!result.rows.length) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: "Menu item not found" });
@@ -2357,7 +2843,8 @@ app.put(
         } catch (e) {
             await client.query('ROLLBACK');
             console.error(e);
-            res.status(500).json({ error: "Failed to update menu item: " + e.message });
+            const failure = menuSkuErrorResponse(e, "Failed to update menu item");
+            res.status(failure.status).json({ error: failure.message });
         } finally { client.release(); }
     }
 );
@@ -2667,10 +3154,14 @@ app.delete(
 // ORDERS
 // =====================================================
 
+function orderActivityActorLabel(req) {
+    return String(req?.user?.display_name || req?.user?.username || "Staff").trim().slice(0, 160) || "Staff";
+}
+
 async function recordOrderActivity(db, orderId, eventType, description, req) {
     const businessId = Number(req?.user?.business_id || 0);
     if (!businessId || !Number(orderId)) return;
-    const actor = String(req?.user?.display_name || req?.user?.username || "Staff").trim().slice(0, 160) || "Staff";
+    const actor = orderActivityActorLabel(req);
     await db.query(`
         INSERT INTO order_activity(order_id,event_type,description,actor,business_id)
         SELECT o.id,$2,$3,$4,$5
@@ -2680,13 +3171,12 @@ async function recordOrderActivity(db, orderId, eventType, description, req) {
 }
 
 async function createKOTForOrder(db, businessId, orderId) {
-    const existing = await db.query("SELECT id FROM kot WHERE order_id=$1 LIMIT 1", [Number(orderId)]);
-    if (existing.rows.length) return 0;
     const items = await db.query(`
-        SELECT oi.menu_id,oi.item_name,oi.quantity,oi.options,m.category,m.kot_group_id
+        SELECT oi.id AS order_item_id,oi.menu_id,oi.item_name,oi.quantity,oi.options,m.category,m.kot_group_id
         FROM order_items oi
         LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2
         WHERE oi.order_id=$1
+          AND NOT EXISTS (SELECT 1 FROM kot k WHERE k.business_id=$2 AND k.order_item_id=oi.id)
         ORDER BY oi.id
     `, [Number(orderId), Number(businessId)]);
     if (!items.rows.length) return 0;
@@ -2698,12 +3188,83 @@ async function createKOTForOrder(db, businessId, orderId) {
         const categoryRoute=groups.rows.find(group=>item.category&&Array.isArray(group.category_names)&&group.category_names.some(category=>String(category).toLowerCase()===String(item.category).toLowerCase()));
         const fallback=activeGroupIds.has(Number(item.kot_group_id))?Number(item.kot_group_id):null;
         const groupId=Number(itemRoute?.id||categoryRoute?.id||fallback)||null;
-        const offset=index*6;
-        values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]));
-        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb)`;
+        const offset=index*7;
+        values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]),Number(item.order_item_id));
+        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7})`;
     });
-    await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options) VALUES ${rows.join(",")}`,values);
+    await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options,order_item_id) VALUES ${rows.join(",")}`,values);
     return items.rows.length;
+}
+
+async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, settings, discountValue, serviceChargeValue, channelKey = null) {
+    if (!Array.isArray(sourceItems) || !sourceItems.length) throw new Error("At least one order item is required.");
+    const items = sourceItems.map(source => {
+        const menuId = Number(source?.menuId ?? source?.menu_id ?? source?.id);
+        const quantity = Number(source?.quantity);
+        const variantId = Number(source?.variantId ?? source?.variant_id) || null;
+        if (!Number.isInteger(menuId) || menuId <= 0 || !Number.isInteger(quantity) || quantity <= 0 || quantity > 999 ||
+            (variantId !== null && (!Number.isInteger(variantId) || variantId <= 0))) {
+            throw new Error("Invalid order item information.");
+        }
+        return { source, menuId, variantId, quantity, options: cleanOrderOptions(source?.options) };
+    });
+    const menuIds = [...new Set(items.map(item => item.menuId))];
+    const menuRows = await db.query(`
+        SELECT id,name,price,channel_prices,sales_channels,unit,tax_rate,tax_mode,category,kot_group_id,option_set_ids
+        FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE
+    `, [Number(businessId), menuIds]);
+    const menuById = new Map(menuRows.rows.map(row => [Number(row.id), row]));
+    if (menuById.size !== menuIds.length) throw new Error("One of the menu items is no longer available for this business.");
+    const variantIds = [...new Set(items.map(item => item.variantId).filter(Boolean))];
+    const variantRows = variantIds.length ? await db.query(`
+        SELECT id,menu_id,name,price,channel_prices,unit
+        FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE
+    `, [Number(businessId), variantIds]) : { rows: [] };
+    const variantsById = new Map(variantRows.rows.map(row => [Number(row.id), row]));
+    const saleChannel = resolveSaleChannel(settings, channelKey || defaultSaleChannelForOrderType(settings, orderType), orderType);
+    const channel = saleChannel.key;
+    for (const item of items) {
+        const menu = menuById.get(item.menuId);
+        assertMenuItemAvailableOnChannel(menu, settings, channel);
+        const variant = item.variantId ? variantsById.get(item.variantId) : null;
+        if (item.variantId && (!variant || Number(variant.menu_id) !== item.menuId)) throw new Error("One of the selected item sizes is no longer available.");
+        const menuPrices = menu.channel_prices && typeof menu.channel_prices === "object" ? menu.channel_prices : {};
+        const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
+        const basePrice = Number(variant ? (variantPrices[channel] ?? variant.price) : (menuPrices[channel] ?? menu.price));
+        if (!Number.isFinite(basePrice) || basePrice < 0) throw new Error("One of the menu prices is invalid.");
+        const optionData = await normalizeOrderItemOptions(db, businessId, menu, item.options);
+        item.name = String(menu.name || "Item") + (variant?.name ? ` - ${variant.name}` : "");
+        item.price = basePrice + optionData.addOnPrice;
+        item.unit = variant?.unit || menu.unit || "ea";
+        item.taxRate = settings.gstCalculationEnabled === false ? 0 : Math.max(0, Number(menu.tax_rate || 0));
+        item.taxMode = menu.tax_mode === "inclusive" ? "inclusive" : "exclusive";
+        item.options = optionData.options;
+        item.kotGroupId = Number(menu.kot_group_id) || null;
+        item.category = String(menu.category || "");
+    }
+    const lineNets = items.map(item => {
+        const gross = item.price * item.quantity;
+        return item.taxMode === "inclusive" && item.taxRate > 0 ? gross / (1 + item.taxRate / 100) : gross;
+    });
+    const subtotal = Math.round(lineNets.reduce((sum, value) => sum + value, 0) * 100) / 100;
+    const discount = discountValue === undefined || discountValue === null ? 0 : Number(discountValue);
+    const serviceCharge = serviceChargeValue === undefined || serviceChargeValue === null ? 0 : Number(serviceChargeValue);
+    if (!Number.isFinite(discount) || discount < 0 || discount > subtotal + 0.01) throw new Error("Discount must be between 0 and the order subtotal.");
+    if (!Number.isFinite(serviceCharge) || serviceCharge < 0) throw new Error("Service charge is invalid.");
+    let discountRemaining = Math.min(discount, subtotal);
+    let discountAssigned = 0;
+    let gst = 0;
+    items.forEach((item, index) => {
+        const lineDiscount = index === items.length - 1
+            ? Math.min(lineNets[index], discountRemaining)
+            : Math.min(lineNets[index], subtotal > 0 ? discount * lineNets[index] / subtotal : 0);
+        discountRemaining = Math.max(0, discountRemaining - lineDiscount);
+        discountAssigned += lineDiscount;
+        gst += Math.max(0, lineNets[index] - lineDiscount) * item.taxRate / 100;
+    });
+    gst = Math.round(gst * 100) / 100;
+    const total = Math.round((Math.max(0, subtotal - discountAssigned) + serviceCharge + gst) * 100) / 100;
+    return { items, subtotal, gst, total, discount, serviceCharge };
 }
 
 app.post(
@@ -2723,12 +3284,9 @@ app.post(
             b.table_number;
         const pax = orderType === "Dine-in" ? Number(b.pax) || 1 : null;
 
-        const subtotal =
-            Number(b.subtotal);
-
-        let gst = Number(b.gst);
-
-        let total = Number(b.total);
+        let subtotal = 0;
+        let gst = 0;
+        let total = 0;
 
         const paymentMethod =
             b.paymentMethod ||
@@ -2748,9 +3306,6 @@ app.post(
 
         if (
             !orderType ||
-            !Number.isFinite(subtotal) ||
-            !Number.isFinite(gst) ||
-            !Number.isFinite(total) ||
             !Array.isArray(items) ||
             !items.length
         ) {
@@ -2786,10 +3341,13 @@ app.post(
             const businessId = Number(req.user.business_id);
             const settingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
             const businessSettings = settingsRow.rows[0]?.settings || {};
+            const saleChannel = resolveSaleChannel(businessSettings, b.saleChannelKey || defaultSaleChannelForOrderType(businessSettings, orderType), orderType);
+            if (b.marketingDealId) assertMarketingDealAvailableForBilling(businessSettings, b.marketingDealId, saleChannel.key);
+            await assertBillingAdjustmentAvailableForChannel(client, businessId, b.discountAdjustmentId, saleChannel.key);
+            await assertBillingAdjustmentAvailableForChannel(client, businessId, b.chargeAdjustmentId, saleChannel.key);
             const createKot = createKotRequested && businessSettings.kotEnabled !== false;
             const orderPrefix = String(businessSettings.orderPrefix || "ORD-").slice(0, 24);
             orderNumber = orderPrefix + Date.now().toString().slice(-8) + crypto.randomBytes(2).toString("hex").toUpperCase();
-            if (businessSettings.gstCalculationEnabled === false) { total = Math.max(0, total - (Number(gst) || 0)); gst = 0; }
 
             if (orderType === "Dine-in") {
 
@@ -2839,39 +3397,76 @@ app.post(
                 const rawMenuId = item.menuId ?? item.menu_id ?? item.id ?? null;
                 const parsedMenuId = Number(rawMenuId);
                 const menuId = Number.isInteger(parsedMenuId) && parsedMenuId > 0 ? parsedMenuId : null;
-                const price = Number(item.price);
                 const quantity = Number(item.quantity);
                 const name = String(item.name || item.item_name || "").trim();
-                if (!name || !Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) {
+                if (!name || !Number.isFinite(quantity) || quantity <= 0 || quantity > 999 || !menuId) {
                     throw new Error("Invalid order item information");
                 }
                 return {
-                    source: item, name, price, quantity, menuId,
+                    source: item, name, price: 0, quantity, menuId,
                     variantId: Number(item.variantId ?? item.variant_id) || null,
                     kotGroupId: Number(item.kotGroupId ?? item.kot_group_id) || null,
                     options: cleanOrderOptions(item.options),
-                    basePrice: Number(item.basePrice ?? item.base_price ?? price)
+                    basePrice: 0
                 };
             });
             const menuIds = [...new Set(normalizedItems.map(item => item.menuId).filter(Boolean))];
             const menuMetadata = menuIds.length ? await client.query(
-                `SELECT id,unit,tax_rate,tax_mode,kot_group_id,category,option_set_ids FROM menu WHERE id=ANY($1::int[]) AND business_id=$2`,
+                `SELECT id,name,price,channel_prices,sales_channels,available,unit,tax_rate,tax_mode,kot_group_id,category,option_set_ids FROM menu WHERE id=ANY($1::int[]) AND business_id=$2 AND available=TRUE`,
                 [menuIds, businessId]
             ) : { rows: [] };
             const menuMetadataById = new Map(menuMetadata.rows.map(item => [Number(item.id), item]));
+            if (menuMetadataById.size !== menuIds.length) throw new Error("One of the menu items is no longer available for this business.");
+            const variantIds = [...new Set(normalizedItems.map(item => item.variantId).filter(Boolean))];
+            const variantRows = variantIds.length ? await client.query(
+                `SELECT id,menu_id,price,channel_prices,unit FROM menu_variants WHERE id=ANY($1::int[]) AND business_id=$2 AND available=TRUE`,
+                [variantIds, businessId]
+            ) : { rows: [] };
+            const variantsById = new Map(variantRows.rows.map(item => [Number(item.id), item]));
+            const priceChannel = saleChannel.key;
             for (const item of normalizedItems) {
-                if (item.menuId && !menuMetadataById.has(item.menuId)) throw new Error("One of the menu items is no longer available for this business.");
-                const metadata = item.menuId ? menuMetadataById.get(item.menuId) : null;
-                item.unit = item.source.unit || metadata?.unit || null;
-                item.taxRate = businessSettings.gstCalculationEnabled === false ? 0 : Number(item.source.taxRate ?? item.source.tax_rate ?? metadata?.tax_rate ?? 5);
-                item.taxMode = item.source.taxMode === "inclusive" || item.source.tax_mode === "inclusive" || (!item.source.taxMode && !item.source.tax_mode && metadata?.tax_mode === "inclusive") ? "inclusive" : "exclusive";
-                item.category = String(metadata?.category || item.source.category || "");
-                const normalizedOptions = await normalizeOrderItemOptions(client, businessId, metadata, item.source.options, item.basePrice, item.price);
+                const metadata = menuMetadataById.get(item.menuId);
+                assertMenuItemAvailableOnChannel(metadata, businessSettings, priceChannel);
+                const variant = item.variantId ? variantsById.get(item.variantId) : null;
+                if (item.variantId && (!variant || Number(variant.menu_id) !== Number(item.menuId))) throw new Error("One of the selected item sizes is no longer available.");
+                const menuPrices = metadata.channel_prices && typeof metadata.channel_prices === "object" ? metadata.channel_prices : {};
+                const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
+                const catalogPrice = Number(variant
+                    ? (variantPrices[priceChannel] ?? variant.price)
+                    : (menuPrices[priceChannel] ?? metadata.price));
+                if (!Number.isFinite(catalogPrice) || catalogPrice < 0) throw new Error("One of the menu prices is invalid.");
+                item.unit = variant?.unit || metadata.unit || null;
+                item.taxRate = businessSettings.gstCalculationEnabled === false ? 0 : Math.max(0, Number(metadata.tax_rate || 0));
+                item.taxMode = metadata.tax_mode === "inclusive" ? "inclusive" : "exclusive";
+                item.category = String(metadata.category || "");
+                item.basePrice = catalogPrice;
+                const normalizedOptions = await normalizeOrderItemOptions(client, businessId, metadata, item.source.options);
                 item.options = normalizedOptions.options;
-                const optionTotal = normalizedOptions.addOnPrice;
-                if (!Number.isFinite(item.basePrice)) item.basePrice = Math.max(0, item.price - optionTotal);
-                item.price = item.basePrice + optionTotal;
+                item.price = item.basePrice + normalizedOptions.addOnPrice;
             }
+            const lineNetAmounts = normalizedItems.map(item => {
+                const gross = item.price * item.quantity;
+                return item.taxMode === "inclusive" && item.taxRate > 0 ? gross / (1 + item.taxRate / 100) : gross;
+            });
+            subtotal = Math.round(lineNetAmounts.reduce((sum, value) => sum + value, 0) * 100) / 100;
+            const discount = Number(b.discount || 0);
+            const serviceCharge = Number(b.serviceCharge || 0);
+            if (!Number.isFinite(discount) || discount < 0 || discount > subtotal + 0.01) throw new Error("Discount must be between 0 and the order subtotal.");
+            if (!Number.isFinite(serviceCharge) || serviceCharge < 0) throw new Error("Service charge is invalid.");
+            let discountRemaining = Math.min(discount, subtotal);
+            let discountAssigned = 0;
+            gst = 0;
+            normalizedItems.forEach((item, index) => {
+                const lineNet = lineNetAmounts[index];
+                const lineDiscount = index === normalizedItems.length - 1
+                    ? Math.min(lineNet, discountRemaining)
+                    : Math.min(lineNet, subtotal > 0 ? discount * lineNet / subtotal : 0);
+                discountRemaining = Math.max(0, discountRemaining - lineDiscount);
+                discountAssigned += lineDiscount;
+                gst += Math.max(0, lineNet - lineDiscount) * item.taxRate / 100;
+            });
+            gst = Math.round(gst * 100) / 100;
+            total = Math.round((Math.max(0, subtotal - discountAssigned) + serviceCharge + gst) * 100) / 100;
             const routeGroups = await client.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [businessId]);
             for (const item of normalizedItems) {
                 const menuGroupId = Number(menuMetadataById.get(item.menuId)?.kot_group_id) || null;
@@ -2911,11 +3506,13 @@ app.post(
                         discount_adjustment_name,
                         charge_adjustment_id,
                         charge_adjustment_name,
-                        pax
+                        pax,
+                        sales_channel_key,
+                        sales_channel_name
                     )
                     VALUES
                     (
-                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14,$15,$16,$17,$18,$19
+                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14,$15,$16,$17,$18,$19,$20,$21
                     )
                     RETURNING *
                     `,
@@ -2928,8 +3525,8 @@ app.post(
                         total,
                         paymentMethod,
                         b.customerId ? Number(b.customerId) : null,
-                        Number(b.discount || 0),
-                        Number(b.serviceCharge || 0),
+                        discount,
+                        serviceCharge,
                         b.notes ? String(b.notes).slice(0, 1000) : null,
                         orderStatus,
                         b.marketingDealId ? String(b.marketingDealId).slice(0, 120) : null,
@@ -2938,7 +3535,9 @@ app.post(
                         b.discountAdjustmentName ? String(b.discountAdjustmentName).slice(0, 120) : null,
                         b.chargeAdjustmentId ? String(b.chargeAdjustmentId).slice(0, 120) : null,
                         b.chargeAdjustmentName ? String(b.chargeAdjustmentName).slice(0, 120) : null,
-                        pax
+                        pax,
+                        saleChannel.key,
+                        saleChannel.label
                     ]
                 );
 
@@ -2959,15 +3558,7 @@ app.post(
                 INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
                 VALUES ${itemRows.join(",")}
             `, itemValues);
-            if (createKot) {
-                const kotValues = [];
-                const kotRows = normalizedItems.map((item, index) => {
-                    const offset = index * 5;
-                    kotValues.push(order.id,item.name,item.quantity,item.kotGroupId,JSON.stringify(item.options));
-                    return `($${offset+1},$${offset+2},$${offset+3},'Pending',$${offset+4},$${offset+5}::jsonb)`;
-                });
-                await client.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options) VALUES ${kotRows.join(",")}`, kotValues);
-            }
+            if (createKot) await createKOTForOrder(client, businessId, order.id);
 
 
             if (orderType === "Dine-in") {
@@ -3042,8 +3633,8 @@ app.post("/api/orders/:id/kot", async (req,res)=>{
     if(!Number.isInteger(orderId)||orderId<=0)return res.status(400).json({error:"Invalid order"});
     const client=await rawPoolConnect();
     try{
-        await applyTenantDbContext(client);
         await client.query("BEGIN");
+        await applyTenantDbContext(client);
         const order=await client.query("SELECT id FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE",[orderId,businessId]);
         if(!order.rows.length){await client.query("ROLLBACK");return res.status(404).json({error:"Order not found"});}
         const settings=await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1",[businessId]);
@@ -3111,7 +3702,7 @@ app.get(
             const result =
                 await pool.query(
                     `
-                    SELECT o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,
+                    SELECT o.*,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,
                            c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
                            c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
                            c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
@@ -3150,7 +3741,15 @@ app.get("/api/orders/:id/activity", async (req, res) => {
             WHERE order_id=$1 AND business_id=$2
             ORDER BY created_at DESC,id DESC
         `, [Number(req.params.id), Number(req.user.business_id)]);
-        res.json({ activities: result.rows });
+        const activities = result.rows.map(activity => {
+            const actor = String(activity.actor || "Staff");
+            const description = String(activity.description || "").replace(
+                /Cancelled by user ID \d+/gi,
+                () => `Cancelled by ${actor}`
+            );
+            return { ...activity, actor, description };
+        });
+        res.json({ activities });
     } catch (error) {
         console.error("Order activity load error:", error);
         res.status(500).json({ error: "Failed to load order activity" });
@@ -3189,6 +3788,17 @@ app.get("/api/orders/:id/payment-summary", async (req,res)=>{
         res.status(500).json({error:'Failed to load payment summary'});
     }
 });
+
+async function nextInvoiceSequenceNumber(client, businessId) {
+    const result = await client.query(`
+        INSERT INTO invoice_number_counters(business_id,next_number)
+        VALUES($1,2)
+        ON CONFLICT(business_id) DO UPDATE
+        SET next_number=invoice_number_counters.next_number+1,updated_at=CURRENT_TIMESTAMP
+        RETURNING next_number-1 AS number
+    `, [Number(businessId)]);
+    return Number(result.rows[0]?.number || 1);
+}
 
 async function settleOrderWithClient(client, req, orderId, businessId, body = {}) {
     const normalizedOrderId = Number(orderId);
@@ -3234,12 +3844,18 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     if (!nonChargeable && (!normalizedPayments.length || normalizedPayments.some(payment => !payment.method || !Number.isFinite(payment.amount) || payment.amount < 0))) {
         throw new Error("Add a valid payment method and amount.");
     }
+    // A full-payment checkout is an intent to settle the current server-side balance.
+    // Reuse the server's freshly recalculated due amount to avoid stale client totals
+    // after an order edit; split and partial payments still require exact amounts.
+    if (!nonChargeable && !keepOpen && String(body.paymentMode || "").toLowerCase() === "full" && normalizedPayments.length === 1) {
+        normalizedPayments[0].amount = remaining;
+    }
     const currentAmount = Math.round(normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
     if (!nonChargeable && keepOpen && (currentAmount <= 0 || currentAmount >= remaining)) {
         throw new Error("A partial payment must be greater than zero and less than the remaining balance.");
     }
     if (!nonChargeable && !keepOpen && Math.abs(currentAmount - remaining) > 0.01) {
-        throw new Error(`Payments must add up to the remaining balance of ${remaining.toFixed(2)}.`);
+        throw new Error(`Payments total ${currentAmount.toFixed(2)}, but the remaining balance is ${remaining.toFixed(2)}. Refresh the payment details or correct the split amounts.`);
     }
 
     let insertedPayments = [];
@@ -3290,7 +3906,7 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         const updatedInvoice = await client.query(`UPDATE invoices SET customer_id=COALESCE($1,customer_id),payment_method=$2,status=$3 WHERE id=$4 RETURNING *`, [customerId, invoiceMethod, status, invoice.id]);
         invoice = updatedInvoice.rows[0];
     } else {
-        const sequence = Number((await client.query(`SELECT nextval('invoice_number_seq') AS number`)).rows[0].number);
+        const sequence = await nextInvoiceSequenceNumber(client, businessId);
         const invoiceNumber = String(checkoutSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequence).padStart(6, "0");
         const createdInvoice = await client.query(`
             INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
@@ -3351,7 +3967,7 @@ app.get("/api/orders/:id", async (req, res) => {
         const orderId = Number(req.params.id);
         const businessId = Number(req.user.business_id);
         const orderQuery = pool.query(
-            "SELECT o.*,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS sale_channel,c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,COALESCE(summary.amount_collected,0) AS amount_collected,COALESCE(summary.allocations,'[]'::json) AS payment_allocations FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN LATERAL (SELECT COALESCE(SUM(t.amount),0) AS amount_collected,COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations FROM (SELECT payment_method,SUM(amount) AS amount FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success' GROUP BY payment_method) t) summary ON TRUE WHERE o.id=$1 AND o.business_id=$2",
+            "SELECT o.*,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,COALESCE(summary.amount_collected,0) AS amount_collected,COALESCE(summary.allocations,'[]'::json) AS payment_allocations FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN LATERAL (SELECT COALESCE(SUM(t.amount),0) AS amount_collected,COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations FROM (SELECT payment_method,SUM(amount) AS amount FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success' GROUP BY payment_method) t) summary ON TRUE WHERE o.id=$1 AND o.business_id=$2",
             [orderId, businessId]
         );
         const itemsQuery = pool.query(
@@ -3397,9 +4013,6 @@ app.put(
                 orderType,
                 tableNumber,
                 pax,
-                subtotal,
-                gst,
-                total,
                 paymentMethod,
                 customerId,
                 discount,
@@ -3410,6 +4023,7 @@ app.put(
                 chargeAdjustmentName,
                 marketingDealId,
                 marketingDealName,
+                saleChannelKey,
                 notes,
                 createKot,
                 items
@@ -3417,16 +4031,6 @@ app.put(
 
             if (!orderType) {
                 throw new Error("Order type is required");
-            }
-
-            if (!Number.isFinite(Number(subtotal)) ||
-                !Number.isFinite(Number(gst)) ||
-                !Number.isFinite(Number(total))) {
-                throw new Error("Invalid order totals");
-            }
-
-            if (!Array.isArray(items) || !items.length) {
-                throw new Error("At least one order item is required");
             }
 
             const existingResult = await client.query(
@@ -3445,19 +4049,28 @@ app.put(
                 throw new Error("Order not found");
             }
             const permissions = req.user.permissions && typeof req.user.permissions === "object" ? req.user.permissions : {};
-            const adminDefaults = req.user.profile_name === "Admin" && req.user.permissions_override === null;
+            const adminDefaults = req.user.is_owner === true && req.user.permissions_override === null;
             const canEditClosed = adminDefaults || permissions["orders.edit_closed"] === true;
             const canEditAfterPrint = adminDefaults || permissions["orders.edit_after_print"] === true;
             const canEditOpen = adminDefaults || permissions["orders.edit_open"] === true || permissions["orders.edit"] === true;
             const orderSettingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
             const orderSettings = orderSettingsRow.rows[0]?.settings || {};
+            const saleChannel = resolveSaleChannel(orderSettings, saleChannelKey || existingOrder.sales_channel_key || defaultSaleChannelForOrderType(orderSettings, orderType), orderType);
+            if (marketingDealId) assertMarketingDealAvailableForBilling(orderSettings, marketingDealId, saleChannel.key);
+            await assertBillingAdjustmentAvailableForChannel(client, Number(req.user.business_id), discountAdjustmentId, saleChannel.key);
+            await assertBillingAdjustmentAvailableForChannel(client, Number(req.user.business_id), chargeAdjustmentId, saleChannel.key);
+            const calculation = await calculatePosOrderTotals(client, Number(req.user.business_id), items, orderType, orderSettings, discount, serviceCharge, saleChannel.key);
+            const normalizedItems = calculation.items;
+            const appliedSubtotal = calculation.subtotal;
+            const appliedGst = calculation.gst;
+            const appliedTotal = calculation.total;
+            const appliedDiscount = calculation.discount;
+            const appliedServiceCharge = calculation.serviceCharge;
             const shouldCreateKot = createKot === true && orderSettings.kotEnabled !== false;
-            const appliedGst = orderSettings.gstCalculationEnabled === false ? 0 : Number(gst);
-            const appliedTotal = orderSettings.gstCalculationEnabled === false ? Math.max(0, Number(total) - Number(gst)) : Number(total);
             if (existingOrder.status === "Cancelled") throw new Error("Cancelled orders cannot be edited.");
             if (existingOrder.status === "Completed") {
                 if (existingOrder.bill_printed_at ? !(canEditAfterPrint || canEditClosed) : !canEditClosed) {
-                    throw Object.assign(new Error(existingOrder.bill_printed_at ? "You do not have permission to edit a printed bill." : "Only an Admin profile with closed-bill editing can edit this closed bill."), { status: 403 });
+                    throw Object.assign(new Error(existingOrder.bill_printed_at ? "You do not have permission to edit a printed bill." : "Only the business owner or a user with closed-bill editing can edit this closed bill."), { status: 403 });
                 }
             } else if (!canEditOpen) {
                 throw Object.assign(new Error("You do not have permission to edit open orders."), { status: 403 });
@@ -3538,20 +4151,22 @@ app.put(
                     discount_adjustment_name = $14,
                     charge_adjustment_id = $15,
                     charge_adjustment_name = $16,
-                    pax = $17
-                WHERE id = $18 AND business_id = $19
+                    pax = $17,
+                    sales_channel_key = $18,
+                    sales_channel_name = $19
+                WHERE id = $20 AND business_id = $21
                 RETURNING *
                 `,
                 [
                     orderType,
                     tableNumber || null,
-                    Number(subtotal),
+                    appliedSubtotal,
                     appliedGst,
                     appliedTotal,
                     paymentMethod || null,
                     customerId ? Number(customerId) : null,
-                    Number(discount || 0),
-                    Number(serviceCharge || 0),
+                    appliedDiscount,
+                    appliedServiceCharge,
                     notes ? String(notes).slice(0, 1000) : null,
                     marketingDealId ? String(marketingDealId).slice(0, 120) : null,
                     marketingDealName ? String(marketingDealName).slice(0, 120) : null,
@@ -3560,6 +4175,8 @@ app.put(
                     chargeAdjustmentId ? String(chargeAdjustmentId).slice(0, 120) : null,
                     chargeAdjustmentName ? String(chargeAdjustmentName).slice(0, 120) : null,
                     orderType === "Dine-in" ? (Number(pax) || 1) : null,
+                    saleChannel.key,
+                    saleChannel.label,
                     orderId,
                     Number(req.user.business_id)
                 ]
@@ -3578,34 +4195,6 @@ app.put(
                 [orderId, Number(req.user.business_id)]
             );
 
-            const normalizedItems = items.map(item => {
-                const rawMenuId = item.menuId ?? item.menu_id ?? item.id ?? null;
-                const parsedMenuId = Number(rawMenuId);
-                const name = String(item.name || item.item_name || "").trim();
-                const price = Number(item.price);
-                const quantity = Number(item.quantity);
-                if (!name || !Number.isFinite(price) || !Number.isFinite(quantity) || quantity <= 0) throw new Error("Invalid order item");
-                return {
-                    name, price, quantity,
-                    menuId: Number.isInteger(parsedMenuId) && parsedMenuId > 0 ? parsedMenuId : null,
-                    variantId: Number(item.variantId ?? item.variant_id) || null,
-                    unit: item.unit || "ea",
-                    taxRate: orderSettings.gstCalculationEnabled === false ? 0 : Number(item.taxRate ?? item.tax_rate ?? 5),
-                    taxMode: item.taxMode === "inclusive" || item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
-                    options: cleanOrderOptions(item.options),
-                    basePrice: Number(item.basePrice ?? item.base_price ?? price),
-                    source: item
-                };
-            });
-            const menuIds = [...new Set(normalizedItems.map(item => item.menuId).filter(Boolean))];
-            const metadataRows = menuIds.length ? await client.query(`SELECT id,option_set_ids FROM menu WHERE id=ANY($1::int[]) AND business_id=$2`, [menuIds, Number(req.user.business_id)]) : { rows: [] };
-            const metadataById = new Map(metadataRows.rows.map(item => [Number(item.id), item]));
-            for (const item of normalizedItems) {
-                const optionData = await normalizeOrderItemOptions(client, Number(req.user.business_id), metadataById.get(item.menuId), item.source.options, item.basePrice, item.price);
-                item.options = optionData.options;
-                if (!Number.isFinite(item.basePrice)) item.basePrice = Math.max(0, item.price - optionData.addOnPrice);
-                item.price = item.basePrice + optionData.addOnPrice;
-            }
             const itemValues = [];
             const itemRows = normalizedItems.map((item, index) => {
                 const offset = index * 11;
@@ -3619,7 +4208,7 @@ app.put(
             if (shouldCreateKot && existingOrder.status !== "Completed") await createKOTForOrder(client, Number(req.user.business_id), orderId);
 
             if (existingOrder.status === "Completed") {
-                await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [Number(subtotal), appliedGst, appliedTotal, orderId]);
+                await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [appliedSubtotal, appliedGst, appliedTotal, orderId]);
             }
 
             /*
@@ -3637,8 +4226,8 @@ app.put(
             }
 
             await recordOrderActivity(client, updatedOrder.id, existingOrder.status === "Completed" ? "Closed bill edited" : "Order updated", `Order details saved. New total: ${appliedTotal.toFixed(2)}.`, req);
-            if (marketingDealId && marketingDealName && Number(discount || 0) > 0) {
-                await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${Number(discount || 0).toFixed(2)}.`, req);
+            if (marketingDealId && marketingDealName && appliedDiscount > 0) {
+                await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${appliedDiscount.toFixed(2)}.`, req);
             }
 
             let checkoutResult = null;
@@ -3719,7 +4308,7 @@ app.put(
 
             if (order.status === "Cancelled") throw Object.assign(new Error("This order has already been cancelled."), { status: 409 });
             const permissions = req.user.permissions && typeof req.user.permissions === "object" ? req.user.permissions : {};
-            const adminDefaults = req.user.profile_name === "Admin" && req.user.permissions_override === null;
+            const adminDefaults = req.user.is_owner === true && req.user.permissions_override === null;
             const closed = order.status === "Completed";
             if (closed && !adminDefaults && permissions["orders.cancel_closed"] !== true) {
                 throw Object.assign(new Error("You do not have permission to cancel a closed order."), { status: 403 });
@@ -3780,7 +4369,7 @@ app.put(
 
             }
 
-            await recordOrderActivity(client, order.id, "Order cancelled", `Reason: ${reason}. Cancelled by user ID ${Number(req.user.id)}${closed ? ". Closed order cancellation." : "."}`, req);
+            await recordOrderActivity(client, order.id, "Order cancelled", `Reason: ${reason}. Cancelled by ${orderActivityActorLabel(req)}${closed ? ". Closed order cancellation." : "."}`, req);
 
             await client.query("COMMIT");
 
@@ -3898,7 +4487,7 @@ app.get(
                     SELECT
                         i.*,
                         o.order_number,
-                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
+                        COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,
                         o.table_number
                     FROM invoices i
 
@@ -3949,7 +4538,7 @@ app.get(
                         i.*,
 
                         o.order_number,
-                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
+                        COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,
                         o.table_number,
 
                         o.created_at AS order_created_at,
@@ -4038,7 +4627,7 @@ app.get(
                         i.*,
 
                         o.order_number,
-                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
+                        COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,
                         o.table_number,
 
                         o.created_at AS order_created_at
@@ -4269,17 +4858,7 @@ app.post(
             // GENERATE INVOICE NUMBER
             // -----------------------------------------
 
-            const sequenceResult =
-                await client.query(
-                    `
-                    SELECT nextval(
-                        'invoice_number_seq'
-                    ) AS number
-                    `
-                );
-
-
-            const sequenceNumber = Number(sequenceResult.rows[0].number);
+            const sequenceNumber = await nextInvoiceSequenceNumber(client, Number(req.user.business_id));
             const invoiceSettings = (await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)])).rows[0]?.settings || {};
             const invoiceNumber = String(invoiceSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequenceNumber).padStart(6, "0");
 
@@ -4491,18 +5070,6 @@ app.post(
                 }
 
 
-                if (
-                    restaurantTable.status !==
-                    "Available"
-                ) {
-
-                    throw new Error(
-                        "Selected table is not available"
-                    );
-
-                }
-
-
                 const conflict =
                     await client.query(
                         `
@@ -4569,22 +5136,6 @@ app.post(
                         Number(req.user.business_id)
                     ]
                 );
-
-
-            if (table) {
-
-                await client.query(
-                    `
-                    UPDATE restaurant_tables
-                    SET status = 'Reserved'
-                    WHERE table_number = $1 AND business_id = $2
-                    `,
-                    [table, Number(req.user.business_id)]
-                );
-
-            }
-
-
             await client.query("COMMIT");
 
 
@@ -4826,7 +5377,9 @@ app.get(
     "/api/kot",
     async (req,res)=>{
         try {
-            const range=req.query.range||"today";
+            const orderId=req.query.orderId===undefined?null:Number(req.query.orderId);
+            if(orderId!==null&&(!Number.isInteger(orderId)||orderId<=0))return res.status(400).json({error:"Invalid order ID"});
+            const range=orderId!==null?"all":(req.query.range||"today");
             const dateRange=range==="all"?{start:"TIMESTAMP '1970-01-01'",end:"CURRENT_TIMESTAMP + INTERVAL '1 day'"}:getReportDateRange(range,req.query.from,req.query.to);
             const result=await pool.query(`
                 SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,kg.printer_id,
@@ -4837,11 +5390,11 @@ app.get(
                 FROM kot k JOIN orders o ON k.order_id=o.id
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id
                 LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=o.business_id
-                WHERE o.business_id=$1
+                WHERE o.business_id=$1 AND ($2::int IS NULL OR o.id=$2::int)
                   AND k.created_at >= ${dateRange.start}
                   AND k.created_at < ${dateRange.end}
                 ORDER BY k.created_at DESC
-            `,[Number(req.user.business_id)]);
+            `,[Number(req.user.business_id),orderId]);
             res.json(result.rows);
         } catch(e){console.error("KOT load error:",e);res.status(500).json({error:"Failed to load KOT"});}
     }
@@ -4913,111 +5466,9 @@ app.get(
 );
 
 
-app.post(
-    "/api/payments",
-    async (req, res) => {
-
-        try {
-
-            const b = req.body;
-
-            const orderId =
-                b.orderId ||
-                b.order_id;
-
-            let orderNumber =
-                b.orderNumber ||
-                b.order_number;
-
-            const amount =
-                Number(b.amount);
-
-            const paymentMethod =
-                b.paymentMethod ||
-                b.payment_method;
-
-
-            if (
-                !orderId ||
-                !Number.isFinite(amount) ||
-                !paymentMethod
-            ) {
-
-                return res.status(400).json({
-                    error:
-                        "Payment information is incomplete"
-                });
-
-            }
-
-            const businessId = Number(req.user.business_id);
-            const order = (await pool.query(
-                `SELECT id,order_number FROM orders WHERE id=$1 AND business_id=$2`,
-                [Number(orderId), businessId]
-            )).rows[0];
-            if (!order) return res.status(404).json({ error: "Order not found" });
-            orderNumber = order.order_number;
-
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO payments
-                    (
-                        order_id,
-                        order_number,
-                        amount,
-                        payment_method,
-                        payment_status,
-                        transaction_id,
-                        business_id
-                    )
-                    VALUES
-                    ($1,$2,$3,$4,$5,$6,$7)
-                    RETURNING *
-                    `,
-                    [
-                        orderId,
-                        orderNumber,
-                        amount,
-                        paymentMethod,
-                        b.paymentStatus ||
-                        "Success",
-                        b.transactionId ||
-                        null,
-                        businessId
-                    ]
-                );
-
-            await recordOrderActivity(
-                pool,
-                Number(orderId),
-                "Payment recorded",
-                `${paymentMethod}: ${Number(amount).toFixed(2)} (${b.paymentStatus || "Success"}).`,
-                req
-            );
-
-            if ((b.paymentStatus || "Success") === "Success") {
-                await awardLoyaltyForPayment(result.rows[0].id, Number(orderId), amount);
-            }
-
-            res.status(201).json({
-                success: true,
-                payment:
-                    result.rows[0]
-            });
-
-        } catch (e) {
-
-            res.status(500).json({
-                error:
-                    "Failed to record payment"
-            });
-
-        }
-
-    }
-);
+app.post("/api/payments", (req, res) => res.status(410).json({
+    error: "Direct payment creation is disabled. Record payments through order settlement."
+}));
 
 
 // =====================================================
@@ -5396,8 +5847,8 @@ app.get(
                             ) value
                         FROM orders
                         WHERE
-                            created_at::date =
-                            CURRENT_DATE
+                            created_at >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
+                        AND created_at < (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
                         AND status =
                             'Completed'
                         AND business_id = $1
@@ -5411,8 +5862,8 @@ app.get(
                             COUNT(*) value
                         FROM orders
                         WHERE
-                            created_at::date =
-                            CURRENT_DATE
+                            created_at >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
+                        AND created_at < (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
                         AND business_id = $1
                         `
                     ),
@@ -5492,6 +5943,11 @@ app.get(
 
 function getReportDateRange(range, from, to) {
 
+    // Order/payment timestamps are UTC wall-clock values. Convert IST calendar
+    // boundaries explicitly so Vercel/Neon server timezone cannot shift a day.
+    const istToday = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date";
+    const utcBoundary = expression => `((${expression})::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')`;
+
     // ==========================================
     // CUSTOM DATE RANGE
     // ==========================================
@@ -5518,11 +5974,8 @@ function getReportDateRange(range, from, to) {
         }
 
         return {
-            start:
-                `'${from}'::date`,
-
-            end:
-                `'${to}'::date + INTERVAL '1 day'`
+            start: utcBoundary(`'${from}'::date`),
+            end: utcBoundary(`'${to}'::date + INTERVAL '1 day'`)
         };
     }
 
@@ -5536,33 +5989,24 @@ function getReportDateRange(range, from, to) {
         case "yesterday":
 
             return {
-                start:
-                    "CURRENT_DATE - INTERVAL '1 day'",
-
-                end:
-                    "CURRENT_DATE"
+                start: utcBoundary(`${istToday} - INTERVAL '1 day'`),
+                end: utcBoundary(istToday)
             };
 
 
         case "week":
 
             return {
-                start:
-                    "date_trunc('week', CURRENT_DATE)",
-
-                end:
-                    "date_trunc('week', CURRENT_DATE) + INTERVAL '1 week'"
+                start: utcBoundary(`date_trunc('week', ${istToday})`),
+                end: utcBoundary(`date_trunc('week', ${istToday}) + INTERVAL '1 week'`)
             };
 
 
         case "month":
 
             return {
-                start:
-                    "date_trunc('month', CURRENT_DATE)",
-
-                end:
-                    "date_trunc('month', CURRENT_DATE) + INTERVAL '1 month'"
+                start: utcBoundary(`date_trunc('month', ${istToday})`),
+                end: utcBoundary(`date_trunc('month', ${istToday}) + INTERVAL '1 month'`)
             };
 
 
@@ -5571,11 +6015,8 @@ function getReportDateRange(range, from, to) {
         default:
 
             return {
-                start:
-                    "CURRENT_DATE",
-
-                end:
-                    "CURRENT_DATE + INTERVAL '1 day'"
+                start: utcBoundary(istToday),
+                end: utcBoundary(`${istToday} + INTERVAL '1 day'`)
             };
 
     }
@@ -5593,13 +6034,13 @@ app.get("/api/reports/sales-audit", async (req, res) => {
         const result = await pool.query(`
             SELECT p.id AS payment_id,p.created_at AS payment_time,p.amount AS transaction_amount,
                    p.payment_method,p.payment_status,p.transaction_id,
-                   o.id AS order_id,o.order_number,CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
+                   o.id AS order_id,o.order_number,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
                    i.invoice_number,
                    COALESCE(paid.amount_collected,0) AS amount_collected,
                    CASE WHEN o.payment_method='Non-chargeable' THEN 0
                         ELSE GREATEST(o.total-COALESCE(paid.amount_collected,0),0) END AS amount_due
             FROM payments p
-            INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id
+            INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
             LEFT JOIN invoices i ON i.order_id=o.id
             LEFT JOIN LATERAL (
                 SELECT SUM(p2.amount) AS amount_collected
@@ -5658,11 +6099,12 @@ app.get("/api/reports/sales-summary", async (req, res) => {
             LEFT JOIN paid_to_date p ON p.order_id=o.id
         `, [businessId]);
         const paymentRows = await pool.query(`
-            SELECT payment_method,COALESCE(SUM(amount),0) AS amount
-            FROM payments
-            WHERE business_id=$1 AND payment_status='Success'
-              AND created_at >= ${dateRange.start} AND created_at < ${dateRange.end}
-            GROUP BY payment_method ORDER BY SUM(amount) DESC,payment_method
+            SELECT p.payment_method,COALESCE(SUM(p.amount),0) AS amount
+            FROM payments p
+            INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
+            WHERE p.business_id=$1 AND p.payment_status='Success'
+              AND p.created_at >= ${dateRange.start} AND p.created_at < ${dateRange.end}
+            GROUP BY p.payment_method ORDER BY SUM(p.amount) DESC,p.payment_method
         `, [businessId]);
         const chargeRows = await pool.query(`
             WITH period_orders AS (
@@ -5756,18 +6198,19 @@ app.get(
                         )
                         AS average_order
 
-                    FROM payments
+                    FROM payments p
+                    INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
 
                     WHERE
                         payment_status =
                         'Success'
 
-                    AND business_id = ${Number(req.user.business_id)}
+                    AND p.business_id = ${Number(req.user.business_id)}
 
-                    AND created_at >=
+                    AND p.created_at >=
                         ${dateRange.start}
 
-                    AND created_at <
+                    AND p.created_at <
                         ${dateRange.end}
                     `
                 );
@@ -5797,6 +6240,7 @@ app.get(
                         SELECT 1
 
                         FROM payments p
+                        INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
 
                         WHERE
                             p.order_id =
@@ -5904,38 +6348,24 @@ app.get(
                 await pool.query(
                     `
                     SELECT
-
-                        payment_method,
-
-                        COUNT(
-                            DISTINCT order_id
-                        ) AS orders,
-
-                        COALESCE(
-                            SUM(amount),
-                            0
-                        ) AS amount
-
-                    FROM payments
-
-                    WHERE
-                        payment_status =
-                        'Success'
-
-                    AND business_id = ${Number(req.user.business_id)}
-
-                    AND created_at >=
-                        ${dateRange.start}
-
-                    AND created_at <
-                        ${dateRange.end}
-
-                    GROUP BY
-                        payment_method
+                        p.payment_method,
+                        COUNT(DISTINCT p.order_id) AS orders,
+                        COALESCE(SUM(p.amount), 0) AS amount
+                    FROM payments p
+                    INNER JOIN orders completed_order
+                        ON completed_order.id = p.order_id
+                        AND completed_order.business_id = p.business_id
+                        AND completed_order.status = 'Completed'
+                    WHERE p.payment_status = 'Success'
+                    AND p.business_id = $1
+                    AND p.created_at >= ${dateRange.start}
+                    AND p.created_at < ${dateRange.end}
+                    GROUP BY p.payment_method
 
                     ORDER BY
                         amount DESC
-                    `
+                    `,
+                    [Number(req.user.business_id)]
                 );
 
 
@@ -6021,6 +6451,7 @@ app.get(
                         SELECT 1
 
                         FROM payments p
+                        INNER JOIN orders completed_order ON completed_order.id=p.order_id AND completed_order.business_id=p.business_id AND completed_order.status='Completed'
 
                         WHERE
                             p.order_id =
@@ -6138,6 +6569,10 @@ app.get(
                         SELECT 1
 
                         FROM payments p
+                        INNER JOIN orders completed_order
+                            ON completed_order.id=p.order_id
+                           AND completed_order.business_id=p.business_id
+                           AND completed_order.status='Completed'
 
                         WHERE
                             p.order_id =
@@ -6228,7 +6663,7 @@ app.get(
                     `
                     SELECT
 
-                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END AS order_type,
+                        COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,
 
                         COUNT(
                             DISTINCT o.id
@@ -6244,6 +6679,7 @@ app.get(
                     INNER JOIN payments p
                         ON p.order_id = o.id
                        AND p.business_id = o.business_id
+                       AND o.status = 'Completed'
 
                     WHERE
                         p.payment_status =
@@ -6259,7 +6695,7 @@ app.get(
                         ${dateRange.end}
 
                     GROUP BY
-                        CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Online ' || o.order_type ELSE o.order_type END
+                        COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END)
 
                     ORDER BY
                         sales DESC
@@ -6331,7 +6767,7 @@ app.get(
                     `
                     SELECT
 
-                        DATE(p.created_at) AS sale_date,
+                        DATE(p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') AS sale_date,
 
                         COUNT(
                             DISTINCT p.order_id
@@ -6343,6 +6779,7 @@ app.get(
                         ) AS sales
 
                     FROM payments p
+                    INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
 
                     WHERE
                         p.payment_status =
@@ -6357,7 +6794,7 @@ app.get(
                         ${dateRange.end}
 
                     GROUP BY
-                        DATE(p.created_at)
+                        DATE(p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
 
                     ORDER BY
                         sale_date ASC
@@ -6451,6 +6888,7 @@ app.get(
                     INNER JOIN payments p
                         ON p.order_id = o.id
                        AND p.business_id = o.business_id
+                       AND o.status = 'Completed'
 
                     WHERE
                         p.payment_status =
@@ -6526,7 +6964,7 @@ app.post('/api/expenses', async (req,res)=>{
     try {
         const businessId=Number(req.user.business_id);
         const amount=Number(req.body.amount); if(!Number.isFinite(amount)||amount<0) return res.status(400).json({error:'Invalid expense amount'});
-        const r=await pool.query(`INSERT INTO expenses(category_id,amount,payment_method,expense_date,note,created_by,business_id) VALUES($1,$2,$3,COALESCE($4::date,CURRENT_DATE),$5,$6,$7) RETURNING *`,[
+        const r=await pool.query(`INSERT INTO expenses(category_id,amount,payment_method,expense_date,note,created_by,business_id) VALUES($1,$2,$3,COALESCE($4::date,(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date),$5,$6,$7) RETURNING *`,[
             req.body.categoryId?Number(req.body.categoryId):null,amount,String(req.body.paymentMethod||'Cash'),req.body.expenseDate||null,req.body.note?String(req.body.note).slice(0,1000):null,req.user?.id||null,businessId]);
         res.status(201).json({success:true,expense:r.rows[0]});
     } catch(e){ console.error(e);res.status(500).json({error:'Failed to save expense'}); }
@@ -6544,10 +6982,11 @@ app.get('/api/expenses/summary', async (req,res)=>{
 // =====================================================
 // LOYALTY
 // =====================================================
-app.get('/api/loyalty/settings', async (_,res)=>{try{res.json(await getLoyaltySettings());}catch(e){res.status(500).json({error:'Failed to load loyalty settings'});}});
+app.get('/api/loyalty/settings', async (req,res)=>{try{res.json(await getLoyaltySettings(Number(req.user.business_id)));}catch(e){res.status(500).json({error:'Failed to load loyalty settings'});}});
 app.put('/api/loyalty/settings', async (req,res)=>{try{
+    const businessId=Number(req.user.business_id);
     const enabled=req.body.enabled!==false, ppc=Math.max(0,Number(req.body.pointsPerCurrency||1)), cpp=Math.max(0,Number(req.body.currencyPerPoint||1)), min=Math.max(0,Math.floor(Number(req.body.minRedeemPoints||100))), welcome=Math.max(0,Math.floor(Number(req.body.welcomePoints||0)));
-    const r=await pool.query(`INSERT INTO loyalty_settings(id,points_per_currency,currency_per_point,min_redeem_points,welcome_points,enabled,updated_at) VALUES(1,$1,$2,$3,$4,$5,CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET points_per_currency=EXCLUDED.points_per_currency,currency_per_point=EXCLUDED.currency_per_point,min_redeem_points=EXCLUDED.min_redeem_points,welcome_points=EXCLUDED.welcome_points,enabled=EXCLUDED.enabled,updated_at=CURRENT_TIMESTAMP RETURNING *`,[ppc,cpp,min,welcome,enabled]); res.json(r.rows[0]);
+    const r=await pool.query(`INSERT INTO loyalty_settings(business_id,points_per_currency,currency_per_point,min_redeem_points,welcome_points,enabled,updated_at) VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP) ON CONFLICT(business_id) DO UPDATE SET points_per_currency=EXCLUDED.points_per_currency,currency_per_point=EXCLUDED.currency_per_point,min_redeem_points=EXCLUDED.min_redeem_points,welcome_points=EXCLUDED.welcome_points,enabled=EXCLUDED.enabled,updated_at=CURRENT_TIMESTAMP RETURNING *`,[businessId,ppc,cpp,min,welcome,enabled]); res.json(r.rows[0]);
 }catch(e){res.status(500).json({error:'Failed to save loyalty settings'});}});
 app.get('/api/loyalty/customers/:customerId', async (req,res)=>{try{
     const customerId=Number(req.params.customerId); const customer=(await pool.query(`SELECT * FROM customers WHERE id=$1`,[customerId])).rows[0]; if(!customer) return res.status(404).json({error:'Customer not found'});
@@ -6604,10 +7043,11 @@ app.post("/api/billing-adjustments", async (req, res) => {
         const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
         const value = Number(req.body.value);
         const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
-        const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
-        const appliesTo = ["all", "dine-in", "takeaway", "delivery", "online"].includes(appliesCanonical)
-            ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
-            : "all";
+        const settingsResult = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const appliesTo = appliesInput.replace(/[\s-]+/g, "_");
+        if (appliesTo !== "all" && !salesChannelsForSettings(settingsResult.rows[0]?.settings || {}).some(channel => channel.key === appliesTo)) {
+            return res.status(400).json({ error: "Choose an active sale channel for this discount or charge." });
+        }
         const description = String(req.body.description || "").trim() || null;
 
         if (!name) return res.status(400).json({ error: "Adjustment name is required" });
@@ -6644,10 +7084,11 @@ app.put("/api/billing-adjustments/:id", async (req, res) => {
         const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
         const value = Number(req.body.value);
         const appliesInput = String(req.body.appliesTo || "all").toLowerCase();
-        const appliesCanonical = appliesInput === "dine_in" ? "dine-in" : appliesInput;
-        const appliesTo = ["all", "dine-in", "takeaway", "delivery", "online"].includes(appliesCanonical)
-            ? (schema.legacy || appliesCanonical !== "dine-in" ? appliesCanonical : "dine_in")
-            : "all";
+        const settingsResult = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const appliesTo = appliesInput.replace(/[\s-]+/g, "_");
+        if (appliesTo !== "all" && !salesChannelsForSettings(settingsResult.rows[0]?.settings || {}).some(channel => channel.key === appliesTo)) {
+            return res.status(400).json({ error: "Choose an active sale channel for this discount or charge." });
+        }
         const description = String(req.body.description || "").trim() || null;
 
         if (!name) return res.status(400).json({ error: "Adjustment name is required" });
@@ -6702,73 +7143,6 @@ app.delete("/api/billing-adjustments/:id", async (req, res) => {
     }
 });
 
-app.get('/api/backup/health', async (_, res) => {
-    const binary = resolvePgDumpBinary();
-    const configured = Boolean(process.env.DB_USER && process.env.DB_NAME && process.env.DB_HOST);
-
-    const pgDumpAvailable = await new Promise(resolve => {
-        execFile(binary, ["--version"], {
-            env: databaseEnv(),
-            windowsHide: true,
-            maxBuffer: 1024 * 1024
-        }, err => resolve(!err));
-    });
-
-    res.json({
-        database: process.env.DB_NAME || "",
-        host: process.env.DB_HOST || "",
-        pgDumpBinary: binary,
-        pgDumpAvailable,
-        ready: configured && pgDumpAvailable,
-        node: process.version
-    });
-});
-
-app.get("/api/backup/export", async (req, res) => {
-    const binary = resolvePgDumpBinary();
-
-    const args = [
-        "--format=plain",
-        "--no-owner",
-        "--no-privileges",
-        "--host",
-        String(process.env.DB_HOST || "localhost"),
-        "--port",
-        String(process.env.DB_PORT || 5432),
-        "--username",
-        String(process.env.DB_USER || ""),
-        String(process.env.DB_NAME || "")
-    ];
-
-    console.log("Starting database backup with:", binary);
-
-    runPgDump(args, databaseEnv(), (err, stdout, stderr) => {
-        if (err) {
-            const detail = String(stderr || err.message || "Unknown pg_dump error").trim();
-            console.error("❌ Backup failed:", detail);
-            return res.status(500).json({ error: `Backup failed: ${detail}` });
-        }
-
-        res.setHeader("Content-Type", "application/sql;charset=utf-8");
-        res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="cafe-pos-backup-${new Date().toISOString().slice(0, 10)}.sql"`
-        );
-        res.send(stdout);
-    });
-});
-
-app.post('/api/backup/restore', async (req,res)=>{
-    try {
-        const sql=String(req.body.sql||''); if(!sql.trim()) return res.status(400).json({error:'Backup SQL is empty'}); if(sql.length>25*1024*1024) return res.status(413).json({error:'Backup exceeds 25MB restore limit'});
-        const temp=path.join(os.tmpdir(),`cafe-pos-restore-${Date.now()}.sql`); fs.writeFileSync(temp,sql,'utf8');
-        const args=['--no-owner','--no-privileges','--host',String(process.env.DB_HOST||'localhost'),'--port',String(process.env.DB_PORT||5432),'--username',String(process.env.DB_USER||''),String(process.env.DB_NAME||'')];
-        await new Promise((resolve,reject)=>execFile(process.env.PSQL_PATH||'psql',args,{env:databaseEnv(),maxBuffer:5*1024*1024},(err,stdout,stderr)=>err?reject(new Error(stderr||err.message)):resolve(stdout)));
-        fs.unlinkSync(temp); res.json({success:true});
-    } catch(e){console.error('Restore failed:',e);res.status(500).json({error:'Restore failed: '+e.message});}
-});
-
-// =====================================================
 // ADVANCED REPORTS
 // =====================================================
 app.get('/api/reports/order-categories', async (req, res) => {
@@ -6829,15 +7203,16 @@ app.get('/api/reports/advanced', async (req, res) => {
         try {
             const result = await pool.query(`
                 SELECT
-                    EXTRACT(HOUR FROM p.created_at)::int AS hour,
+                    EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::int AS hour,
                     COUNT(DISTINCT p.order_id)::int AS orders,
                     COALESCE(SUM(p.amount), 0) AS sales
                 FROM payments p
+                INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
                 WHERE p.payment_status = 'Success'
                   AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
-                GROUP BY EXTRACT(HOUR FROM p.created_at)
+                GROUP BY EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
                 ORDER BY hour
             `);
 
@@ -6853,18 +7228,19 @@ app.get('/api/reports/advanced', async (req, res) => {
         try {
             const result = await pool.query(`
                 SELECT
-                    TO_CHAR(p.created_at, 'Dy') AS day,
-                    EXTRACT(ISODOW FROM p.created_at)::int AS day_no,
+                    TO_CHAR(p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata', 'Dy') AS day,
+                    EXTRACT(ISODOW FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::int AS day_no,
                     COUNT(DISTINCT p.order_id)::int AS orders,
                     COALESCE(SUM(p.amount), 0) AS sales
                 FROM payments p
+                INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
                 WHERE p.payment_status = 'Success'
                   AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
                 GROUP BY
-                    TO_CHAR(p.created_at, 'Dy'),
-                    EXTRACT(ISODOW FROM p.created_at)
+                    TO_CHAR(p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata', 'Dy'),
+                    EXTRACT(ISODOW FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')
                 ORDER BY day_no
             `);
 
@@ -6881,16 +7257,17 @@ app.get('/api/reports/advanced', async (req, res) => {
             const result = await pool.query(`
                 SELECT
                     CASE
-                        WHEN EXTRACT(HOUR FROM p.created_at) >= 5 AND EXTRACT(HOUR FROM p.created_at) < 11 THEN 'Breakfast'
-                        WHEN EXTRACT(HOUR FROM p.created_at) >= 11 AND EXTRACT(HOUR FROM p.created_at) < 15 THEN 'Lunch'
-                        WHEN EXTRACT(HOUR FROM p.created_at) >= 15 AND EXTRACT(HOUR FROM p.created_at) < 18 THEN 'Afternoon'
-                        WHEN EXTRACT(HOUR FROM p.created_at) >= 18 AND EXTRACT(HOUR FROM p.created_at) < 22 THEN 'Evening'
+                        WHEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') >= 5 AND EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') < 11 THEN 'Breakfast'
+                        WHEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') >= 11 AND EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') < 15 THEN 'Lunch'
+                        WHEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') >= 15 AND EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') < 18 THEN 'Afternoon'
+                        WHEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') >= 18 AND EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') < 22 THEN 'Evening'
                         ELSE 'Late night'
                     END AS daypart,
-                    MIN(CASE WHEN EXTRACT(HOUR FROM p.created_at) < 5 THEN EXTRACT(HOUR FROM p.created_at) + 24 ELSE EXTRACT(HOUR FROM p.created_at) END)::int AS sort_hour,
+                    MIN(CASE WHEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') < 5 THEN EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') + 24 ELSE EXTRACT(HOUR FROM p.created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') END)::int AS sort_hour,
                     COUNT(DISTINCT p.order_id)::int AS orders,
                     COALESCE(SUM(p.amount), 0) AS sales
                 FROM payments p
+                INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
                 WHERE p.payment_status = 'Success'
                   AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
@@ -6923,6 +7300,7 @@ app.get('/api/reports/advanced', async (req, res) => {
                    AND p.business_id = o.business_id
                    AND p.payment_status = 'Success'
                 WHERE o.business_id = ${Number(req.user.business_id)}
+                  AND o.status = 'Completed'
                   AND p.business_id = ${Number(req.user.business_id)}
                   AND p.created_at >= ${dr.start}
                   AND p.created_at < ${dr.end}
@@ -6950,6 +7328,7 @@ app.get('/api/reports/advanced', async (req, res) => {
                     COALESCE(o.cancelled_at,o.updated_at,o.created_at) AS cancelled_at,
                     o.cancellation_reason AS reason,
                     o.cancelled_by_user_id,
+                    COALESCE(NULLIF(BTRIM(u.display_name),''),NULLIF(BTRIM(u.username),''),'Unknown user') AS cancelled_by_user_name,
                     o.total AS value
                 FROM orders o
                 LEFT JOIN app_users u ON u.id=o.cancelled_by_user_id AND u.business_id=o.business_id
@@ -7015,8 +7394,8 @@ app.get('/api/reports/advanced', async (req, res) => {
                     COALESCE(SUM(amount), 0) AS amount
                 FROM expenses
                 WHERE business_id = ${Number(req.user.business_id)}
-                  AND expense_date >= (${dr.start})::date
-                  AND expense_date < (${dr.end})::date
+                  AND expense_date >= ((${dr.start})::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date
+                  AND expense_date < ((${dr.end})::timestamp AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date
             `);
 
             expenseTotal = Number(
@@ -7052,19 +7431,18 @@ app.get('/api/reports/advanced', async (req, res) => {
 // DEPLOYMENT / HEALTH
 // =====================================================
 app.get('/api/system/health', async (_,res)=>{
-    try { await pool.query('SELECT 1'); res.json({ok:true,serverTime:new Date().toISOString(),node:process.version,environment:process.env.NODE_ENV||'development',database:process.env.DB_NAME||''}); }
-    catch(e){res.status(500).json({ok:false,error:e.message});}
+    try { await pool.query('SELECT 1'); res.json({ok:true,serverTime:new Date().toISOString(),node:process.version,environment:process.env.NODE_ENV||'development'}); }
+    catch(e){res.status(503).json({ok:false,error:'Database health check failed'});}
 });
 app.get('/api/system/deployment-check', async (_,res)=>{
     const checks=[];
-    checks.push({key:'database',label:'PostgreSQL configuration',ok:Boolean(process.env.DB_USER&&process.env.DB_NAME&&process.env.DB_HOST)});
-    try{await pool.query('SELECT 1');checks.push({key:'dbConnection',label:'Database connection',ok:true});}catch(e){checks.push({key:'dbConnection',label:'Database connection',ok:false,detail:e.message});}
-    checks.push({key:'node',label:'Node.js runtime',ok:parseInt(process.versions.node.split('.')[0],10)>=18,detail:process.version});
-    checks.push({key:'pgDump',label:'pg_dump backup utility',ok:await new Promise(resolve=>execFile(process.env.PG_DUMP_PATH||'pg_dump',['--version'],{env:databaseEnv()},err=>resolve(!err)))});
-    res.json({checks,env:{NODE_ENV:process.env.NODE_ENV||'development',PORT:PORT,DB_HOST:process.env.DB_HOST||'',DB_NAME:process.env.DB_NAME||''}});
-});
+    checks.push({key:'database',label:'PostgreSQL configuration',ok:Boolean(process.env.DATABASE_URL || (process.env.DB_USER&&process.env.DB_NAME&&process.env.DB_HOST))});
+    try{await pool.query('SELECT 1');checks.push({key:'dbConnection',label:'Database connection',ok:true});}catch(e){checks.push({key:'dbConnection',label:'Database connection',ok:false,detail:'Database connection failed'});}
+    const [nodeMajor,nodeMinor]=process.versions.node.split('.').map(Number);
+    checks.push({key:'node',label:'Node.js runtime',ok:nodeMajor>22||(nodeMajor===22&&nodeMinor>=12),detail:`${process.version} · requires Node 22.12+`});
 
-// =====================================================
+    res.json({checks,env:{NODE_ENV:process.env.NODE_ENV||'development',PORT:PORT}});
+});
 // ACCESS / USERS / ROLES / PERMISSIONS
 // =====================================================
 
@@ -7131,7 +7509,8 @@ async function ensureAccessTables() {
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             password_hash TEXT,
             business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL,
-            permissions_override JSONB
+            permissions_override JSONB,
+            is_owner BOOLEAN NOT NULL DEFAULT FALSE
         )
     `);
 
@@ -7139,6 +7518,7 @@ async function ensureAccessTables() {
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_hash TEXT`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions_override JSONB`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE`);
     await pool.query(`
         UPDATE access_profiles
         SET permissions=COALESCE(permissions,'{}'::jsonb)
@@ -7184,6 +7564,29 @@ async function seedBusinessAccessProfiles(businessId, db = pool)  {
     }
 }
 
+async function ensureBusinessOwnerFlags() {
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE`);
+    await pool.query(`
+        WITH ranked_users AS (
+            SELECT id, business_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY business_id
+                       ORDER BY CASE WHEN is_owner THEN 0 ELSE 1 END,
+                                created_at ASC NULLS LAST,
+                                id ASC
+                   ) AS owner_rank
+            FROM app_users
+            WHERE business_id IS NOT NULL
+        )
+        UPDATE app_users u
+        SET is_owner = (ranked_users.owner_rank = 1)
+        FROM ranked_users
+        WHERE u.id = ranked_users.id
+          AND u.is_owner IS DISTINCT FROM (ranked_users.owner_rank = 1)
+    `);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_one_owner_per_business ON app_users(business_id) WHERE is_owner=TRUE`);
+}
+
 app.get("/api/access", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
@@ -7221,6 +7624,7 @@ app.post("/api/access/profiles", async (req, res) => {
         const description = String(req.body.description || "").trim();
         const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : defaultPermissionsServer();
         if (!name) return res.status(400).json({ error: "Profile name is required" });
+        if (name === "Admin") return res.status(400).json({ error: "Admin is a reserved built-in profile name" });
         const result = await pool.query(
             `INSERT INTO access_profiles (name, business_id, description, permissions) VALUES ($1,$2,$3,$4::jsonb) RETURNING *`,
             [name, businessId, description || null, JSON.stringify(permissions)]
@@ -7240,13 +7644,14 @@ app.put("/api/access/profiles/:id", async (req, res) => {
         const current = await pool.query(`SELECT * FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "Access profile not found" });
         const old = current.rows[0];
-        if (old.name === "Admin" && req.user.profile_name === "Admin") {
-            // Admin may adjust permissions, but the profile itself remains protected.
-        }
         const name = String(req.body.name ?? old.name).trim();
         const description = String(req.body.description ?? old.description ?? "").trim();
         const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : old.permissions;
         if (!name) return res.status(400).json({ error: "Profile name is required" });
+        if (old.name === "Admin" && name !== "Admin") return res.status(400).json({ error: "The built-in Admin profile cannot be renamed" });
+        if (old.name !== "Admin" && name === "Admin") return res.status(400).json({ error: "Admin is a reserved built-in profile name" });
+        const ownProfile = await pool.query(`SELECT 1 FROM app_users WHERE id=$1 AND business_id=$2 AND profile_id=$3 LIMIT 1`, [Number(req.user.id), businessId, id]);
+        if (ownProfile.rows.length) return res.status(403).json({ error: "You cannot edit the access profile assigned to your own account" });
         const result = await pool.query(
             `UPDATE access_profiles SET name=$1, description=$2, permissions=$3::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=$4 AND business_id=$5 RETURNING *`,
             [name, description || null, JSON.stringify(permissions), id, businessId]
@@ -7305,7 +7710,7 @@ app.post("/api/access/users", async (req, res) => {
         }
         const result = await pool.query(
             `INSERT INTO app_users (display_name, username, password_hash, profile_id, business_id, active) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
-            [displayName, username, hashPassword(password), profileId, businessId, active]
+            [displayName, username, await hashPassword(password), profileId, businessId, active]
         );
         res.status(201).json({ success: true, user: result.rows[0] });
     } catch (e) {
@@ -7319,9 +7724,11 @@ app.put("/api/access/users/:id", async (req, res) => {
         const id = Number(req.params.id);
         const businessId = Number(req.user.business_id);
         if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid user ID" });
+        if (id === Number(req.user.id)) return res.status(403).json({ error: "You cannot edit your own account from Access management" });
         const current = await pool.query(`SELECT * FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "User not found" });
         const old = current.rows[0];
+        if (old.is_owner) return res.status(403).json({ error: "The business owner account can only be managed by the owner or support staff" });
         const displayName = req.body.displayName === undefined ? old.display_name : String(req.body.displayName).trim();
         const username = req.body.username === undefined ? old.username : String(req.body.username).trim().toLowerCase();
         const profileId = req.body.profileId === undefined ? old.profile_id : (req.body.profileId === null || req.body.profileId === "" ? null : Number(req.body.profileId));
@@ -7337,7 +7744,7 @@ app.put("/api/access/users/:id", async (req, res) => {
             password
                 ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
                 : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
-            password ? [displayName,username,hashPassword(password),profileId,active,id,businessId] : [displayName,username,profileId,active,id,businessId]
+            password ? [displayName,username,await hashPassword(password),profileId,active,id,businessId] : [displayName,username,profileId,active,id,businessId]
         );
         res.json({ success: true, user: result.rows[0] });
     } catch (e) {
@@ -7350,10 +7757,10 @@ app.delete("/api/access/users/:id", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
-        const user = await pool.query(`SELECT id, username, profile_id FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
+        if (id === Number(req.user.id)) return res.status(403).json({ error: "You cannot delete your own account" });
+        const user = await pool.query(`SELECT id, username, profile_id, is_owner FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!user.rows.length) return res.status(404).json({ error: "User not found" });
-        const profile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1 AND business_id=$2`, [user.rows[0].profile_id, businessId]);
-        if (profile.rows[0]?.name === "Admin") return res.status(400).json({ error: "The Admin user cannot be deleted" });
+        if (user.rows[0].is_owner) return res.status(400).json({ error: "The business owner account cannot be deleted" });
         await pool.query(`DELETE FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true });
     } catch (e) {
@@ -7588,6 +7995,7 @@ app.get(
                 [businessId]
             ))]);
             const settings = result.rows[0]?.settings || {};
+            settings.posSalesChannels = salesChannelsForSettings(settings);
             settings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
             res.json(settings);
         } catch (e) {
@@ -7605,6 +8013,8 @@ app.put(
                 ? { ...req.body }
                 : {};
             delete settings.showPoweredByCafePilot;
+            delete settings.marketingDeals;
+            delete settings.menuOptionSets;
             const businessId = Number(req.user.business_id);
 
             const result = await pool.query(
@@ -7612,7 +8022,7 @@ app.put(
                 INSERT INTO app_settings (id, business_id, settings, updated_at)
                 VALUES ($1, $1, $2::jsonb, CURRENT_TIMESTAMP)
                 ON CONFLICT (business_id) DO UPDATE
-                SET settings = EXCLUDED.settings,
+                SET settings = COALESCE(app_settings.settings, '{}'::jsonb) || (EXCLUDED.settings - 'marketingDeals' - 'menuOptionSets'),
                     updated_at = CURRENT_TIMESTAMP
                 RETURNING settings, updated_at
                 `,
@@ -7636,6 +8046,82 @@ app.put(
         }
     }
 );
+
+app.put("/api/settings/sales-channels", async (req, res) => {
+    const businessId = Number(req.user?.business_id);
+    const input = req.body?.channels;
+    if (!Number.isInteger(businessId) || businessId <= 0 || !Array.isArray(input) || input.length < 2 || input.length > 40) {
+        return res.status(400).json({ error: "Provide 2 to 40 sale channels." });
+    }
+    const channels = normalizeSalesChannels(input);
+    const labels = channels.map(channel => channel.label.toLocaleLowerCase());
+    if (channels.length !== input.length || new Set(labels).size !== labels.length ||
+        !channels.some(channel => channel.orderType === "Dine-in") ||
+        !channels.some(channel => channel.orderType === "Takeaway") ||
+        !channels.some(channel => channel.qrMenu)) {
+        return res.status(400).json({ error: "Channel keys and names must be unique. Keep at least one Dine-in channel, one Takeaway channel, and one QR Menu channel." });
+    }
+    const client = await pool.connect();
+    try {
+        await client.query("BEGIN");
+        await applyTenantDbContext(client);
+        const savedResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 FOR UPDATE", [businessId]);
+        const settings = savedResult.rows[0]?.settings || {};
+        const previous = salesChannelsForSettings(settings);
+        const nextKeys = new Set(channels.map(channel => channel.key));
+        const removedKeys = previous.map(channel => channel.key).filter(key => !nextKeys.has(key));
+
+        const deals = Array.isArray(settings.marketingDeals) ? settings.marketingDeals.map(deal => {
+            if (!Array.isArray(deal?.channels) || !deal.channels.length) return deal;
+            const retained = deal.channels.map(value => String(value).toLowerCase()).filter(key => nextKeys.has(key));
+            return { ...deal, channels: retained, active: retained.length ? deal.active !== false : false };
+        }) : settings.marketingDeals;
+        const preferences = {};
+        for (const [name, orderType] of [["newOrder", "Takeaway"], ["tableView", "Dine-in"]]) {
+            const available = channels.filter(channel => channel.orderType === orderType).map(channel => channel.key);
+            const current = settings.posChannelPreferences?.[name] || {};
+            const selected = Array.isArray(current.channels) ? current.channels.filter(key => available.includes(key)) : [];
+            const selectedChannels = selected.length ? [...new Set(selected)] : available;
+            preferences[name] = {
+                channels: selectedChannels,
+                defaultChannel: selectedChannels.includes(current.defaultChannel) ? current.defaultChannel : selectedChannels[0]
+            };
+        }
+        const nextSettings = { ...settings, posSalesChannels: channels, posChannelPreferences: preferences };
+        if (Array.isArray(deals)) nextSettings.marketingDeals = deals;
+        await client.query(`
+            INSERT INTO app_settings(id,business_id,settings,updated_at) VALUES($1,$1,$2::jsonb,CURRENT_TIMESTAMP)
+            ON CONFLICT(business_id) DO UPDATE SET settings=EXCLUDED.settings,updated_at=CURRENT_TIMESTAMP
+        `, [businessId, JSON.stringify(nextSettings)]);
+
+        if (removedKeys.length) {
+            const menuRows = await client.query("SELECT id,sales_channels,channel_prices FROM menu WHERE business_id=$1", [businessId]);
+            for (const item of menuRows.rows) {
+                const available = Array.isArray(item.sales_channels) ? item.sales_channels.map(String).filter(key => nextKeys.has(key)) : channels.map(channel => channel.key);
+                const prices = item.channel_prices && typeof item.channel_prices === "object" ? { ...item.channel_prices } : {};
+                removedKeys.forEach(key => delete prices[key]);
+                await client.query("UPDATE menu SET sales_channels=$1::jsonb,channel_prices=$2::jsonb WHERE id=$3 AND business_id=$4", [JSON.stringify(available), JSON.stringify(prices), item.id, businessId]);
+            }
+            const variants = await client.query("SELECT id,channel_prices FROM menu_variants WHERE business_id=$1", [businessId]);
+            for (const variant of variants.rows) {
+                const prices = variant.channel_prices && typeof variant.channel_prices === "object" ? { ...variant.channel_prices } : {};
+                removedKeys.forEach(key => delete prices[key]);
+                await client.query("UPDATE menu_variants SET channel_prices=$1::jsonb WHERE id=$2 AND business_id=$3", [JSON.stringify(prices), variant.id, businessId]);
+            }
+            await client.query("UPDATE billing_adjustments SET active=FALSE,updated_at=CURRENT_TIMESTAMP WHERE business_id=$1 AND replace(replace(lower(applies_to),'-','_'),' ','_')=ANY($2::text[])", [businessId, removedKeys]);
+        }
+        const qrFallback = channels.find(channel => channel.qrMenu)?.key;
+        await client.query("UPDATE public_menu_settings SET price_channel=$1,updated_at=CURRENT_TIMESTAMP WHERE business_id=$2 AND NOT (price_channel=ANY($3::text[]))", [qrFallback, businessId, channels.filter(channel => channel.qrMenu).map(channel => channel.key)]);
+        await client.query("COMMIT");
+        res.json({ success: true, channels, settings: nextSettings, marketingDeals: Array.isArray(nextSettings.marketingDeals) ? nextSettings.marketingDeals : [] });
+    } catch (error) {
+        await client.query("ROLLBACK");
+        console.error("Save sales channels error:", error);
+        res.status(error.status || 500).json({ error: error.message || "Could not save sale channels." });
+    } finally {
+        client.release();
+    }
+});
 
 function isPrivatePrinterIPv4(value) {
     const ip=String(value||'').trim();
@@ -7673,7 +8159,7 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
     const line='-'.repeat(width);
     const moneyValue=value=>currency+Number(value||0).toFixed(2);
     const rows=[
-        clean(settings.restaurantName||'CAFE POS'),
+        clean(settings.restaurantName||'SLASH POS'),
         clean(settings.address||''),
         settings.phone?'Phone: '+clean(settings.phone):'',
         settings.gstin?'GSTIN: '+clean(settings.gstin):'',
@@ -7779,7 +8265,7 @@ app.post('/api/printers/:id/test',async(req,res)=>{
         const printer=await getTenantPrinter(req,res,req.params.id);
         if(!printer)return;
         if(printer.connection_type==='network'){
-            const body=receiptTextForPrinter({invoiceNumber:'PRINTER TEST',orderNumber:'TEST',items:[],subtotal:0,gst:0,total:0,paymentMethod:'—'},{restaurantName:'Cafe POS Printer Test',footer:'Printer connection successful'},printer.paper_width);
+            const body=receiptTextForPrinter({invoiceNumber:'PRINTER TEST',orderNumber:'TEST',items:[],subtotal:0,gst:0,total:0,paymentMethod:'—'},{restaurantName:'Slash POS Printer Test',footer:'Printer connection successful'},printer.paper_width);
             await sendRawPrinterBytes(printer.host,printer.port,body);
             return res.json({success:true,mode:'network'});
         }
@@ -7795,7 +8281,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
         if(!req.body.receipt||!['object','string'].includes(typeof req.body.receipt))return res.status(400).json({error:'Receipt data is required'});
         const savedSettings=(await pool.query('SELECT settings FROM app_settings WHERE business_id=$1',[Number(req.user.business_id)])).rows[0]?.settings||{};
         const settings={
-            restaurantName:req.user.business_name||'CAFE POS',
+            restaurantName:req.user.business_name||'SLASH POS',
             address:req.user.business_address||'',
             phone:req.user.business_phone||'',
             gstin:req.user.gstin||'',
@@ -7817,7 +8303,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
-    'loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns'
+    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters'
 ];
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices
@@ -7891,7 +8377,7 @@ async function makeNameUniquePerBusiness(tableName, columnName) {
 async function ensureTenantIsolationPhase2A() {
     console.log('🔧 Phase 2A: starting tenant isolation migration');
     if (!systemBusinessId) {
-        const r=await rawPoolQuery(`SELECT id FROM businesses ORDER BY id LIMIT 1`);
+        const r=await runSystemContext(() => pool.query(`SELECT id FROM businesses ORDER BY id LIMIT 1`));
         systemBusinessId=Number(r.rows[0]?.id||0)||null;
     }
     if (!systemBusinessId) throw new Error('No default business exists for tenant migration');
@@ -7918,11 +8404,43 @@ async function ensureTenantIsolationPhase2A() {
             WITH CHECK (current_setting('app.system_mode', true)='on' OR business_id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)`);
     }
 
+    await pool.query(`ALTER TABLE businesses ENABLE ROW LEVEL SECURITY`);
+    await pool.query(`ALTER TABLE businesses FORCE ROW LEVEL SECURITY`);
+    await pool.query(`DROP POLICY IF EXISTS tenant_isolation ON businesses`);
+    await pool.query(`CREATE POLICY tenant_isolation ON businesses
+        USING (current_setting('app.system_mode', true)='on' OR id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)
+        WITH CHECK (current_setting('app.system_mode', true)='on' OR id=NULLIF(current_setting('app.business_id', true),'')::INTEGER)`);
+
+    await dropSingleColumnUniqueConstraints('invoices','invoice_number');
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_business_invoice_number ON invoices(business_id,invoice_number)`);
+    await pool.query(`
+        INSERT INTO invoice_number_counters(business_id,next_number)
+        SELECT b.id,COALESCE(MAX(NULLIF((regexp_match(i.invoice_number,'([0-9]+)$'))[1],'')::BIGINT),0)+1
+        FROM businesses b
+        LEFT JOIN invoices i ON i.business_id=b.id
+        GROUP BY b.id
+        ON CONFLICT(business_id) DO NOTHING
+    `);
+
     await pool.query(`
         INSERT INTO order_activity(order_id,business_id,event_type,description,actor,created_at)
         SELECT o.id,o.business_id,'Order activity started','Order created before activity tracking was enabled.','System',COALESCE(o.created_at,CURRENT_TIMESTAMP)
         FROM orders o
         WHERE NOT EXISTS (SELECT 1 FROM order_activity a WHERE a.order_id=o.id)
+    `);
+
+    // Reservations are time-slot records; they must not leave the physical
+    // table marked unavailable between visits. Arrived tables stay occupied.
+    await pool.query(`
+        UPDATE restaurant_tables t
+        SET status='Available'
+        WHERE t.status='Reserved'
+          AND NOT EXISTS (
+              SELECT 1 FROM orders o
+              WHERE o.business_id=t.business_id
+                AND o.table_number::text=t.table_number::text
+                AND o.status NOT IN ('Completed','Cancelled')
+          )
     `);
 
     await makeNameUniquePerBusiness('kot_groups','name');
@@ -8156,11 +8674,20 @@ async function ensureLicenseTables() {
     await pool.query(`
         CREATE TABLE IF NOT EXISTS support_sessions (
             token VARCHAR(128) PRIMARY KEY,
+            token_hash VARCHAR(64),
             support_user_id INTEGER NOT NULL REFERENCES support_users(id) ON DELETE CASCADE,
             expires_at TIMESTAMPTZ NOT NULL,
             created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    await pool.query(`ALTER TABLE support_sessions ADD COLUMN IF NOT EXISTS token_hash VARCHAR(64)`);
+    const legacySupportSessions = await pool.query(`SELECT token FROM support_sessions WHERE token_hash IS NULL`);
+    for (const row of legacySupportSessions.rows) {
+        const tokenHash = hashSessionToken(row.token);
+        await pool.query(`UPDATE support_sessions SET token=$1,token_hash=$1 WHERE token=$2`, [tokenHash, row.token]);
+    }
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_support_sessions_token_hash ON support_sessions(token_hash)`);
+    await pool.query(`ALTER TABLE support_sessions ALTER COLUMN token_hash SET NOT NULL`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_sessions_expires_at ON support_sessions(expires_at)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_support_sessions_user_id ON support_sessions(support_user_id)`);
 
@@ -8169,7 +8696,7 @@ async function ensureLicenseTables() {
     if (supportUsername && supportPassword) {
         const existing = await pool.query(`SELECT id FROM support_users WHERE username=$1 LIMIT 1`, [supportUsername]);
         if (!existing.rows.length) {
-            await pool.query(`INSERT INTO support_users(username,display_name,password_hash,active) VALUES($1,$2,$3,TRUE)`, [supportUsername, 'Cafe POS Support', hashPassword(supportPassword)]);
+            await pool.query(`INSERT INTO support_users(username,display_name,password_hash,active) VALUES($1,$2,$3,TRUE)`, [supportUsername, 'Slash POS Support', await hashPassword(supportPassword)]);
             console.log(`✅ Support account created for ${supportUsername}`);
         }
     } else {
@@ -8195,7 +8722,7 @@ async function ensureTrialLicensesForBusinesses() {
 }
 
 async function seedAllBusinessAccessProfiles() {
-    const businesses = await rawPoolQuery(`SELECT id FROM businesses ORDER BY id`);
+    const businesses = await runSystemContext(() => pool.query(`SELECT id FROM businesses ORDER BY id`));
     for (const row of businesses.rows) await seedBusinessAccessProfiles(Number(row.id));
 }
 
@@ -8312,22 +8839,22 @@ async function ensurePhase2BAuthIsolation() {
 
     // Clone the canonical built-in profiles to every business now that the
     // composite uniqueness exists. This also makes ON CONFLICT deterministic.
-    const businesses = (await rawPoolQuery(`SELECT id FROM businesses ORDER BY id`)).rows.map(r => Number(r.id));
-    const sourceProfiles = (await rawPoolQuery(`SELECT id,name,description,permissions FROM access_profiles WHERE business_id=$1 ORDER BY id`, [systemBusinessId])).rows;
+    const businesses = (await runSystemContext(() => pool.query(`SELECT id FROM businesses ORDER BY id`))).rows.map(r => Number(r.id));
+    const sourceProfiles = (await runSystemContext(() => pool.query(`SELECT id,name,description,permissions FROM access_profiles WHERE business_id=$1 ORDER BY id`, [systemBusinessId]))).rows;
 
     for (const businessId of businesses) {
         if (businessId === Number(systemBusinessId)) continue;
         for (const profile of sourceProfiles) {
-            await rawPoolQuery(`
+            await runSystemContext(() => pool.query(`
                 INSERT INTO access_profiles(name,business_id,description,permissions)
                 VALUES($1,$2,$3,$4::jsonb)
                 ON CONFLICT (business_id,name) DO NOTHING
-            `, [profile.name,businessId,profile.description,JSON.stringify(profile.permissions || {})]);
+            `, [profile.name,businessId,profile.description,JSON.stringify(profile.permissions || {})]));
         }
         for (const profile of sourceProfiles) {
-            const target = await rawPoolQuery(`SELECT id FROM access_profiles WHERE business_id=$1 AND name=$2 LIMIT 1`, [businessId, profile.name]);
+            const target = await runSystemContext(() => pool.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name=$2 LIMIT 1`, [businessId, profile.name]));
             if (target.rows[0]) {
-                await rawPoolQuery(`UPDATE app_users SET profile_id=$1 WHERE business_id=$2 AND profile_id=$3`, [target.rows[0].id,businessId,profile.id]);
+                await runSystemContext(() => pool.query(`UPDATE app_users SET profile_id=$1 WHERE business_id=$2 AND profile_id=$3`, [target.rows[0].id,businessId,profile.id]));
             }
         }
     }
@@ -8496,8 +9023,9 @@ const SUPPORT_SESSION_TTL_MS = 8 * 60 * 60 * 1000;
 
 async function createSupportSession(userId) {
     const token = crypto.randomBytes(32).toString('hex');
+    const tokenHash = hashSessionToken(token);
     const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
-    await pool.query(`INSERT INTO support_sessions(token,support_user_id,expires_at) VALUES($1,$2,$3)`, [token,userId,expiresAt]);
+    await pool.query(`INSERT INTO support_sessions(token,token_hash,support_user_id,expires_at) VALUES($1,$1,$2,$3)`, [tokenHash,userId,expiresAt]);
     return { token, expiresAt: expiresAt.getTime() };
 }
 
@@ -8507,12 +9035,13 @@ async function getSupportSession(req) {
         : '';
     if (!token) token = getCookie(req, 'cafe_support_session') || '';
     if (!token) return null;
-    const r = await pool.query(`SELECT s.token,s.support_user_id,s.expires_at,u.username,u.display_name FROM support_sessions s JOIN support_users u ON u.id=s.support_user_id WHERE s.token=$1 LIMIT 1`, [token]);
+    const tokenHash = hashSessionToken(token);
+    const r = await pool.query(`SELECT s.token_hash AS token,s.support_user_id,s.expires_at,u.username,u.display_name FROM support_sessions s JOIN support_users u ON u.id=s.support_user_id WHERE s.token_hash=$1 LIMIT 1`, [tokenHash]);
     const row = r.rows[0];
     if (!row) return null;
     const expiresAt = new Date(row.expires_at).getTime();
     if (expiresAt < Date.now()) {
-        await pool.query(`DELETE FROM support_sessions WHERE token=$1`, [token]);
+        await pool.query(`DELETE FROM support_sessions WHERE token_hash=$1`, [tokenHash]);
         return null;
     }
     return row;
@@ -8534,17 +9063,23 @@ app.post('/api/support/login', async (req,res)=>{
         const username=String(req.body.username||'').trim().toLowerCase();
         const password=String(req.body.password||'');
         if(!username||!password) return res.status(400).json({error:'Support username and password are required'});
+        if(password.length>1024) return res.status(400).json({error:'Password must be 1024 characters or fewer'});
+        const identityKey=loginIdentityKey('support',0,username);
+        const existingLockout=await getLoginLockout(identityKey);
+        if(existingLockout){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((existingLockout-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}
         const r=await pool.query(`SELECT id,username,display_name,password_hash,active FROM support_users WHERE LOWER(username)=$1 LIMIT 1`,[username]);
         const user=r.rows[0];
-        if(!user||!user.active||!verifyPassword(password,user.password_hash)) return res.status(401).json({error:'Invalid support credentials'});
+        const passwordValid=user?.active?await verifyPassword(password,user.password_hash):false;
+        if(!passwordValid){const lockedUntil=await recordFailedLogin(identityKey);if(lockedUntil){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((lockedUntil-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}return res.status(401).json({error:'Invalid support credentials'});}
+        await clearLoginFailures(identityKey);
         const session=await createSupportSession(user.id);
         setCookie(res,'cafe_support_session',session.token,{maxAge:Math.floor(SUPPORT_SESSION_TTL_MS/1000),httpOnly:true,sameSite:'Lax',secure:true});
-        res.json({success:true,token:session.token,user:{id:user.id,username:user.username,displayName:user.display_name},expiresAt:session.expiresAt});
+        res.json({success:true,user:{id:user.id,username:user.username,displayName:user.display_name},expiresAt:session.expiresAt});
     }catch(e){console.error('Support login error:',e);res.status(500).json({error:'Support login failed'});}
 });
 
 app.post('/api/support/logout', supportAuth, async(req,res)=>{
-    try { await pool.query(`DELETE FROM support_sessions WHERE token=$1`,[req.supportUser.token]); clearCookie(res,'cafe_support_session'); res.json({success:true}); }
+    try { await pool.query(`DELETE FROM support_sessions WHERE token_hash=$1`,[req.supportUser.token]); clearCookie(res,'cafe_support_session'); res.json({success:true}); }
     catch(e){res.status(500).json({error:'Support logout failed'});}
 });
 
@@ -8595,7 +9130,7 @@ app.patch('/api/support/businesses/:id/branding', supportAuth, async(req,res)=>{
         const businessId=Number(req.params.id);
         const show=req.body?.showPoweredByCafePilot;
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
-        if(typeof show!=='boolean')return res.status(400).json({error:'Choose whether Cafe Pilot branding should be shown.'});
+        if(typeof show!=='boolean')return res.status(400).json({error:'Choose whether Slash branding should be shown.'});
         const result=await runSystemContext(()=>pool.query(
             "INSERT INTO support_business_branding(business_id,show_powered_by_cafe_pilot,updated_at) SELECT id,$2,CURRENT_TIMESTAMP FROM businesses WHERE id=$1 ON CONFLICT (business_id) DO UPDATE SET show_powered_by_cafe_pilot=EXCLUDED.show_powered_by_cafe_pilot,updated_at=CURRENT_TIMESTAMP RETURNING show_powered_by_cafe_pilot",
             [businessId,show]
@@ -8663,7 +9198,7 @@ app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
                 INSERT INTO app_users(display_name,username,password_hash,profile_id,business_id,active,permissions_override)
                 VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
                 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at
-            `,[displayName,username,hashPassword(password),profileId,businessId,active,permissionsOverride===null?null:JSON.stringify(permissionsOverride)]);
+            `,[displayName,username,await hashPassword(password),profileId,businessId,active,permissionsOverride===null?null:JSON.stringify(permissionsOverride)]);
             return result.rows[0];
         });
         if(!user)return res.status(400).json({error:'Permission profile must belong to the selected business'});
@@ -8716,14 +9251,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
             }
             if(assignedProfileName==='Admin'&&permissionsOverride&&(!permissionsOverride['dashboard.view']||!permissionsOverride['access.view']||!permissionsOverride['access.edit']))throw Object.assign(new Error('Admin custom permissions must keep Dashboard and Access management available'),{status:400});
 
-            if(current.profile_name==='Admin'&&current.active&&(!active||profileId!==current.profile_id)){
-                const otherAdmins=Number((await pool.query(`
-                    SELECT COUNT(*)::int AS count
-                    FROM app_users u JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
-                    WHERE u.business_id=$1 AND u.active=TRUE AND p.name='Admin' AND u.id<>$2
-                `,[businessId,userId])).rows[0]?.count||0);
-                if(otherAdmins===0)throw Object.assign(new Error('This is the last active Admin user for this business'),{status:400});
-            }
+            if(current.is_owner&&(!active||profileId!==current.profile_id))throw Object.assign(new Error('The business owner account must remain active and assigned to its current access profile'),{status:400});
 
             const updated=(await pool.query(`
                 UPDATE app_users
@@ -8732,7 +9260,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
                     permissions_override=$6::jsonb,updated_at=CURRENT_TIMESTAMP
                 WHERE id=$7 AND business_id=$8
                 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at
-            `,[displayName,username,profileId,active,password?hashPassword(password):null,permissionsOverride===null?null:JSON.stringify(permissionsOverride),userId,businessId])).rows[0];
+            `,[displayName,username,profileId,active,password?await hashPassword(password):null,permissionsOverride===null?null:JSON.stringify(permissionsOverride),userId,businessId])).rows[0];
             if(password||!active)await pool.query('DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2',[userId,businessId]);
             return updated;
         });
@@ -8866,15 +9394,16 @@ app.get('/api/license/status', async(req,res)=>{
 async function ensurePerformanceIndexes() {
     const statements = [
         `CREATE INDEX IF NOT EXISTS idx_orders_business_created_at ON orders(business_id, created_at DESC)`,
+        `CREATE INDEX IF NOT EXISTS idx_orders_cancelled_report ON orders(business_id,cancelled_at DESC) WHERE status='Cancelled'`,
         `CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`,
         "CREATE INDEX IF NOT EXISTS idx_payments_order_business_status ON payments(order_id,business_id,payment_status)",
         `CREATE INDEX IF NOT EXISTS idx_customers_business_created_at ON customers(business_id, created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_reservations_business_created_at ON reservations(business_id, created_at DESC)`,
         `CREATE INDEX IF NOT EXISTS idx_kot_business_created_at ON kot(business_id, created_at DESC)`,
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_kot_order_item_unique ON kot(business_id,order_item_id) WHERE order_item_id IS NOT NULL`,
         `CREATE INDEX IF NOT EXISTS idx_payments_business_created_at ON payments(business_id, created_at DESC)`,
-        `CREATE INDEX IF NOT EXISTS idx_menu_business_active ON menu(business_id, active)`,
+        `CREATE INDEX IF NOT EXISTS idx_menu_business_available ON menu(business_id, available)`,
         `CREATE INDEX IF NOT EXISTS idx_menu_categories_business_active ON menu_categories(business_id, active)`,
-        `CREATE INDEX IF NOT EXISTS idx_restaurant_tables_business_active ON restaurant_tables(business_id, active)`,
         `CREATE INDEX IF NOT EXISTS idx_app_sessions_user_business ON app_sessions(user_id, business_id)`,
         `CREATE INDEX IF NOT EXISTS idx_registered_devices_business_status ON registered_devices(business_id, status)`,
         `CREATE INDEX IF NOT EXISTS idx_business_licenses_business_status ON business_licenses(business_id, status)`
@@ -8888,15 +9417,60 @@ async function ensurePerformanceIndexes() {
 // =====================================================
 // START SERVER / DATABASE MIGRATIONS
 // =====================================================
+async function assertSafeRlsDatabaseRole() {
+    const result = await rawPoolQuery("SELECT current_user AS role_name, r.rolsuper, r.rolbypassrls FROM pg_roles r WHERE r.rolname=current_user LIMIT 1");
+    const role = result.rows[0];
+    if (!role || role.rolsuper || role.rolbypassrls) {
+        throw new Error('The application database role must not have SUPERUSER or BYPASSRLS privileges; use a restricted runtime role.');
+    }
+}
+
+async function verifyTenantRlsPolicies() {
+    const ownerColumn = await rawPoolQuery(`
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='app_users' AND column_name='is_owner'
+        LIMIT 1
+    `);
+    if (!ownerColumn.rows.length) throw new Error('The is_owner security migration is missing; run the database migration before serving requests.');
+    const requiredTables = [...TENANT_TABLES_PHASE_2A, 'businesses', 'app_users', 'access_profiles', 'business_licenses', 'registered_devices', 'device_registration_keys'];
+    const result = await rawPoolQuery(
+        `WITH required(relname) AS (SELECT unnest($1::text[]))
+         SELECT r.relname
+         FROM required r
+         LEFT JOIN pg_class c ON c.relname=r.relname AND c.relnamespace='public'::regnamespace AND c.relkind IN ('r','p')
+         LEFT JOIN pg_policies p ON p.schemaname='public' AND p.tablename=r.relname AND p.policyname='tenant_isolation'
+         WHERE c.oid IS NULL OR NOT c.relrowsecurity OR NOT c.relforcerowsecurity
+            OR p.policyname IS NULL OR p.qual IS NULL OR p.with_check IS NULL
+            OR POSITION('app.business_id' IN p.qual)=0 OR POSITION('app.system_mode' IN p.qual)=0
+            OR POSITION('app.business_id' IN p.with_check)=0 OR POSITION('app.system_mode' IN p.with_check)=0
+         ORDER BY r.relname`,
+        [requiredTables]
+    );
+    if (result.rows.length) {
+        throw new Error('Tenant RLS is missing or not forced for: ' + result.rows.map(row => row.relname).join(', '));
+    }
+}
 async function startServer() {
 
     try {
 
+        // System context is allowed only while the one-off schema migration runs.
+        tenantSystemMode = true;
+
         console.log('🚀 Phase 2A startup: initializing database');
+        await assertSafeRlsDatabaseRole();
+        console.log('✅ Application database role is not SUPERUSER/BYPASSRLS');
+        await rawPoolQuery(`CREATE TABLE IF NOT EXISTS api_rate_limits (
+            bucket_key VARCHAR(64) PRIMARY KEY,
+            scope VARCHAR(80) NOT NULL,
+            window_started_at TIMESTAMPTZ NOT NULL,
+            hit_count INTEGER NOT NULL DEFAULT 0
+        )`);
+        await ensureLoginAttemptTable();
         console.log('1/7 ensureBusinessTable');
         await ensureBusinessTable();
         console.log('✅ ensureBusinessTable complete');
-        const systemBusiness = await rawPoolQuery(`SELECT id FROM businesses ORDER BY id LIMIT 1`);
+        const systemBusiness = await runSystemContext(() => pool.query(`SELECT id FROM businesses ORDER BY id LIMIT 1`));
         systemBusinessId = Number(systemBusiness.rows[0]?.id || 0) || null;
         if (!systemBusinessId) throw new Error("No business exists after business initialization");
 
@@ -8919,6 +9493,8 @@ async function startServer() {
         console.log('7/10 ensurePhase2BAuthIsolation');
         await ensurePhase2BAuthIsolation();
         console.log('✅ ensurePhase2BAuthIsolation complete');
+        await ensureBusinessOwnerFlags();
+        console.log('✅ Business owner flags initialized');
         console.log('7b/10 ensurePerformanceIndexes');
         await ensurePerformanceIndexes();
         console.log('✅ ensurePerformanceIndexes complete');
@@ -8928,6 +9504,8 @@ async function startServer() {
         console.log('9/10 ensureSessionTable');
         await ensureSessionTable();
         console.log('✅ ensureSessionTable complete');
+        await verifyTenantRlsPolicies();
+        console.log('✅ Required tenant tables have forced RLS policies');
 
         tenantSystemMode = false;
 
@@ -8936,7 +9514,7 @@ async function startServer() {
             PORT,
             () =>
                 console.log(
-                    `🚀 Cafe POS server running on http://localhost:${PORT}`
+                    `🚀 Slash POS server running on http://localhost:${PORT}`
                 )
         );
        } else if (process.env.MIGRATE_ONLY === 'true') {
@@ -8964,6 +9542,15 @@ const shouldRunStartupMigrations =
     !process.env.VERCEL || String(process.env.RUN_DB_MIGRATIONS || '').toLowerCase() === 'true';
 
 const startupPromise = shouldRunStartupMigrations ? startServer() : Promise.resolve();
+const runtimeRlsVerification = process.env.VERCEL && !shouldRunStartupMigrations
+    ? assertSafeRlsDatabaseRole()
+        .then(() => verifyTenantRlsPolicies())
+        .then(async () => {
+            try { await ensureLoginAttemptTable(); }
+            catch (error) { persistentPublicRateLimitAvailable = false; persistentLoginLockoutAvailable = false; console.warn('Persistent rate limits or login lockout table unavailable; using process-local fallbacks:', error.message); }
+            tenantSystemMode = false;
+        })
+    : Promise.resolve();
 
 if (process.env.VERCEL) {
     if (shouldRunStartupMigrations) {
@@ -8973,7 +9560,13 @@ if (process.env.VERCEL) {
     }
 
     module.exports = async function handler(req, res) {
-        await startupPromise;
+        try {
+            await startupPromise;
+            await runtimeRlsVerification;
+        } catch (error) {
+            console.error('Runtime tenant security verification failed:', error.message);
+            return res.status(503).json({ error: 'Database security configuration is incomplete. Apply the tenant migrations and use a role without BYPASSRLS.' });
+        }
         return app(req, res);
     };
 }

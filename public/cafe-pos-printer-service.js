@@ -1,4 +1,4 @@
-// Cafe POS Windows Printer Service
+// Slash POS Windows Printer Service
 // Run on the Windows PC that has the printers installed:
 //   node cafe-pos-printer-service.js
 // The web POS calls http://127.0.0.1:18181
@@ -108,7 +108,7 @@ public class RawPrinterHelper {
         IntPtr h;
         if(!OpenPrinter(printer, out h, IntPtr.Zero)) throw new Exception("Could not open printer. Windows error: " + Marshal.GetLastWin32Error());
         try {
-            DOCINFO di = new DOCINFO(); di.pDocName = "Cafe POS Receipt"; di.pDataType = "RAW";
+            DOCINFO di = new DOCINFO(); di.pDocName = "Slash POS Receipt"; di.pDataType = "RAW";
             if(!StartDocPrinter(h, 1, di)) throw new Exception("StartDocPrinter failed: " + Marshal.GetLastWin32Error());
             try {
                 if(!StartPagePrinter(h)) throw new Exception("StartPagePrinter failed: " + Marshal.GetLastWin32Error());
@@ -151,7 +151,7 @@ public class CafePosDriverPrinter {
         PrintDocument document = new PrintDocument();
         document.PrinterSettings.PrinterName = printer;
         if (!document.PrinterSettings.IsValid) throw new Exception("Windows could not find that printer (error 1801).");
-        document.DocumentName = "Cafe POS Print Job";
+        document.DocumentName = "Slash POS Print Job";
         document.DefaultPageSettings.Margins = new Margins(35, 35, 35, 35);
         document.PrintController = new StandardPrintController();
         Font font = new Font("Consolas", 10);
@@ -200,7 +200,7 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (req.method === 'GET' && req.url === '/health') {
-      return send(res, 200, { ok: true, service: 'Cafe POS Printer Service', port: PORT });
+      return send(res, 200, { ok: true, service: 'Slash POS Printer Service', port: PORT });
     }
 
     if (req.method === 'GET' && req.url === '/printers') {
@@ -217,7 +217,7 @@ const server = http.createServer(async (req, res) => {
       if (!printer) return send(res, 404, { error: `Windows printer not found: ${printerName}` });
 
       const receipt = req.url === '/test'
-        ? `CAFE POS\nPRINTER TEST\n${printerName}\n${new Date().toLocaleString()}\n\n\n`
+        ? `SLASH POS\nPRINTER TEST\n${printerName}\n${new Date().toLocaleString()}\n\n\n`
         : String(body.receipt || '');
       if (!receipt) return send(res, 400, { error: 'receipt is required.' });
 
@@ -234,6 +234,6 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Cafe POS Printer Service running at http://127.0.0.1:${PORT}`);
+  console.log(`Slash POS Printer Service running at http://127.0.0.1:${PORT}`);
   console.log('Open http://127.0.0.1:18181/printers to verify Windows printer discovery.');
 });

@@ -3,3 +3,4 @@ node_modules/
 *.log
 backups/
 desktop-dist/
+cafe_pos_neon_backup.sql

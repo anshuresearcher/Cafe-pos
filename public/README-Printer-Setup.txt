@@ -1,4 +1,4 @@
-CAFE POS - WINDOWS DIRECT PRINTING
+SLASH POS - WINDOWS DIRECT PRINTING
 
 1. Put these files on the Windows POS computer:
    - cafe-pos-printer-service.js
@@ -12,7 +12,7 @@ CAFE POS - WINDOWS DIRECT PRINTING
    http://127.0.0.1:18181/printers
    You should see JSON containing your Windows-installed printers.
 
-5. In Cafe POS -> Printer:
+5. In Slash POS -> Printer:
    - Connection Type: Local computer printer
    - Refresh
    - Select your Windows printer

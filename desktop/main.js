@@ -106,7 +106,7 @@ async function readUserSettings() {
         const value = JSON.parse(await fs.readFile(path.join(app.getPath("userData"), USER_SETTINGS_FILE), "utf8"));
         if (value.apiServerUrl) apiServerUrl = normalizeApiServer(value.apiServerUrl);
     } catch (error) {
-        if (error.code !== "ENOENT") console.warn("Could not read Cafe POS desktop settings:", error.message);
+        if (error.code !== "ENOENT") console.warn("Could not read Slash POS desktop settings:", error.message);
     }
 }
 
@@ -144,7 +144,7 @@ function createMainWindow() {
         minWidth: 1024,
         minHeight: 700,
         show: false,
-        title: "Cafe Pilot POS",
+        title: "Slash POS",
         icon: path.join(__dirname, "assets", "cafe-pilot-icon.ico"),
         backgroundColor: "#f6f7f9",
         frame: false,
@@ -278,12 +278,12 @@ function makeInvoicePdfHtml(bill = {}, settings = {}) {
         : Number(bill.amountCollected || 0);
     const due = bill.amountDue === undefined ? Math.max(0, Number(bill.total || 0) - collected) : Number(bill.amountDue || 0);
     const itemCount = `${items.length} ${items.length === 1 ? "item" : "items"}`;
-    const brand = clean ? "Order" : (settings.restaurantName || "CAFE POS");
+    const brand = clean ? "Order" : (settings.restaurantName || "SLASH POS");
     const businessDetails = clean ? "" : [settings.address, settings.phone ? `Phone: ${settings.phone}` : "", settings.gstin ? `GSTIN: ${settings.gstin}` : ""].filter(Boolean).map(value => `<p>${escapeHtml(value)}</p>`).join("");
     const details = clean ? "" : `<section class="details">${bill.isOpenOrder ? `<div class="open-order">OPEN ORDER / PROFORMA</div>` : ""}${detailRows}${customer ? `<div><span>Customer</span><strong>${escapeHtml(customer)}</strong></div>` : ""}</section>`;
     const payment = clean ? "" : `<section class="payment"><div><span>Payment</span><strong>${escapeHtml(bill.paymentMethod || "-")}</strong></div>${(Array.isArray(bill.paymentAllocations) ? bill.paymentAllocations : []).map(entry => `<div><span>${escapeHtml(entry?.method || "Payment")}</span><strong>${amount(entry?.amount)}</strong></div>`).join("")}<div><span>Amount Collected</span><strong>${amount(collected)}</strong></div><div><span>Amount Due</span><strong>${amount(due)}</strong></div></section>`;
 
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(bill.invoiceNumber || bill.orderNumber || "Cafe POS Bill")}</title><style>
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(bill.invoiceNumber || bill.orderNumber || "Slash POS Bill")}</title><style>
 @page{size:A4;margin:14mm}*{box-sizing:border-box}body{margin:0;background:#fff;color:#222;font:13px Arial,Helvetica,sans-serif}.bill{width:100%;max-width:548px;margin:0 auto;border:1px solid #e5e7eb;background:#fff}.toolbar{display:flex;align-items:center;min-height:58px;padding:10px 24px;border-bottom:1px solid #e0e2e5;color:#17191c;font-size:20px;font-weight:700}.header{padding:27px 24px 21px;border-bottom:1px solid #dedfe1;text-align:center}.header h1{margin:0;color:#222;font-size:20px;font-weight:400}.header p{margin:4px 0 0;color:#62666c;font-size:12px}.details{display:grid;gap:7px;padding:17px 24px;border-bottom:1px solid #dedfe1}.details>div{display:flex;justify-content:space-between;gap:12px;font-size:12px}.details span{color:#666}.details strong{text-align:right;font-weight:500}.details .open-order{justify-content:center;color:#8a4c00;font-weight:700}.quick{display:flex;justify-content:space-between;margin:0 24px;padding:12px 0;border-bottom:1px solid #dedfe1;color:#30343a;font-size:13px}.items{padding:0 24px}.items table{width:100%;border-collapse:collapse;font-size:13px}.items th,.items td{padding:9px 4px;color:#222;vertical-align:top}.items th{border-bottom:1px solid #e1e2e4;font-size:12px;font-weight:700;text-align:left}.items td:nth-child(2),.items th:nth-child(2){text-align:center}.items td:nth-child(n+3),.items th:nth-child(n+3){text-align:right;white-space:nowrap}.items small{display:block;margin-top:3px;color:#62666c;font-size:11px}.summary{margin:0 24px;padding:10px 0 18px;border-top:1px solid #dedfe1}.summary>div,.payment>div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;color:#50545a;font-size:13px}.summary strong,.payment strong{color:#222;font-weight:500}.summary .total{padding-top:10px;border-top:1px solid #e5e7eb;color:#17191c;font-size:21px}.summary .total strong{font-size:21px;font-weight:500}.payment{margin:0 24px;padding:10px 0;border-top:1px solid #dedfe1}.footer{margin:0 24px;padding:13px 0 20px;border-top:1px solid #dedfe1;color:#555;text-align:center;font-size:12px}@media print{.bill{break-inside:avoid;border-radius:0}}
 </style></head><body><main class="bill"><div class="toolbar">Bill</div><header class="header"><h1>${escapeHtml(brand)}</h1>${businessDetails}</header>${details}<div class="quick"><span>Order</span><span>${itemCount}</span></div><section class="items"><table><thead><tr><th>${clean ? "Name" : "Item"}</th><th>Qty</th><th>${clean ? "Rate" : "Price"}</th><th>${clean ? "Amount" : "Total"}</th></tr></thead><tbody>${itemRows}</tbody></table></section><section class="summary">${summaries}</section>${payment}</main></body></html>`;
 }
@@ -304,7 +304,7 @@ async function saveReceiptPdf(event, payload = {}) {
     const fileName = kind === "test"
         ? `Cafe-POS-Printer-Test-${timestamp}-${uniqueSuffix}.pdf`
         : `${bill.isOpenOrder ? "Proforma" : "Invoice"}${reference ? `-${reference}` : ""}-${timestamp}-${uniqueSuffix}.pdf`;
-    const outputDirectory = path.join(app.getPath("documents"), "Cafe Pilot POS Receipts");
+    const outputDirectory = path.join(app.getPath("documents"), "Slash POS Receipts");
     const outputFile = path.join(outputDirectory, fileName);
     await fs.mkdir(outputDirectory, { recursive: true });
 
@@ -318,7 +318,7 @@ async function saveReceiptPdf(event, payload = {}) {
     pdfWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     try {
         const html = kind === "test"
-            ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(fileName)}</title><style>@page{size:A4;margin:14mm}body{font:13px Arial,Helvetica,sans-serif;color:#222}main{max-width:548px;margin:0 auto;border:1px solid #e5e7eb;padding:24px}h1{font-size:20px;font-weight:400}pre{font:13px/1.5 Consolas,"Courier New",monospace;white-space:pre-wrap}</style></head><body><main><h1>Cafe POS Printer Test</h1><pre>${escapeHtml(receipt)}</pre></main></body></html>`
+            ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(fileName)}</title><style>@page{size:A4;margin:14mm}body{font:13px Arial,Helvetica,sans-serif;color:#222}main{max-width:548px;margin:0 auto;border:1px solid #e5e7eb;padding:24px}h1{font-size:20px;font-weight:400}pre{font:13px/1.5 Consolas,"Courier New",monospace;white-space:pre-wrap}</style></head><body><main><h1>Slash POS Printer Test</h1><pre>${escapeHtml(receipt)}</pre></main></body></html>`
             : makeInvoicePdfHtml(bill, payload.settings || {});
         await pdfWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
         const pdf = await pdfWindow.webContents.printToPDF({ pageSize: "A4", printBackground: true, margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 } });
@@ -343,7 +343,7 @@ function openServerSettings() {
         width: 520,
         height: 400,
         resizable: false,
-        title: "Cafe POS Server Connection",
+        title: "Slash POS Server Connection",
         parent: mainWindow || undefined,
         modal: Boolean(mainWindow),
         autoHideMenuBar: false,
@@ -363,7 +363,7 @@ function openServerSettings() {
 function installMenu() {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
         {
-            label: "Cafe POS",
+            label: "Slash POS",
             submenu: [
                 { label: "Connect to POS server…", click: openServerSettings },
                 { type: "separator" },
@@ -406,7 +406,7 @@ ipcMain.handle("desktop:open-server-settings", event => {
 ipcMain.handle("desktop:save-receipt-pdf", async (event, payload) => {
     try { return await saveReceiptPdf(event, payload); }
     catch (error) {
-        console.error("Could not save Cafe POS invoice PDF:", error.message);
+        console.error("Could not save Slash POS invoice PDF:", error.message);
         return { success: false, error: error.message || "Could not save the invoice PDF." };
     }
 });

@@ -194,4 +194,4 @@ for (const image of iconImages) {
 
 fs.writeFileSync(path.join(outputDirectory, "cafe-pilot-icon.ico"), Buffer.concat([header, ...entries, ...iconImages.map(image => image.png)]));
 fs.writeFileSync(path.join(outputDirectory, "cafe-pilot-icon.png"), encodePng(512, renderPixels(512)));
-console.log("Generated Cafe Pilot icon: 7 ICO sizes (16–256 px) and 512 px PNG preview.");
+console.log("Generated Slash icon: 7 ICO sizes (16–256 px) and 512 px PNG preview.");

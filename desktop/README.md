@@ -1,6 +1,6 @@
-# Cafe Pilot POS for Windows
+# Slash POS for Windows
 
-The desktop app wraps the existing Cafe POS interface in a resizable Electron window with a custom Cafe Pilot title bar and native minimize, maximize/restore, and close controls. It connects to the existing POS API and database; database credentials are not copied to the Windows computer.
+The desktop app wraps the existing Slash POS interface in a resizable Electron window with a custom Slash title bar and native minimize, maximize/restore, and close controls. It connects to the existing POS API and database; database credentials are not copied to the Windows computer.
 
 ## Run the desktop app during development
 

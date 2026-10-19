@@ -8,7 +8,7 @@
     <meta name="viewport"
         content="width=device-width, initial-scale=1.0">
 
-    <title>Cafe Pilot POS</title>
+    <title>Slash</title>
 
     <link rel="stylesheet"
         href="style.css">
@@ -135,10 +135,9 @@
 
 
 <body>
-<div id="desktopTitlebar" class="desktop-titlebar" hidden aria-label="Cafe Pilot desktop window controls">
+<div id="desktopTitlebar" class="desktop-titlebar" hidden aria-label="Slash desktop window controls">
     <div class="desktop-titlebar-brand" aria-label="Drag to move the window">
-        <span class="desktop-titlebar-mark" aria-hidden="true">☕</span>
-        <span>Cafe Pilot</span>
+        <span>Slash</span>
     </div>
     <div class="desktop-titlebar-controls">
         <button type="button" id="desktopServerSettings" class="desktop-titlebar-button desktop-settings-button" aria-label="Connect to POS server" title="Connect to POS server">
@@ -173,10 +172,10 @@
     </section>
 </div>
 <div id="loginScreen" class="login-screen">
-    <aside class="login-showcase" aria-label="Cafe Pilot point of sale">
+    <aside class="login-showcase" aria-label="Slash point of sale">
         <div class="login-brand-top">
             <span class="login-brand-icon" aria-hidden="true">☕</span>
-            <span class="login-brand-name"><strong>Cafe Pilot</strong><small>POINT OF SALE</small></span>
+            <span class="login-brand-name"><strong>Slash</strong><small>POINT OF SALE</small></span>
         </div>
         <div class="login-brand-copy">
             <p class="login-brand-kicker">A BETTER FLOW FOR YOUR CAFE</p>
@@ -196,7 +195,7 @@
         <div id="loginView">
         <div class="login-logo">☕</div>
         <h1>Welcome back</h1>
-        <p>Sign in to your Cafe Pilot workspace.</p>
+        <p>Sign in to your Slash workspace.</p>
         <div id="loginBusinessWelcome" class="login-business-welcome" hidden>
             <span id="loginBusinessWelcomeCopy">Welcome back to</span>
             <strong id="loginBusinessName"></strong>
@@ -298,7 +297,7 @@
 
             <div class="device-registration-note">
                 This registration key can be used only once. After registration,
-                use the normal Cafe POS username and password to log in.
+                use the normal Slash POS username and password to log in.
             </div>
 
             <button type="button" class="device-registration-secondary" onclick="showLoginViewFromDeviceRegistration()">
@@ -317,7 +316,7 @@
 
         <div class="billing-brand-row">
             <button type="button" class="billing-menu-toggle" aria-label="Open app menu" onclick="document.body.classList.toggle('billing-nav-open')">☰</button>
-            <h2><span class="brand-default">☕ Cafe POS</span><span class="billing-brand-label">Cafe Pilot</span></h2>
+            <h2><span class="brand-default">Slash</span><span class="billing-brand-label">Slash</span></h2>
         </div>
         <nav class="billing-flow-nav" aria-label="Point of sale">
             <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">MY ORDERS</button>
@@ -326,10 +325,10 @@
         </nav>
         <nav class="app-module-nav" aria-label="App modules">
             <div class="module-drawer-header">
-                <strong>Cafe Pilot</strong>
+                <strong>Slash</strong>
                 <button type="button" class="module-drawer-close" aria-label="Close app menu" onclick="document.body.classList.remove('billing-nav-open')">&times;</button>
             </div>
-            <div class="module-drawer-caption">CAFE PILOT SUPPORT</div>
+            <div class="module-drawer-caption">SLASH SUPPORT</div>
 
 
         <button
@@ -619,8 +618,6 @@
                         <span class="billing-order-badge" id="billingOrderState">New order</span>
                     </div>
                     <div class="billing-top-actions">
-                        <button type="button" id="dineBtn" class="type-btn" onclick="setOrderType('Dine-in')">🍽️ Dine-in</button>
-                        <button type="button" id="takeBtn" class="type-btn selected" onclick="setOrderType('Takeaway')">🛍️ Takeaway</button>
                         <label class="pos-sale-channel"><span>Sale channel</span><select id="billingSaleChannel" onchange="selectBillingSaleChannel(this.value)" aria-label="Sale channel"></select></label>
                         <div class="billing-search-wrap">
                             <span>🔎</span><input id="billingMenuSearch" type="search" placeholder="Search menu items…" oninput="filterBillingMenu(this.value)">
@@ -636,13 +633,13 @@
 
                     <section class="billing-menu-panel">
                         <div class="billing-section-heading">
-                            <div><span class="eyebrow">ORDER MODE</span><h3 id="billingMenuTitle">Takeaway menu</h3></div>
+                            <div><span class="eyebrow">SALE CHANNEL</span><h3 id="billingMenuTitle">Choose a sale channel</h3></div>
                             
                         </div>
 
                         
 
-                        <div id="takeawayMenuHint" class="billing-inline-hint">Takeaway billing is ready — choose items below.</div>
+                        <div id="takeawayMenuHint" class="billing-inline-hint">Choose a sale channel to see its available items.</div>
 
                         <div id="billingMenuGrid" class="menu-grid"></div>
                     </section>
@@ -654,7 +651,7 @@
                         </div>
                         <div class="billing-customer-step-intro">Look up an existing customer or enter details for this order.</div>
                         <div class="billing-cart-header">
-                            <div><span class="eyebrow">CURRENT BILL</span><h3 id="orderType">Takeaway</h3></div>
+                            <div><span class="eyebrow">CURRENT BILL</span><h3 id="orderType">Sale channel</h3></div>
                             <div class="billing-cart-header-actions">
                                 <button type="button" class="billing-customer-open-btn" onclick="openBillingCustomerPanel()" aria-label="Customer information" aria-controls="billingCustomerPanel" title="Customer information" aria-expanded="false">
                                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5Z"/></svg>
@@ -711,6 +708,7 @@
                         <div class="bill modern-bill-card">
                             <div><span>Subtotal</span><span id="subtotal">₹0</span></div>
                             <div><span>GST</span><span id="gst">₹0</span></div>
+                            <div id="billingTaxBreakdown" class="live-tax-breakdown" aria-label="GST calculation details" style="display:none"></div>
                             <div id="billingDiscountRow"><span id="billingDiscountLabel">Discount</span><span id="discountAmount">₹0</span></div>
                             <div id="billingServiceChargeRow"><span id="billingChargeLabel">Service Charge</span><span id="serviceChargeAmount">₹0</span></div>
                             <div id="billingRoundingRow" style="display:none"><span>Rounding</span><span id="billingRoundingAmount">₹0.00</span></div>
@@ -1101,7 +1099,7 @@
             <div class="restaurant-menu-publisher-controls">
               <label class="restaurant-menu-publish-toggle"><input id="publicMenuEnabled" type="checkbox"> Publish QR menu</label>
               <label for="publicMenuPriceChannel">Guest price list</label>
-              <select id="publicMenuPriceChannel"><option value="online">Online</option><option value="dine_in">Dine-in</option><option value="takeaway">Takeaway</option><option value="delivery">Delivery</option></select>
+              <select id="publicMenuPriceChannel"></select>
               <button type="button" class="big-btn" onclick="saveRestaurantMenuSettings()">Save menu settings</button>
             </div>
             <div class="restaurant-menu-publisher-controls restaurant-menu-host-controls"><label for="publicMenuBaseUrl">QR address for phones</label><input id="publicMenuBaseUrl" type="url" placeholder="https://your-cafe-domain.com" oninput="updateRestaurantMenuLinkPreview()"><button type="button" class="table-action-btn" onclick="saveRestaurantMenuSettings()">Save QR address</button></div><div class="restaurant-menu-publisher-controls restaurant-menu-url"><input id="publicMenuUrl" type="url" readonly placeholder="Your guest menu link will appear here"><button type="button" class="table-action-btn" onclick="copyRestaurantMenuUrl()">Copy base link</button></div>
@@ -1512,6 +1510,7 @@
         <div class="modal-header"><div><span class="eyebrow">MARKETING</span><h2 id="marketingDealModalTitle">Create Deal</h2></div><button type="button" onclick="closeMarketingDealForm()" aria-label="Close">✕</button></div>
         <div class="marketing-deal-form-grid">
             <div class="form-group marketing-deal-wide"><label for="marketingDealName">Deal name</label><input id="marketingDealName" maxlength="120" placeholder="e.g. Buy 2 coffees, get 1 free"></div>
+            <div class="form-group marketing-deal-wide"><label for="marketingDealDescription">Deal description <span class="access-muted">(shown on QR menu)</span></label><textarea id="marketingDealDescription" maxlength="240" rows="2" placeholder="Tell guests what this deal includes"></textarea></div>
             <div class="form-group"><label for="marketingDealType">Deal type</label><select id="marketingDealType" onchange="updateMarketingDealFields()"><option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option><option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option></select></div>
             <div class="form-group"><label for="marketingDealCategory">Category</label><select id="marketingDealCategory" onchange="populateMarketingDealOptions({category:this.value})"><option value="">All categories</option></select></div>
             <div class="form-group marketing-deal-wide"><label for="marketingDealItem">Eligible items in selected category (optional)</label><select id="marketingDealItem" multiple size="5"></select><small class="access-muted">Selecting a category limits this list to its items. Leave the category empty to see all items.</small></div>
@@ -1522,10 +1521,14 @@
             <div class="form-group"><label for="marketingDealValue">Deal value</label><input id="marketingDealValue" type="number" min="0" step="0.01" placeholder="0"></div>
             <div class="form-group"><label for="marketingDealStart">Start date</label><input id="marketingDealStart" type="date"></div>
             <div class="form-group"><label for="marketingDealEnd">End date</label><input id="marketingDealEnd" type="date"></div>
+            <fieldset class="marketing-channel-fieldset marketing-deal-wide"><legend>Deal days</legend><div id="marketingDealDays" class="marketing-deal-days-options"></div><small class="marketing-schedule-hint">Choose when the deal is available. Older deals default to every day.</small></fieldset>
+            <div class="form-group"><label for="marketingDealStartTime">Start time</label><input id="marketingDealStartTime" type="time"></div>
+            <div class="form-group"><label for="marketingDealEndTime">End time</label><input id="marketingDealEndTime" type="time"></div>
+            <div class="marketing-schedule-hint marketing-deal-wide">Leave both times empty for all-day availability. Overnight windows are supported. QR menus display active offers but do not apply them.</div>
             <div class="form-group"><label for="marketingMaxOccurrences">Max uses per branch / day</label><input id="marketingMaxOccurrences" type="number" min="0" placeholder="No limit"></div>
             <div class="form-group"><label for="marketingMinGroupSize">Minimum group size</label><input id="marketingMinGroupSize" type="number" min="1" placeholder="Any size"></div>
             <div class="form-group"><label for="marketingRecurringPeriod">Recurring period</label><select id="marketingRecurringPeriod"><option value="None">None</option><option>Daily</option><option>Weekly</option><option>Monthly</option></select></div>
-            <fieldset class="marketing-channel-fieldset marketing-deal-wide"><legend>Channels</legend><div id="marketingDealChannels" class="marketing-channel-options"></div></fieldset>
+            <fieldset class="marketing-channel-fieldset marketing-deal-wide"><legend>Channels</legend><div id="marketingDealChannels" class="marketing-channel-options"></div><small class="marketing-schedule-hint">QR Menu offers appear in the Offers card for display. QR orders do not automatically receive the discount.</small></fieldset>
             <div class="marketing-deal-checks marketing-deal-wide">
                 <label><input id="marketingForNewCustomers" type="checkbox"> For new customers</label>
                 <label><input id="marketingUseMembership" type="checkbox"> Use membership loyalty</label>
@@ -1552,7 +1555,7 @@
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('weekday-sales')"><span class="module-card-icon">📆</span><span class="module-card-copy"><strong>Sales by Weekday</strong><span>Find the busiest and highest earning days.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('daypart-sales')"><span class="module-card-icon">☕</span><span class="module-card-copy"><strong>Sales by Daypart</strong><span>Compare breakfast, lunch, afternoon, evening and late night.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('top-customers')"><span class="module-card-icon">👥</span><span class="module-card-copy"><strong>Top Customers</strong><span>See your highest value customers for this period.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
-    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review the reason, user ID, cancellation time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review the reason, staff name, cancellation time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('discount-orders')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Review completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('non-chargeable-orders')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Review completed orders with no payment collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
   </div>
@@ -1563,7 +1566,7 @@
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="weekday-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Weekday</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('weekday-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Weekday</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedWeekdayBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="daypart-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Daypart</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('daypart-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Daypart</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedDaypartBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><div class="advanced-report-table-heading"><h3>Top Customers</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('top-customers')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By User ID</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="discount-orders" hidden><div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="downloadDiscountReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('discounts')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Discount</th><th>Discount Rule</th><th>Total</th><th>Payment</th></tr></thead><tbody id="advancedDiscountBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="non-chargeable-orders" hidden><div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="downloadNonChargeableReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('non-chargeable')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="advancedNonChargeableBody"></tbody></table></div></div>
   </div>
@@ -1745,6 +1748,13 @@
                 <div class="pos-preferences-table-head"><span>Module</span><span>Channels to show</span><span>Default channel</span></div>
                 <div id="posPreferencesRows"></div>
             </div>
+        </div>
+        <div class="settings-card sales-channels-settings-card" data-settings-feature="sales-channels" hidden>
+            <div class="settings-master-header">
+                <div><span class="eyebrow">CHANNEL SETUP</span><h3>Sales Channels</h3><p class="access-muted">Set up where each item, discount and offer can be used. QR Menu is the guest ordering channel.</p></div>
+                <button type="button" class="big-btn" onclick="openSalesChannelModal()">＋ New channel</button>
+            </div>
+            <div id="salesChannelsList" class="sales-channels-list"></div>
         </div>
 <div class="settings-grid advanced-settings-grid">
             <div class="settings-card" data-settings-feature="non-chargeable" hidden>
@@ -2453,7 +2463,9 @@
     <div id="addMenuModal" class="modal"><div class="modal-content menu-modal-content"><div class="modal-header"><div><span class="menu-eyebrow">ITEM MASTER</span><h2 id="addMenuModalTitle">Add Menu Item</h2></div><button class="close-btn" onclick="closeAddMenuModal()">✕</button></div>
       <div class="menu-form-grid">
         <div class="form-group"><label>Item Name</label><input id="menuName" type="text" placeholder="e.g. Cappuccino"></div>
+        <div class="form-group"><label for="menuSku">SKU Code</label><input id="menuSku" type="text" maxlength="80" placeholder="Leave blank to auto-generate"><small class="access-muted">SKU must be unique in this cafe. Leave blank to generate one automatically.</small></div>
         <div class="form-group menu-category-field"><label>Category</label><div class="menu-category-input-row"><select id="menuCategory"><option value="">Select category</option></select><button type="button" class="table-action-btn" onclick="openMenuCategoryModal()">＋ New</button></div></div>
+        <div class="form-group full"><label for="menuDescription">Item Description</label><textarea id="menuDescription" maxlength="2000" rows="3" placeholder="Describe the item for guests browsing your QR menu"></textarea><small class="access-muted">Shown on the QR menu. Up to 2,000 characters.</small></div>
         <div class="form-group menu-image-field"><label for="menuImageFile">Item Image</label><input id="menuImageFile" type="file" accept="image/jpeg,image/png,image/webp" onchange="previewMenuItemImage(this.files?.[0])"><small class="access-muted">Choose a JPG, PNG or WebP image. The saved, compressed image must be 200 KB or smaller.</small><div id="menuImagePreview" class="menu-image-preview"></div><button type="button" class="table-action-btn" onclick="clearMenuItemImage()">Remove image</button></div>
         <div class="form-group"><label>Base Price</label><input id="menuPrice" type="number" min="0" step="0.01"></div>
         <div class="form-group"><label>Nature</label><select id="menuNature"><option>Goods</option><option>Service</option></select></div>
@@ -2462,7 +2474,7 @@
         <div class="form-group"><label>Item Tax Mode</label><select id="menuTaxMode"><option value="exclusive">Exclusive — tax added</option><option value="inclusive">Inclusive — tax included</option></select></div>
         <div class="form-group"><label>KOT Group</label><select id="menuKOTGroup"><option value="">No KOT Group</option></select></div>
       </div>
-      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Prices</h3><p>Dine-in, Takeaway, Delivery and Online prices can differ.</p></div></div><div class="menu-channel-price-grid"><div class="form-group"><label>Dine-in</label><input id="menuPrice_dine_in" type="number" min="0" step="0.01"></div><div class="form-group"><label>Takeaway</label><input id="menuPrice_takeaway" type="number" min="0" step="0.01"></div><div class="form-group"><label>Delivery</label><input id="menuPrice_delivery" type="number" min="0" step="0.01"></div><div class="form-group"><label>Online</label><input id="menuPrice_online" type="number" min="0" step="0.01"></div></div></div>
+      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Availability & Prices</h3><p>Choose where guests can order this item and set a different price for each channel.</p></div></div><div id="menuChannelAvailability" class="menu-channel-availability"></div><div id="menuChannelPriceGrid" class="menu-channel-price-grid"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach saved option sets such as milk choice, add-ons or spice level.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></div>
       <div class="modal-actions"><button class="big-btn" onclick="saveMenuItemV2()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
@@ -2472,10 +2484,7 @@
         <p class="access-muted">These POS prices also feed the published cafe and restaurant menu.</p>
         <div class="menu-price-fields">
           <div class="form-group"><label for="managedMenuBasePrice">Base price</label><input id="managedMenuBasePrice" type="number" min="0" step="0.01"></div>
-          <div class="form-group"><label for="managedMenuPriceOnline">Online price</label><input id="managedMenuPriceOnline" type="number" min="0" step="0.01"></div>
-          <div class="form-group"><label for="managedMenuPriceDineIn">Dine-in price</label><input id="managedMenuPriceDineIn" type="number" min="0" step="0.01"></div>
-          <div class="form-group"><label for="managedMenuPriceTakeaway">Takeaway price</label><input id="managedMenuPriceTakeaway" type="number" min="0" step="0.01"></div>
-          <div class="form-group"><label for="managedMenuPriceDelivery">Delivery price</label><input id="managedMenuPriceDelivery" type="number" min="0" step="0.01"></div>
+          <div id="managedMenuChannelPrices" class="menu-channel-price-grid"></div>
         </div>
         <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variant prices</h3><p>Update sizes such as Small, Regular or Large.</p></div></div><div id="menuVariantPriceEditor"></div></div>
         <div class="modal-actions"><button type="button" class="big-btn" onclick="saveMenuPriceEditor()">Save prices</button><button type="button" class="cancel-btn" onclick="closeMenuPriceEditor()">Cancel</button></div>
@@ -2569,6 +2578,7 @@
                     <div><span>Sub Total</span><strong id="paymentSubtotal">₹0.00</strong></div>
                     <div><span>Charges</span><strong id="paymentCharges">₹0.00</strong></div>
                     <div><span>Tax</span><strong id="paymentTax">₹0.00</strong></div>
+                    <div id="paymentTaxBreakdown" class="live-tax-breakdown" aria-label="GST calculation details" style="display:none"></div>
                     <div><span>Discount</span><strong id="paymentDiscount">₹0.00</strong></div>
                     <div id="paymentRoundingRow" hidden><span>Rounding</span><strong id="paymentRounding">₹0.00</strong></div>
                     <div class="payment-summary-total"><span>Bill Total</span><strong id="paymentBillTotal">₹0.00</strong></div>
@@ -2938,7 +2948,7 @@
 
                 setDeviceRegistrationMessage(
                     "Device registered successfully for " + businessName +
-                    ". You can now log in with your Cafe POS username and password.",
+                    ". You can now log in with your Slash POS username and password.",
                     "success"
                 );
 
@@ -3007,7 +3017,7 @@
         </div>
 
         <div class="bill-header">
-            <h2 id="billRestaurantName">CAFE POS</h2>
+            <h2 id="billRestaurantName">SLASH POS</h2>
             <p id="billRestaurantAddress">
                 Cafe Management System
             </p>
@@ -3097,6 +3107,8 @@
                 <strong id="billChargeAmount">₹0.00</strong>
             </div>
 
+            <div id="billTaxBreakdown" class="bill-tax-breakdown" aria-label="Tax calculation details" style="display:none"></div>
+
             <div id="billGstRow">
                 <span>GST</span>
                 <strong id="billGST">₹0.00</strong>
@@ -3131,7 +3143,7 @@
             <p id="billCustomFooter">Thank You!
 Visit Again 😊</p>
         </div>
-        <p id="billPoweredBy" class="bill-powered-by">Powered by Cafe Pilot</p>
+        <p id="billPoweredBy" class="bill-powered-by">Powered by Slash</p>
 
         <div class="bill-actions">
 
@@ -3169,7 +3181,7 @@ Visit Again 😊</p>
             <div class="form-group"><label>Rule Type</label><select id="billingAdjustmentKind"><option value="discount">Discount</option><option value="charge">Charge</option></select></div>
             <div class="form-group"><label>Calculation</label><select id="billingAdjustmentCalculation"><option value="percent">Percentage (%)</option><option value="fixed">Fixed Amount</option></select></div>
             <div class="form-group"><label>Value</label><input id="billingAdjustmentValue" type="number" min="0" step="0.01" placeholder="0"></div>
-            <div class="form-group"><label>Applies To</label><select id="billingAdjustmentApplies"><option value="all">All Channels</option><option value="dine-in">Dine-in</option><option value="takeaway">Takeaway</option><option value="online">Online</option></select></div>
+            <div class="form-group"><label>Applies To</label><select id="billingAdjustmentApplies"><option value="all">All Channels</option></select></div>
             <div class="form-group full"><label>Description</label><textarea id="billingAdjustmentDescription" rows="3" placeholder="Describe when this rule should be used"></textarea></div>
         </div>
         <div class="modal-actions">
@@ -3207,7 +3219,7 @@ Visit Again 😊</p>
 
 <div id="businessAboutModal" class="modal">
     <div class="business-about-dialog">
-        <div class="business-about-brand"><span class="business-about-mark">☕</span><div><strong>Cafe Pilot</strong><span>Business information</span></div><button type="button" onclick="closeBusinessAbout()" aria-label="Close About">✕</button></div>
+        <div class="business-about-brand"><span class="business-about-mark">☕</span><div><strong>Slash</strong><span>Business information</span></div><button type="button" onclick="closeBusinessAbout()" aria-label="Close About">✕</button></div>
         <h2 id="aboutBusinessName">Current Business</h2>
         <p id="aboutBusinessMeta" class="business-about-meta"></p>
         <div class="business-about-grid">
@@ -3221,8 +3233,18 @@ Visit Again 😊</p>
             <div><span>GSTIN</span><strong id="aboutGstin">—</strong></div>
             <div><span>Currency</span><strong id="aboutCurrency">—</strong></div>
         </div>
-        <div class="business-about-footer"><span>POS version</span><strong>Cafe Pilot · Phase 2</strong></div>
+        <div class="business-about-footer"><span>POS version</span><strong>Slash · Phase 2</strong></div>
         <button type="button" class="big-btn" onclick="closeBusinessAbout()">Close</button>
+    </div>
+</div>
+<div id="salesChannelModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="salesChannelModalTitle">
+    <div class="modal-content sales-channel-modal-content">
+        <div class="modal-header"><h2 id="salesChannelModalTitle">Create sale channel</h2><button type="button" class="close-btn" onclick="closeSalesChannelModal()" aria-label="Close">✕</button></div>
+        <input id="salesChannelEditingKey" type="hidden">
+        <div class="form-group"><label for="salesChannelName">Channel name</label><input id="salesChannelName" type="text" maxlength="60" placeholder="e.g. Swiggy or Cafe Counter"></div>
+        <div class="form-group"><label for="salesChannelOrderType">Order flow</label><select id="salesChannelOrderType"><option value="Takeaway">Takeaway / delivery flow</option><option value="Dine-in">Dine-in / table flow</option></select><small class="access-muted">This keeps table selection and order handling matched to the channel.</small></div>
+        <label class="sales-channel-qr-toggle"><input id="salesChannelQrMenu" type="checkbox"><span><strong>Use as a QR Menu channel</strong><small>Items and prices assigned to this channel will appear on its public QR menu.</small></span></label>
+        <div class="modal-actions"><button type="button" class="big-btn" onclick="saveSalesChannel()">Save channel</button><button type="button" class="cancel-btn" onclick="closeSalesChannelModal()">Cancel</button></div>
     </div>
 </div>
 </body>
