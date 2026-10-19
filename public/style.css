@@ -3155,3 +3155,97 @@ body:has(#new-order.active-page) .billing-workspace{height:calc(100% - 60px)}
   body:has(#new-order.active-page) .billing-top-actions .billing-search-wrap{width:100%;margin:0}
   body:has(#new-order.active-page) .billing-workspace{height:auto;min-height:calc(100% - 118px)}
 }
+
+/* Order detail toolbar, action menu, and group-aware KOT view. */
+.orders-detail-toolbar{display:flex;align-items:stretch;min-height:67px;border-bottom:1px solid #e8edf1;background:#fff}
+.orders-detail-toolbar[hidden]{display:none}
+.orders-detail-tool{position:relative;display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:0;border:0;border-right:1px solid #e8edf1;background:#fff;color:#52606a;cursor:pointer}
+.orders-detail-tool:hover,.orders-detail-tool.active{background:#f4f8ff;color:#2563c8}
+.orders-detail-tool-icon{display:grid;place-items:center;min-height:26px;color:#18212a;font-size:24px;line-height:1}
+.orders-detail-tool small{color:#687580;font-size:9px;line-height:1.1}
+.orders-kot-grid-icon{display:grid;grid-template-columns:repeat(2,10px);grid-template-rows:repeat(2,10px);gap:3px}
+.orders-kot-grid-icon i{width:10px;height:10px;border:2px solid currentColor;border-radius:2px}
+.orders-detail-more-wrap{position:relative;display:flex;flex:1}
+.orders-detail-more-wrap>.orders-detail-tool{width:100%;border-right:0}
+.orders-kebab-icon{font-size:28px}
+.orders-detail-more-menu{position:absolute;z-index:35;top:calc(100% - 1px);right:8px;width:min(240px,calc(100vw - 48px));max-height:min(65vh,420px);overflow:auto;border:1px solid #e4e8ed;border-radius:9px;background:#fff;box-shadow:0 14px 34px rgba(24,37,49,.18)}
+.orders-detail-more-menu[hidden]{display:none}
+.orders-detail-more-menu button{display:block;width:100%;min-height:44px;padding:11px 14px;border:0;border-bottom:1px solid #eef0f2;background:#fff;color:#27333b;text-align:left;font:inherit;font-size:13px;cursor:pointer}
+.orders-detail-more-menu button:last-child{border-bottom:0}
+.orders-detail-more-menu button:hover{background:#f5f8fb}
+.orders-detail-more-menu button.danger{color:#a43232}
+.restaurant-logo-setting{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;margin-bottom:10px;padding:14px;border:1px solid #e5e9ed;border-radius:11px;background:#fafcfd}
+.restaurant-logo-setting .form-group{margin:0}
+.restaurant-logo-preview-wrap{display:flex;align-items:center;gap:10px}
+.restaurant-logo-preview-wrap[hidden]{display:none}
+.restaurant-logo-preview-wrap img{width:86px;height:72px;object-fit:contain;border:1px solid #e4e8ec;border-radius:9px;background:#fff}
+.bill-restaurant-logo{display:block;max-width:150px;max-height:75px;margin:0 auto 10px;object-fit:contain}
+.bill-restaurant-logo[hidden]{display:none}
+.order-kot-view-modal-content{display:flex;flex-direction:column;width:min(680px,calc(100vw - 30px));max-height:min(88vh,820px);padding:0;overflow:hidden;border-radius:16px;background:#fff}
+.order-kot-view-header{padding:18px 22px;border-bottom:1px solid #edf0f2}
+.order-kot-view-header h2{margin:4px 0 0;color:#26333c;font-size:20px}
+.order-kot-view-body{display:grid;align-content:start;gap:12px;min-height:150px;padding:18px 22px;overflow:auto}
+.order-kot-summary{display:grid;gap:4px;padding:12px 14px;border-radius:10px;background:#f3f7fc;color:#2f3d49}
+.order-kot-summary span{color:#72808c;font-size:12px}
+.order-kot-group-card{padding:15px;border:1px solid #e5e9ed;border-radius:12px;background:#fff}
+.order-kot-group-card>header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.order-kot-group-card>header>div{display:grid;gap:3px}
+.order-kot-group-card>header strong{color:#202b34;font-size:16px}
+.order-kot-group-card>header small,.order-kot-item-count{color:#7a8791;font-size:11px}
+.order-kot-printer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px;margin:12px 0;padding:9px 10px;border-radius:8px;background:#f7f9fb;color:#78838c;font-size:11px}
+.order-kot-printer strong{color:#34434d;font-size:11px}
+.order-kot-group-card ul{display:grid;gap:0;margin:0 0 12px;padding:0;list-style:none}
+.order-kot-group-card li{display:flex;align-items:flex-start;gap:10px;padding:10px 2px;border-bottom:1px solid #eff1f3}
+.order-kot-group-card li>div{display:grid;flex:1;gap:3px;min-width:0}
+.order-kot-group-card li>div strong{color:#26333b;font-size:13px}
+.order-kot-group-card li small{color:#7b8790;font-size:11px}
+.order-kot-group-card li>span{color:#283640;font-size:12px;font-weight:700;white-space:nowrap}
+.order-kot-group-card li em{min-width:72px;color:#6e7b84;font-size:10px;font-style:normal;text-align:right}
+.order-kot-group-card>.table-action-btn{width:100%;min-height:40px}
+.order-kot-empty{display:grid;justify-items:center;gap:10px;padding:30px 15px;text-align:center;color:#6e7b84}
+.order-kot-empty .orders-kot-grid-icon{color:#4d6a84}
+.order-kot-empty strong{color:#26343d}
+.order-kot-empty p{max-width:380px;margin:0;font-size:12px;line-height:1.55}
+.order-kot-error{color:#a43232;font-size:13px}
+.order-kot-view-footer{display:flex;justify-content:flex-end;gap:9px;padding:13px 20px;border-top:1px solid #edf0f2;background:#fbfcfd}
+@media(max-width:600px){.restaurant-logo-setting{grid-template-columns:1fr}.restaurant-logo-preview-wrap{justify-content:flex-start}.order-kot-view-modal-content{width:calc(100vw - 20px);max-height:calc(100vh - 24px)}.order-kot-view-body{padding:13px}.order-kot-view-footer{padding:11px}.orders-detail-toolbar{min-height:62px}}
+
+/* QR order progression: Accept → Mark Ready → Checkout. */
+.qr-order-workflow{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 18px;border-bottom:1px solid #dce8e4;background:linear-gradient(115deg,#f1faf5,#f5f8ff);color:#24352e}
+.qr-order-workflow[hidden]{display:none}
+.qr-order-workflow-copy{display:grid;gap:5px;min-width:0}
+.qr-order-workflow-copy .eyebrow{color:#638274;font-size:9px;font-weight:800;letter-spacing:.14em}
+.qr-order-workflow-copy strong{font-size:13px;line-height:1.45}
+.qr-order-workflow>.big-btn{flex:0 0 auto;min-width:154px;margin:0;padding:10px 15px}
+.menu-admin-price-row{grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:600px){.qr-order-workflow{align-items:stretch;flex-direction:column;gap:10px;padding:13px}.qr-order-workflow>.big-btn{width:100%;min-width:0}.menu-admin-price-row{grid-template-columns:repeat(2,minmax(0,1fr))}}
+
+/* QR order actions sit where the list card previously showed its date and total. */
+.order-list-card{cursor:default}
+.order-list-card-open{display:grid;grid-column:1/-1;gap:8px;width:100%;min-width:0;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.order-list-card-open:focus-visible,.qr-order-list-card:focus-visible{outline:2px solid #438979;outline-offset:2px}
+.qr-order-list-card{grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:9px;row-gap:8px;cursor:pointer}
+.qr-order-list-card .order-list-card-open{grid-column:1/-1}
+.qr-order-list-meta{display:grid;gap:3px;min-width:0;color:#78848c;font-size:10px}
+.qr-order-list-meta>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qr-order-list-action{grid-column:2;grid-row:2;display:inline-flex;align-items:center;justify-content:center;gap:6px;min-width:104px;min-height:37px;padding:8px 11px;border:1px solid transparent;border-radius:10px;background:linear-gradient(135deg,#239a69,#147450);box-shadow:0 3px 8px rgba(24,105,74,.2);color:#fff;font:inherit;font-size:11px;font-weight:800;letter-spacing:.01em;white-space:nowrap;cursor:pointer;transition:transform .16s ease,box-shadow .16s ease,filter .16s ease}
+.qr-order-list-action::before{font-size:12px;line-height:1}
+.qr-order-list-action.accept::before{content:"✓"}
+.qr-order-list-action.ready{background:linear-gradient(135deg,#5289df,#3568b4);box-shadow:0 3px 8px rgba(53,104,180,.2)}
+.qr-order-list-action.ready::before{content:"✦"}
+.qr-order-list-action.checkout{background:linear-gradient(135deg,#f0ae43,#d78619);box-shadow:0 3px 8px rgba(186,119,22,.2)}
+.qr-order-list-action.checkout::before{content:"→"}
+.qr-order-list-action:not(:disabled):hover{filter:brightness(1.05);transform:translateY(-1px);box-shadow:0 5px 12px rgba(30,55,45,.22)}
+.qr-order-list-action:not(:disabled):active{transform:translateY(0);box-shadow:0 2px 5px rgba(30,55,45,.18)}
+.qr-order-list-action:focus-visible{outline:3px solid rgba(61,125,102,.35);outline-offset:2px}
+.qr-order-list-action:disabled{opacity:.48;box-shadow:none;cursor:not-allowed}
+/* Slash wordmark: refined serif typography for the product brand. */
+.billing-brand-row h2,
+.sidebar h2,
+.desktop-titlebar-brand > span,
+.business-about-brand > div > strong {
+    font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-weight: 700;
+    letter-spacing: .015em;
+    text-rendering: optimizeLegibility;
+}
