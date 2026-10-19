@@ -768,6 +768,15 @@
                 </section>
                 <aside id="ordersDetailPane" class="orders-detail-panel" aria-label="Selected order details">
                     <div class="orders-detail-heading"><div><span class="eyebrow">ORDER DETAILS</span><h3 id="orderDetailsPanelTitle">Select an order</h3><p id="orderDetailsPanelHint">Choose an order from the list to see its items and bill.</p></div><button type="button" class="orders-detail-close" onclick="closeOrderDetails()" aria-label="Clear selected order">×</button></div>
+                    <div id="orderDetailsToolbar" class="orders-detail-toolbar" hidden>
+                        <button type="button" class="orders-detail-tool" onclick="openOrderKOTView()" aria-label="KOT view" title="KOT view"><span class="orders-detail-tool-icon orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><small>KOT View</small></button>
+                        <button type="button" class="orders-detail-tool active" onclick="focusOrderInfo()" aria-label="Order info" title="Order info"><span class="orders-detail-tool-icon" aria-hidden="true">ⓘ</span><small>Order Info</small></button>
+                        <div class="orders-detail-more-wrap">
+                            <button id="orderDetailsMoreButton" type="button" class="orders-detail-tool" onclick="toggleOrderDetailsMenu(event)" aria-haspopup="menu" aria-expanded="false" aria-label="More order actions" title="More info"><span class="orders-detail-tool-icon orders-kebab-icon" aria-hidden="true">⋮</span><small>More Info</small></button>
+                            <div id="orderDetailsMoreMenu" class="orders-detail-more-menu" role="menu" hidden></div>
+                        </div>
+                    </div>
+                    <div id="qrOrderWorkflow" class="qr-order-workflow" hidden></div>
                     <div id="orderDetailsEmpty" class="orders-detail-empty"><span>🧾</span><strong>No order selected</strong><p>Order items, payment status and actions will appear here.</p></div>
                     <div id="orderDetailsContent" hidden></div>
                     <div id="orderDetailsActions" class="orders-detail-actions" hidden></div>
@@ -1689,6 +1698,10 @@
         <div class="settings-grid">
             <div class="settings-card" data-settings-feature="restaurant-profile" hidden>
                 <h3>🏪 Restaurant Profile</h3>
+                <div class="restaurant-logo-setting">
+                    <div class="form-group"><label for="settingRestaurantLogoFile">Brand logo</label><input id="settingRestaurantLogoFile" type="file" accept="image/png,image/jpeg,image/webp" onchange="handleRestaurantLogoUpload(this)"><small class="access-muted">PNG, JPG or WebP. The logo appears above the business name on invoices.</small></div>
+                    <div id="settingRestaurantLogoPreviewWrap" class="restaurant-logo-preview-wrap" hidden><img id="settingRestaurantLogoPreview" alt="Restaurant logo preview"><button type="button" class="table-action-btn" onclick="removeRestaurantLogo()">Remove logo</button></div>
+                </div>
                 <div class="form-group"><label>Restaurant Name</label><input id="settingRestaurantName" type="text" placeholder="Restaurant Name"></div>
                 <div class="form-group"><label>Address</label><input id="settingAddress" type="text" placeholder="Address"></div>
                 <div class="form-group"><label>Phone</label><input id="settingPhone" type="text" placeholder="Phone"></div>
@@ -2063,7 +2076,7 @@
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('order-type')"><span class="module-card-icon">🍽️</span><span class="module-card-copy"><strong>Sales by Order Type</strong><span>Compare dine-in, takeaway and other order channels.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('daily')"><span class="module-card-icon">📅</span><span class="module-card-copy"><strong>Daily Sales</strong><span>Track sales and order counts across the selected dates.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('gst')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>GST / Tax Report</strong><span>Taxable sales and GST collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
-        <button type="button" class="module-navigation-card" onclick="showSalesReportView('audit')"><span class="module-card-icon">🔎</span><span class="module-card-copy"><strong>Sale Transaction Audit</strong><span>Payment transactions, collected amount and amount due.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+                <button type="button" class="module-navigation-card" onclick="showSalesReportView('audit')"><span class="module-card-icon">🔎</span><span class="module-card-copy"><strong>Sale Transaction Audit</strong><span>Completed sales by order, invoice, payment and balance.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('discounts')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('non-chargeable')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Completed orders recorded without payment.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     </div>
@@ -2429,14 +2442,14 @@
 
 <div class="dashboard-box sales-audit-box">
     <div class="sales-audit-header">
-        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review payment transactions, payment methods, amounts collected, and remaining due for the selected report period.</p></div>
+        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review completed sales by order, invoice, channel, customer, tax, payment and balance. CSV export follows the supplied 102-column audit layout; fields not recorded by Slash are left blank.</p></div>
         <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
     </div>
     <div id="salesAuditStatus" class="access-muted" role="status">Choose a date range above, then load the transaction audit.</div>
     <div class="table-container">
         <table>
-            <thead><tr><th>Payment time</th><th>Order / Invoice</th><th>Type / Table</th><th>Payment mode</th><th>Transaction ID</th><th>Transaction</th><th>Bill total</th><th>Order collected to date</th><th>Order due</th><th>Order status</th></tr></thead>
-            <tbody id="salesAuditBody"><tr><td colspan="10">No audit loaded.</td></tr></tbody>
+            <thead><tr><th>Business date</th><th>Invoice date</th><th>Invoice number</th><th>Order number</th><th>Channel / table</th><th>Customer</th><th>Payment modes</th><th>Gross</th><th>Discount</th><th>Other charges</th><th>Taxes</th><th>Total</th><th>Paid</th><th>Balance due</th><th>Sale status</th></tr></thead>
+            <tbody id="salesAuditBody"><tr><td colspan="15">No audit loaded.</td></tr></tbody>
         </table>
     </div>
 </div>
@@ -2472,7 +2485,6 @@
         <div class="form-group"><label>Measuring Unit</label><select id="menuUnit"><option>ea</option><option>pcs</option><option>g</option><option>kg</option><option>ml</option><option>lt</option><option>plate</option><option>cup</option><option>glass</option><option>box</option></select></div>
         <div class="form-group"><label>Tax Profile</label><select id="menuTaxProfile"><option value="0">Tax 0% / Exempt</option><option value="5">GST 5% (CGST 2.5% + SGST 2.5%)</option><option value="18">GST 18%</option><option value="28">GST 28%</option></select></div>
         <div class="form-group"><label>Item Tax Mode</label><select id="menuTaxMode"><option value="exclusive">Exclusive — tax added</option><option value="inclusive">Inclusive — tax included</option></select></div>
-        <div class="form-group"><label>KOT Group</label><select id="menuKOTGroup"><option value="">No KOT Group</option></select></div>
       </div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Availability & Prices</h3><p>Choose where guests can order this item and set a different price for each channel.</p></div></div><div id="menuChannelAvailability" class="menu-channel-availability"></div><div id="menuChannelPriceGrid" class="menu-channel-price-grid"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
@@ -2536,7 +2548,7 @@
             <p class="access-muted">Upload an .xlsx workbook or CSV file. Use the template to add items and update existing items by matching their names.</p>
             <div class="form-group menu-import-mode"><label for="menuImportMode">Import action</label><select id="menuImportMode"><option value="upsert">Update matching items and add new items</option><option value="update">Update matching items only</option><option value="insert">Add new items only</option></select></div>
             <div class="menu-import-actions"><button type="button" class="table-action-btn" onclick="downloadMenuImportTemplate()">↓ Download template</button><button type="button" class="table-action-btn" onclick="downloadExistingMenuSpreadsheet()">↓ Export existing items</button><label class="menu-import-file-btn">Choose file<input id="menuImportFile" type="file" accept=".xlsx,.csv,.tsv,text/csv" onchange="readMenuImportFile(this.files?.[0])"></label><span id="menuImportFileName" class="access-muted">No file selected</span></div>
-            <div id="menuImportStatus" class="menu-import-status" role="status">Required columns: Item Name, Category, Price. Optional columns support channel prices, tax, unit, availability and KOT group.</div>
+            <div id="menuImportStatus" class="menu-import-status" role="status">Required columns: Item Name, Category, Price. Optional columns support channel prices, tax, unit and availability.</div>
             <div id="menuImportPreview" class="menu-import-preview"></div>
             <div class="modal-actions"><button id="menuImportSubmit" type="button" class="big-btn" onclick="submitMenuSpreadsheet()" disabled>Import items</button><button type="button" class="cancel-btn" onclick="closeMenuImportModal()">Cancel</button></div>
         </div>
@@ -3017,6 +3029,7 @@
         </div>
 
         <div class="bill-header">
+            <img id="billRestaurantLogo" class="bill-restaurant-logo" alt="Business logo" hidden>
             <h2 id="billRestaurantName">SLASH POS</h2>
             <p id="billRestaurantAddress">
                 Cafe Management System
@@ -3165,6 +3178,14 @@ Visit Again 😊</p>
 
 </div>
 
+
+<div id="orderKOTViewModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="orderKOTViewTitle" onclick="if(event.target===this)closeOrderKOTView()">
+    <div class="modal-content order-kot-view-modal-content">
+        <div class="modal-header order-kot-view-header"><div><span class="eyebrow">KITCHEN TICKETS</span><h2 id="orderKOTViewTitle">KOT View</h2></div><button type="button" class="close-btn" onclick="closeOrderKOTView()" aria-label="Close KOT view">×</button></div>
+        <div id="orderKOTViewBody" class="order-kot-view-body"><p class="access-muted">Loading kitchen tickets…</p></div>
+        <div class="order-kot-view-footer"><button type="button" class="table-action-btn" onclick="closeOrderKOTView()">Close</button><button id="orderKOTPrintAllButton" type="button" class="big-btn" onclick="printKOT(window.orderKOTViewOrderId)">🖨️ Print / Reprint all</button></div>
+    </div>
+</div>
 
 <div id="billingAdjustmentModal" class="modal">
     <div class="modal-content billing-adjustment-modal-content">

@@ -10,6 +10,8 @@ sessionStorage.removeItem("cafeAuthToken");
 let currentUser = null;
 let currentLicense = null;
 let currentDevice = null;
+let pendingBusinessLogoUrl = null;
+let businessLogoChanged = false;
 const LOGIN_BUSINESS_NAME_KEY = 'cafeLoginBusinessName';
 function settingsLocalStorageKey(){return currentUser&&currentUser.business_id?"cafeAppSettings:"+Number(currentUser.business_id):"cafeAppSettings";}
 
@@ -1160,7 +1162,7 @@ function showSalesReportView(reportKey = "overview") {
         "order-type": { title: "Sales by Order Type", description: "Compare dine-in, takeaway and other order channels.", body: "reportOrderTypeBody" },
         daily: { title: "Daily Sales", description: "Track sales and order counts across the selected dates.", body: "reportDailyBody" },
         gst: { title: "GST / Tax Report", description: "Taxable sales and GST collected.", body: "reportGstBody" },
-        audit: { title: "Sale Transaction Audit", description: "Review payment transactions, collected amount and amount due.", body: "salesAuditBody" },
+        audit: { title: "Sale Transaction Audit", description: "Review completed sales by order with invoice, payment, tax and balance details.", body: "salesAuditBody" },
         discounts: { title: "Discounted Orders", description: "Completed orders that used a discount.", body: "reportDiscountOrdersBody" },
         "non-chargeable": { title: "Non-chargeable Orders", description: "Completed orders recorded without payment.", body: "reportNonChargeableOrdersBody" }
     };
@@ -2228,6 +2230,21 @@ let paymentDueNow = 0;
 let splitPayments = [];
 let previousPaymentAllocations = [];
 
+function getCurrentCheckoutBreakdown() {
+    const calculated = getBillingBreakdown();
+    const order = currentOpenOrderData?.order;
+    if (!currentOpenOrderId || !isQrTrackedOrder(order)) return calculated;
+    return {
+        ...calculated,
+        subtotal: Number(order.subtotal || 0),
+        discount: Number(order.discount || 0),
+        serviceCharge: Number(order.service_charge || 0),
+        gst: Number(order.gst || 0),
+        total: Number(order.total || 0),
+        roundingAdjustment: 0
+    };
+}
+
 async function openPayment() {
     const newOrderPage = document.getElementById("new-order");
     if (!newOrderPage?.classList.contains("active-page")) return;
@@ -2248,7 +2265,7 @@ async function openPayment() {
     }
     if (!newOrderPage.classList.contains("active-page") || !cart.length) return;
 
-    const breakdown = getBillingBreakdown();
+    const breakdown = getCurrentCheckoutBreakdown();
     paymentDueNow = Math.max(0, Number(breakdown.total || 0) - paymentCollectedSoFar);
     paymentCategory = "full";
     selectedPaymentMethod = preferredPaymentMethod();
@@ -2351,7 +2368,7 @@ function renderSplitPayments() {
     list.innerHTML = splitPayments.map((payment, index) => `<div class="split-payment-row"><span>${esc(payment.method)}</span><strong>${money(payment.amount)}</strong><button type="button" aria-label="Remove payment" onclick="removeSplitPayment(${index})">×</button></div>`).join("");
 }
 function updatePaymentSummary() {
-    const b = getBillingBreakdown();
+    const b = getCurrentCheckoutBreakdown();
     const setMoney = (id, value) => { const element = document.getElementById(id); if (element) element.textContent = money(value); };
     setMoney("paymentSubtotal", b.subtotal);
     setMoney("paymentCharges", b.serviceCharge);
@@ -2388,7 +2405,7 @@ function updateCashChange() { updatePaymentSummary(); }
 function choosePayment(method) { selectPaymentMethod(method); }
 
 async function confirmPOSPayment() {
-    const due = Math.max(0, Number(getBillingBreakdown().total || 0) - paymentCollectedSoFar);
+    const due = Math.max(0, Number(getCurrentCheckoutBreakdown().total || 0) - paymentCollectedSoFar);
     if (paymentCategory === "non-chargeable") {
         const nonChargeableReason = document.getElementById("paymentNonChargeableReason")?.value || "";
         if (!nonChargeableReason) return alert("Choose a non-chargeable reason before continuing.");
@@ -2418,11 +2435,12 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
     if (completingOrder) return;
     if (!cart.length) return alert("There are no items in the order.");
     completingOrder = true;
-    const subtotal = calculateSubtotal();
-    const b = getBillingBreakdown();
+    const b = getCurrentCheckoutBreakdown();
+    const subtotal = b.subtotal;
     const gst = b.gst;
     const total = b.total;
     const priorOrder = currentOpenOrderData?.order || {};
+    const isQrExistingOrder = Boolean(currentOpenOrderId && isQrTrackedOrder(priorOrder));
     const paymentsToRecord = Array.isArray(paymentOptions.payments) ? paymentOptions.payments : [{ method: paymentMethod, amount: total }];
 
     try {
@@ -2435,7 +2453,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             if (!customerName || !customerPhone) throw new Error("Please enter both customer name and phone number, or leave customer details blank.");
         }
         let billingCustomer = null;
-        if (customerName && customerPhone) {
+        if (customerName && customerPhone && !isQrExistingOrder) {
             const customerResult = await api("/customers/save-for-billing", { method: "POST", body: JSON.stringify(customerDetails) });
             billingCustomer = customerResult.customer || null;
             cacheBillingCustomer(billingCustomer);
@@ -2463,14 +2481,16 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             keepOpen: Boolean(paymentOptions.keepOpen),
             nonChargeable: Boolean(paymentOptions.nonChargeable),
             nonChargeableReason: String(paymentOptions.nonChargeableReason || ""),
-            createKot: !isNewOrder && kotEnabled,
+            createKot: !isNewOrder && kotEnabled && !isQrExistingOrder,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null
         };
         let settlement;
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
-            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
+            const updated = isQrExistingOrder
+                ? await api(`/orders/${orderId}/settle`, { method: "POST", body: JSON.stringify({ ...checkoutPayload, createKot: false }) })
+                : await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
             order = updated.order;
             orderNumber = order.order_number;
             settlement = updated;
@@ -2494,7 +2514,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const tableInput = document.getElementById("tableNumber");
         if (tableInput) tableInput.value = "";
         updateCart();
-        if (kotEnabled && appSettings.kotPrintMode === "checkout" && !paymentOptions.keepOpen) {
+        if (kotEnabled && appSettings.kotPrintMode === "checkout" && !paymentOptions.keepOpen && !isQrExistingOrder) {
             Promise.resolve().then(() => printKOT(order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
         }
         window.currentBillData = {
@@ -2714,6 +2734,12 @@ window.openBillPreview = function(data) {
 
     const restaurantName = document.getElementById("billRestaurantName");
     if (restaurantName) restaurantName.textContent = isCleanPreview ? "Order" : (appSettings.restaurantName || "SLASH POS");
+    const restaurantLogo = document.getElementById("billRestaurantLogo");
+    if (restaurantLogo) {
+        const logo = businessLogoUrl();
+        restaurantLogo.src = logo;
+        restaurantLogo.hidden = !logo || isCleanPreview;
+    }
     const restaurantAddress = document.getElementById("billRestaurantAddress");
     if (restaurantAddress) restaurantAddress.textContent = appSettings.address || "Cafe Management System";
     const restaurantPhone = document.getElementById("billRestaurantPhone");
@@ -3055,7 +3081,8 @@ window.printThermalBill = async function(options = {}) {
                         address: appSettings.address,
                         phone: appSettings.phone,
                         gstin: appSettings.gstin,
-                        currency: appSettings.currency
+                        currency: appSettings.currency,
+                        businessLogoUrl: businessLogoUrl()
                     }
                 });
                 if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the invoice PDF.");
@@ -3155,7 +3182,15 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
             const statusClass = group(order);
             const orderDate = order.created_at ? new Date(order.created_at).toLocaleString() : "";
             const tableMeta = [order.sale_channel || order.order_type, order.table_number ? `Table ${esc(order.table_number)}${Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}` : ""].filter(Boolean).map(esc).join(" · ") || "-";
-            return `<button type="button" class="order-list-card ${selected ? "selected" : ""}" role="listitem" onclick="viewOrder(${Number(order.id)})"><span class="order-list-card-top"><strong>${esc(order.order_number || `#${order.id}`)}</strong><span class="order-status-pill ${statusClass}">${esc(status)}</span></span><span class="order-list-card-meta"><span>${tableMeta}</span><span>${esc(orderDate)}</span></span><span class="order-list-card-bottom"><span>${esc(order.customer_name || order.payment_method || (statusClass === "open" ? "Unpaid" : ""))}</span><strong>${money(order.total)}</strong></span></button>`;
+            const orderId = Number(order.id);
+            const cardClass = `order-list-card ${selected ? "selected" : ""}`;
+            const heading = `<span class="order-list-card-top"><strong>${esc(order.order_number || `#${order.id}`)}</strong><span class="order-status-pill ${statusClass}">${esc(status)}</span></span>`;
+            const normalizedStatus = status.trim().toLowerCase();
+            if (isQrTrackedOrder(order) && !["completed", "cancelled"].includes(normalizedStatus)) {
+                const customerMeta = order.customer_name || (statusClass === "open" ? "Unpaid" : "");
+                return `<article class="${cardClass} qr-order-list-card" data-order-id="${orderId}" role="listitem" tabindex="0" onclick="viewOrder(${orderId})" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();viewOrder(${orderId})}"><button type="button" class="order-list-card-open" onclick="event.stopPropagation();viewOrder(${orderId})" aria-label="Open ${esc(order.order_number || `order ${orderId}`)}">${heading}</button><div class="qr-order-list-meta"><span>${tableMeta}</span>${customerMeta ? `<span>${esc(customerMeta)}</span>` : ""}</div>${renderQrOrderListAction(order)}</article>`;
+            }
+            return `<article class="${cardClass}" data-order-id="${orderId}" role="listitem"><button type="button" class="order-list-card-open" onclick="viewOrder(${orderId})" aria-label="Open ${esc(order.order_number || `order ${orderId}`)}">${heading}<span class="order-list-card-meta"><span>${tableMeta}</span><span>${esc(orderDate)}</span></span><span class="order-list-card-bottom"><span>${esc(order.customer_name || order.payment_method || (statusClass === "open" ? "Unpaid" : ""))}</span><strong>${money(order.total)}</strong></span></button></article>`;
         }).join("") || `<div class="orders-empty-state"><span>⌕</span><strong>No matching orders</strong><small>Try changing the search or filters.</small></div>`;
 
         const openCount = document.getElementById("openOrdersCount");
@@ -3274,6 +3309,114 @@ async function viewOrderActivity(orderId) {
 function closeOrderActivity() {
     const modal = document.getElementById("orderActivityModal");
     if (modal) modal.style.display = "none";
+}
+
+let orderActionMenuDismissListener = null;
+function closeOrderDetailsMenu() {
+    const menu = document.getElementById("orderDetailsMoreMenu");
+    const button = document.getElementById("orderDetailsMoreButton");
+    if (menu) menu.hidden = true;
+    if (button) button.setAttribute("aria-expanded", "false");
+    if (orderActionMenuDismissListener) {
+        document.removeEventListener("click", orderActionMenuDismissListener);
+        orderActionMenuDismissListener = null;
+    }
+}
+function toggleOrderDetailsMenu(event) {
+    event?.stopPropagation();
+    const menu = document.getElementById("orderDetailsMoreMenu");
+    const button = document.getElementById("orderDetailsMoreButton");
+    if (!menu || !button) return;
+    if (!menu.hidden) return closeOrderDetailsMenu();
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    orderActionMenuDismissListener = event => {
+        if (!event.target.closest(".orders-detail-more-wrap")) closeOrderDetailsMenu();
+    };
+    setTimeout(() => document.addEventListener("click", orderActionMenuDismissListener), 0);
+}
+function focusOrderInfo() {
+    closeOrderDetailsMenu();
+    const content = document.getElementById("orderDetailsContent");
+    if (content) content.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function isQrTrackedOrder(order) {
+    return Boolean(order?.public_tracking_token) || /^QR-/i.test(String(order?.order_number || ""));
+}
+
+function renderQrOrderListAction(order) {
+    const status = String(order?.status || "").trim().toLowerCase();
+    const orderId = Number(order?.id);
+    let label = "";
+    let action = "";
+    let className = "";
+    let permitted = false;
+    let permissionHint = "";
+    if (status === "pending") {
+        label = "Accept";
+        action = `updateQrOrderWorkflow(${orderId},'Preparing')`;
+        className = "accept";
+        permitted = hasPermission("kitchen", "edit");
+        permissionHint = "Kitchen edit access is required to accept this order.";
+    } else if (status === "preparing") {
+        label = "Mark ready";
+        action = `updateQrOrderWorkflow(${orderId},'Ready')`;
+        className = "ready";
+        permitted = hasPermission("kitchen", "edit");
+        permissionHint = "Kitchen edit access is required to mark this order ready.";
+    } else if (status === "ready") {
+        label = "Checkout";
+        action = `checkoutQrOrder(${orderId})`;
+        className = "checkout";
+        permitted = hasPermission("payments", "create") && hasPermission("new_order", "view");
+        permissionHint = "Checkout access is required to complete this order.";
+    } else {
+        return "";
+    }
+    return `<button type="button" class="qr-order-list-action ${className}" onclick="event.stopPropagation();${action}"${permitted ? "" : ` disabled title="${permissionHint}"`}>${label}</button>`;
+}
+
+function renderQrOrderWorkflow(order) {
+    const panel = document.getElementById("qrOrderWorkflow");
+    if (!panel) return;
+    const status = String(order?.status || "").trim().toLowerCase();
+    if (!isQrTrackedOrder(order) || ["completed", "cancelled"].includes(status)) {
+        panel.hidden = true;
+        panel.innerHTML = "";
+        return;
+    }
+    const canAdvance = hasPermission("kitchen", "edit");
+    const canCheckout = hasPermission("payments", "create") && hasPermission("new_order", "view");
+    let note = "";
+    if (status === "pending") {
+        note = "New QR order · use Accept on its order card to send the ticket to the kitchen.";
+    } else if (status === "preparing") {
+        note = "Accepted · kitchen is preparing this order. Mark it ready from its order card.";
+    } else if (status === "ready") {
+        note = "Ready · complete checkout from its order card to close this QR order.";
+    }
+    if (status === "ready" && !canCheckout) note += " Ask a cashier with checkout access to complete payment.";
+    else if (!canAdvance && status !== "ready") note += " You do not have kitchen edit access for this step.";
+    panel.innerHTML = `<div class="qr-order-workflow-copy"><span class="eyebrow">QR ORDER FLOW</span><strong>${esc(note)}</strong></div>`;
+    panel.hidden = false;
+}
+
+async function updateQrOrderWorkflow(orderId, status) {
+    try {
+        await api(`/orders/${Number(orderId)}/qr-status`, { method: "PUT", body: JSON.stringify({ status }) });
+        if (status === "Preparing" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId);
+        await updateOrdersTable(true, false);
+        await viewOrder(orderId);
+        if (appSettings.kotEnabled !== false && hasPermission("kitchen", "view")) await loadKOT(false);
+    } catch (error) {
+        alert(error.message || "Could not update this QR order.");
+    }
+}
+
+async function checkoutQrOrder(orderId) {
+    closeOrderDetailsMenu();
+    await payOpenOrder(Number(orderId));
 }
 
 async function viewOrder(orderId) {
@@ -3472,11 +3615,26 @@ async function viewOrder(orderId) {
                 ? (order.bill_printed_at ? hasPermission("orders", "edit_after_print") || hasPermission("orders", "edit_closed") : hasPermission("orders", "edit_closed"))
                 : !cancelled && (hasPermission("orders", "edit_open") || hasPermission("orders", "edit"));
             const canCancel = !cancelled && (closed ? hasPermission("orders", "cancel_closed") : (hasPermission("orders", "edit_open") || hasPermission("orders", "edit")));
-            actions.innerHTML = `<button type="button" class="table-action-btn" onclick="viewOrderBill(${Number(order.id)})">🧾 View bill</button><button type="button" class="table-action-btn" onclick="viewOrderActivity(${Number(order.id)})">Activity</button>${!closed && !cancelled ? `<button type="button" class="table-action-btn" onclick="payOpenOrder(${Number(order.id)})">Take payment</button>` : ""}${canEdit ? `<button type="button" class="table-action-btn" onclick="editOpenOrder(${Number(order.id)})">Edit order</button>` : ""}${canCancel ? `<button type="button" class="cancel-btn" onclick="cancelOrder(${Number(order.id)})">Cancel order</button>` : ""}<button type="button" class="big-btn" onclick="printCurrentOrder()">🖨️ Print bill</button>`;
-            actions.hidden = false;
-            actions.insertAdjacentHTML("afterbegin", '<button type="button" class="table-action-btn" onclick="printOrderKOT('+Number(order.id)+')">🖨️ Print KOT</button>');
+            const toolbar = document.getElementById("orderDetailsToolbar");
+            const orderIdValue = Number(order.id);
+            const isQrOrder = isQrTrackedOrder(order);
+            const canTakePayment = !closed && !cancelled && (!isQrOrder || status === "ready");
+            const menuItems = [
+                `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();viewOrderBill(${orderIdValue})">🧾 View bill</button>`,
+                `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();viewOrderActivity(${orderIdValue})">◷ Activity</button>`,
+                canTakePayment && !isQrOrder ? `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();payOpenOrder(${orderIdValue})">💳 Take payment</button>` : "",
+                canEdit ? `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();editOpenOrder(${orderIdValue})">✎ Edit order</button>` : "",
+                canCancel ? `<button type="button" role="menuitem" class="danger" onclick="closeOrderDetailsMenu();cancelOrder(${orderIdValue})">Cancel order</button>` : "",
+                `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();printCurrentOrder()">🖨️ Print bill</button>`
+            ].filter(Boolean);
+            const moreMenu = document.getElementById("orderDetailsMoreMenu");
+            if (moreMenu) moreMenu.innerHTML = menuItems.join("");
+            if (toolbar) toolbar.hidden = false;
+            renderQrOrderWorkflow(order);
+            actions.innerHTML = "";
+            actions.hidden = true;
         }
-        document.querySelectorAll(".order-list-card").forEach(card => card.classList.toggle("selected", Number(card.getAttribute("onclick")?.match(/\d+/)?.[0]) === Number(order.id)));
+        document.querySelectorAll(".order-list-card").forEach(card => card.classList.toggle("selected", Number(card.dataset.orderId) === Number(order.id)));
 
 
     } catch (error) {
@@ -3489,17 +3647,22 @@ async function viewOrder(orderId) {
 
 
 function closeOrderDetails() {
+    closeOrderDetailsMenu();
+    const qrWorkflow = document.getElementById("qrOrderWorkflow");
+    if (qrWorkflow) { qrWorkflow.hidden = true; qrWorkflow.innerHTML = ""; }
     window.selectedOrderId = null;
     const title = document.getElementById("orderDetailsPanelTitle");
     const hint = document.getElementById("orderDetailsPanelHint");
     const empty = document.getElementById("orderDetailsEmpty");
     const content = document.getElementById("orderDetailsContent");
     const actions = document.getElementById("orderDetailsActions");
+    const toolbar = document.getElementById("orderDetailsToolbar");
     if (title) title.textContent = "Select an order";
     if (hint) hint.textContent = "Choose an order from the list to see its items and bill.";
     if (empty) empty.hidden = false;
     if (content) { content.hidden = true; content.innerHTML = ""; }
     if (actions) { actions.hidden = true; actions.innerHTML = ""; }
+    if (toolbar) toolbar.hidden = true;
     document.querySelectorAll(".order-list-card.selected").forEach(card => card.classList.remove("selected"));
 }
 
@@ -4476,25 +4639,11 @@ let kotGroupSelectedTargets={categories:new Set(),items:new Set()};
 let kotGroupWorkingTargets=null;
 let kotGroupTargetType="categories";
 
-function getKOTGroupName(id){
-    const g=(kotGroups||[]).find(x=>Number(x.id)===Number(id));
-    return g ? g.name : "No KOT Group";
-}
-
-function populateKOTGroupSelect(){
-    const select=document.getElementById("menuKOTGroup");
-    if(!select)return;
-    const current=select.value;
-    select.innerHTML='<option value="">No KOT Group</option>'+(kotGroups||[]).filter(g=>g.active!==false).map(g=>`<option value="${g.id}">${esc(g.name)} — ${esc(g.station||"Kitchen")}</option>`).join("");
-    if(current)select.value=String(current);
-}
-
 async function loadKOTGroups(){
     try{
         kotGroups=await api("/kot-groups");
         const c=document.getElementById("kotGroupsContainer");
         setText("kotGroupCount",kotGroups.length);
-        populateKOTGroupSelect();
         if(!c)return;
         if(!kotGroups.length){c.innerHTML='<div class="kot-groups-empty"><strong>No KOT groups yet</strong><span>Create a group to route menu categories or items to a printer.</span></div>';return;}
         c.innerHTML=kotGroups.map(g=>{
@@ -4858,9 +5007,72 @@ async function viewOrderBill(orderId){
     }catch(error){alert("Unable to view this bill: "+(error.message||"Please try again."));}
 }
 
-async function printKOT(orderId){
+async function openOrderKOTView(orderId = window.selectedOrderId){
+    const id = Number(orderId);
+    const modal = document.getElementById("orderKOTViewModal");
+    const body = document.getElementById("orderKOTViewBody");
+    const title = document.getElementById("orderKOTViewTitle");
+    const printAll = document.getElementById("orderKOTPrintAllButton");
+    if (!id || !modal || !body) return;
+    window.orderKOTViewOrderId = id;
+    const order = (currentOrders || []).find(item => Number(item.id) === id);
+    if (title) title.textContent = `KOT View · ${order?.order_number || `Order #${id}`}`;
+    if (printAll) printAll.disabled = true;
+    body.innerHTML = '<p class="access-muted">Loading kitchen tickets…</p>';
+    modal.style.display = "flex";
+    try {
+        const isCancelled = String(order?.status || "").toLowerCase() === "cancelled";
+        let tickets = await api(`/kot?orderId=${encodeURIComponent(id)}`);
+        if (!tickets?.length && appSettings.kotEnabled !== false && !isCancelled && hasPermission("kitchen", "print")) {
+            await api(`/orders/${id}/kot`, { method: "POST" });
+            tickets = await api(`/kot?orderId=${encodeURIComponent(id)}`);
+        }
+        const canPrintKOT = hasPermission("kitchen", "print") && appSettings.kotEnabled !== false;
+        const groups = new Map();
+        (tickets || []).forEach(ticket => {
+            const key = ticket.kot_group_id ? String(ticket.kot_group_id) : "unassigned";
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push(ticket);
+        });
+        if (!tickets?.length) {
+            body.innerHTML = '<div class="order-kot-empty"><span class="orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>No KOT tickets for this order</strong><p>Map menu items or categories to a KOT group and assign its printer in Settings → KOT Groups.</p></div>';
+        } else {
+            body.innerHTML = `<div class="order-kot-summary"><strong>${tickets.length} kitchen item${tickets.length === 1 ? "" : "s"}</strong><span>Tickets are routed to the printer saved on each KOT group.</span></div>` + [...groups.entries()].map(([key, groupTickets]) => {
+                const first = groupTickets[0];
+                const groupName = first.kot_group_name || "Unassigned";
+                const station = first.kot_group_station || "Kitchen";
+                const printer = first.printer_name || "No printer assigned · uses the print dialog";
+                const items = groupTickets.map(ticket => {
+                    const options = formatItemOptionNames(ticket.options);
+                    return `<li><div><strong>${esc(ticket.item_name || "Item")}</strong>${options ? `<small>${esc(options)}</small>` : ""}</div><span>× ${Number(ticket.quantity || 0)}</span><em>${esc(ticket.status || "Pending")}</em></li>`;
+                }).join("");
+                const groupArgument = key === "unassigned" ? "'unassigned'" : String(Number(key));
+                return `<article class="order-kot-group-card"><header><div><strong>${esc(groupName)}</strong><small>${esc(station)}</small></div><span class="order-kot-item-count">${groupTickets.length} item${groupTickets.length === 1 ? "" : "s"}</span></header><div class="order-kot-printer"><span>Assigned printer</span><strong>${esc(printer)}</strong></div><ul>${items}</ul>${canPrintKOT ? `<button type="button" class="table-action-btn" onclick="reprintKOTGroup(${id},${groupArgument})">🖨️ Print / Reprint this group</button>` : ""}</article>`;
+            }).join("");
+        }
+        if (printAll) printAll.disabled = !tickets?.length || !canPrintKOT;
+    } catch (error) {
+        body.innerHTML = `<p class="order-kot-error">Unable to load KOT tickets: ${esc(error.message || "Please try again.")}</p>`;
+    }
+}
+
+function closeOrderKOTView(){
+    const modal = document.getElementById("orderKOTViewModal");
+    if (modal) modal.style.display = "none";
+}
+
+async function reprintKOTGroup(orderId, groupId){
+    await printKOT(orderId, groupId);
+}
+
+async function printKOT(orderId, onlyGroupId){
     try{
-        const tickets=await api(`/kot?orderId=${encodeURIComponent(Number(orderId))}&print=1`);
+        let tickets=await api(`/kot?orderId=${encodeURIComponent(Number(orderId))}&print=1`);
+        if (onlyGroupId !== undefined) {
+            tickets = tickets.filter(ticket => onlyGroupId === "unassigned"
+                ? !Number(ticket.kot_group_id)
+                : Number(ticket.kot_group_id) === Number(onlyGroupId));
+        }
         if(!tickets.length)return alert("KOT not found.");
         const buckets=new Map();
         tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
@@ -4909,7 +5121,6 @@ async function loadMenuManagement(){
         try{kotGroups=await api('/kot-groups');}catch(_){kotGroups=kotGroups||[];}
         try{await loadMenuOptionSets();}catch(_){menuOptionSets=[];}
         renderMenuOptionSetsOverview();
-        populateKOTGroupSelect();
         const list=document.querySelector('#menu .menu-list');
         if(!list)return;
         list.innerHTML=`<div class="menu-modern-head"><div><strong>${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;
@@ -4925,7 +5136,7 @@ function renderMenuManagementCards(){
     const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
     const nature=String(document.getElementById('menuManagementNature')?.value||'');
     const items=currentMenu.filter(item=>{
-        const hay=`${item.name} ${item.sku||''} ${item.description||''} ${item.category} ${item.nature} ${item.kot_group_name||''} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
+        const hay=`${item.name} ${item.sku||''} ${item.description||''} ${item.category} ${item.nature} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
         return(!q||hay.includes(q))&&(!nature||item.nature===nature);
     });
     grid.innerHTML=items.length?items.map(item=>{
@@ -4933,7 +5144,7 @@ function renderMenuManagementCards(){
         return `<article class="menu-admin-card ${available?'':'disabled'}">
           <div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
           <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}</div>
-          <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div><div><small>KOT</small><strong>${esc(item.kot_group_name||'Not routed')}</strong></div></div>
+          <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div></div>
           <div class="menu-channel-chips">${POS_CHANNELS.filter(saleChannel=>!Array.isArray(item.sales_channels)||item.sales_channels.includes(saleChannel.key)).map(saleChannel=>`<span>${esc(saleChannel.label)} ${money(channel[saleChannel.key]??item.price)}</span>`).join('')}</div>
           ${variants.length?`<div class="menu-variant-list"><strong>Variants</strong>${variants.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}
           <div class="menu-admin-actions"><button type="button" class="table-action-btn" onclick="openMenuPriceEditor(${Number(item.id)})">💰 Manage prices</button><button type="button" class="table-action-btn" onclick="editMenuItem(${Number(item.id)})">Edit details</button><label class="menu-availability-toggle"><input type="checkbox" ${available?'checked':''} onchange="setMenuItemAvailability(${Number(item.id)},this.checked)" aria-label="Enable ${esc(item.name)} in the POS"><span>${available?'POS On':'POS Off'}</span></label></div>
@@ -4990,7 +5201,6 @@ function renderMenuChannelFields(selectedChannels=null, channelPrices={}, basePr
 function openAddMenuModal(item=null){
     editingMenuItemId=item?.id||null;
     currentMenuImageData=item?.image_url||item?.imageUrl||null;
-    populateKOTGroupSelect();
     populateMenuCategorySelect(item?.category||'');
     document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';
     document.getElementById('menuName').value=item?.name||'';
@@ -5002,7 +5212,6 @@ function openAddMenuModal(item=null){
     document.getElementById('menuUnit').value=item?.unit||'ea';
     document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';
     document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';
-    document.getElementById('menuKOTGroup').value=item?.kot_group_id?String(item.kot_group_id):'';
     const channelPrices=item?.channel_prices||{};
     renderMenuChannelFields(item?.sales_channels,channelPrices,item?.price||0);
     const file=document.getElementById('menuImageFile');
@@ -5049,7 +5258,7 @@ async function saveMenuItemV2(){
     for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
     const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
-    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,kotGroupId:Number(document.getElementById('menuKOTGroup').value||0)||null,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
     try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(wasEditing?'Menu item updated.':'Menu item added.');}catch(error){alert(error.message);}
 }
 
@@ -5117,7 +5326,7 @@ function openMenuImportModal() {
     const file = document.getElementById("menuImportFile");
     if (file) file.value = "";
     document.getElementById("menuImportFileName").textContent = "No file selected";
-    document.getElementById("menuImportStatus").textContent = "Required columns: Item Name, Category, Price. Optional columns include SKU, Description, channel prices, tax, unit, availability and KOT group.";
+    document.getElementById("menuImportStatus").textContent = "Required columns: Item Name, Category, Price. Optional columns include SKU, Description, channel prices, tax, unit and availability.";
     document.getElementById("menuImportPreview").innerHTML = "";
     document.getElementById("menuImportSubmit").disabled = true;
     document.getElementById("menuImportModal").style.display = "flex";
@@ -5128,8 +5337,8 @@ function closeMenuImportModal() {
 }
 
 function downloadMenuImportTemplate() {
-    const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
-    const example = ["Masala Chai", "", "Freshly brewed spiced tea.", "Hot Drinks", "80", ...POS_CHANNELS.map(()=>"80"), POS_CHANNELS.map(channel=>channel.label).join("; "), "TRUE", "Goods", "cup", "5", "exclusive", "Main Kitchen"];
+    const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode"];
+    const example = ["Masala Chai", "", "Freshly brewed spiced tea.", "Hot Drinks", "80", ...POS_CHANNELS.map(()=>"80"), POS_CHANNELS.map(channel=>channel.label).join("; "), "TRUE", "Goods", "cup", "5", "exclusive"];
     const csv = "\uFEFF" + [headers, example].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -5145,7 +5354,7 @@ async function downloadExistingMenuSpreadsheet() {
             alert("No existing menu items were found to export.");
             return;
         }
-        const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "KOT Group"];
+        const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode"];
         const rows = items.map(item => {
             const channelPrices = item.channel_prices || {};
             return [
@@ -5153,7 +5362,7 @@ async function downloadExistingMenuSpreadsheet() {
                 ...POS_CHANNELS.map(channel=>channelPrices[channel.key]??""),
                 (Array.isArray(item.sales_channels)?item.sales_channels:POS_CHANNELS.map(channel=>channel.key)).map(key=>getSaleChannel(key)?.label||key).join("; "),
                 item.available === false ? "FALSE" : "TRUE", item.nature || "Goods", item.unit || "ea",
-                item.tax_rate ?? "", item.tax_mode || "exclusive", item.kot_group_name || ""
+                item.tax_rate ?? "", item.tax_mode || "exclusive"
             ];
         });
         const csvCell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
@@ -5298,8 +5507,7 @@ function mapMenuImportRows(matrix) {
         nature: findColumn("Nature", "Item Nature"),
         unit: findColumn("Unit", "UOM"),
         taxRate: findColumn("Tax Rate", "GST Rate", "Tax"),
-        taxMode: findColumn("Tax Mode"),
-        kotGroup: findColumn("KOT Group", "Kitchen Station")
+        taxMode: findColumn("Tax Mode")
     };
     const channelPriceColumns=POS_CHANNELS.map(channel=>({key:channel.key,column:findColumn(`${channel.label} Price`,`${channel.key} Price`,channel.key==="online"?"Online Price":"")}));
     const salesChannelsColumn=findColumn("Sale Channels","Sales Channels","Available Channels");
@@ -5337,7 +5545,6 @@ function mapMenuImportRows(matrix) {
             unit: valueAt(row, columns.unit) || null,
             taxRate: rawTax === null ? null : Number.isFinite(rawTax) && rawTax >= 0 && rawTax <= 100 ? rawTax : null,
             taxMode: ["inclusive", "exclusive"].includes(rawTaxMode) ? rawTaxMode : null,
-            kotGroup: valueAt(row, columns.kotGroup) || null,
             error: reason || (rawTax !== null && (!Number.isFinite(rawTax) || rawTax < 0 || rawTax > 100) ? "Tax rate must be between 0 and 100." : "")
         };
     }).filter(item => item.name || item.category || item.price !== null);
@@ -6387,6 +6594,9 @@ async function loadSettings() {
     setSettingValue("settingAddress", appSettings.address);
     setSettingValue("settingPhone", appSettings.phone);
     setSettingValue("settingGstin", appSettings.gstin);
+    pendingBusinessLogoUrl = null;
+    businessLogoChanged = false;
+    setRestaurantLogoPreview(currentUser?.logo_url || "");
     setSettingValue("settingHeader", appSettings.header);
     setSettingValue("settingFooter", appSettings.footer);
     setSettingValue("settingShowInvoice", appSettings.showInvoice);
@@ -6431,6 +6641,71 @@ async function loadSettings() {
     renderBillingSaleChannelOptions();
     renderBillingAdjustmentAppliesOptions();
     applyPermissionsToUI();
+}
+
+function setRestaurantLogoPreview(logoUrl) {
+    const wrap = document.getElementById("settingRestaurantLogoPreviewWrap");
+    const image = document.getElementById("settingRestaurantLogoPreview");
+    const hasLogo = Boolean(String(logoUrl || "").trim());
+    if (image) image.src = hasLogo ? String(logoUrl) : "";
+    if (wrap) wrap.hidden = !hasLogo;
+}
+
+async function handleRestaurantLogoUpload(input) {
+    const file = input?.files?.[0];
+    if (!file) return;
+    if (!/^image\/(?:png|jpeg|webp)$/.test(file.type)) {
+        input.value = "";
+        return alert("Choose a PNG, JPG or WebP image.");
+    }
+    if (file.size > 12 * 1024 * 1024) {
+        input.value = "";
+        return alert("Choose a logo image smaller than 12 MB.");
+    }
+    try {
+        const bitmap = await createImageBitmap(file);
+        if (bitmap.width * bitmap.height > 40000000) {
+            bitmap.close?.();
+            throw new Error("Choose a logo image with dimensions below 40 megapixels.");
+        }
+        const canvas = document.createElement("canvas");
+        let result = "";
+        for (const size of [600, 480, 360]) {
+            const scale = Math.min(1, size / bitmap.width, size / bitmap.height);
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            const context = canvas.getContext("2d");
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            for (const quality of [0.84, 0.72, 0.6]) {
+                result = canvas.toDataURL("image/webp", quality);
+                if (result.length <= 760000) break;
+            }
+            if (result.length <= 760000) break;
+        }
+        bitmap.close?.();
+        if (!result.startsWith("data:image/webp;base64,") || result.length > 760000) {
+            throw new Error("This logo could not be compressed enough. Choose a smaller or simpler image.");
+        }
+        pendingBusinessLogoUrl = result;
+        businessLogoChanged = true;
+        setRestaurantLogoPreview(result);
+    } catch (error) {
+        input.value = "";
+        alert(error.message || "Could not read this logo image.");
+    }
+}
+
+function removeRestaurantLogo() {
+    pendingBusinessLogoUrl = "";
+    businessLogoChanged = true;
+    const input = document.getElementById("settingRestaurantLogoFile");
+    if (input) input.value = "";
+    setRestaurantLogoPreview("");
+}
+
+function businessLogoUrl() {
+    return String(currentUser?.logo_url || "");
 }
 
 async function saveSettings() {
@@ -6490,11 +6765,23 @@ async function saveSettings() {
     localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
     localStorage.setItem("cafeThermalPaperWidth", appSettings.paperWidth);
 
+    let logoSaveError = "";
+    if (businessLogoChanged) {
+        try {
+            const savedLogo = await api("/business/profile/logo", { method: "PUT", body: JSON.stringify({ logoUrl: pendingBusinessLogoUrl }) });
+            currentUser.logo_url = savedLogo.logoUrl || "";
+            pendingBusinessLogoUrl = null;
+            businessLogoChanged = false;
+            setRestaurantLogoPreview(currentUser.logo_url);
+        } catch (error) {
+            logoSaveError = error.message || "The business logo could not be saved.";
+        }
+    }
     try {
         await api("/settings", { method: "PUT", body: JSON.stringify(appSettings) });
-        alert("Settings saved successfully! ✅");
+        alert(logoSaveError ? `Settings saved, but the logo was not updated: ${logoSaveError}` : "Settings saved successfully! ✅");
     } catch (error) {
-        alert("Settings saved locally. Server could not be reached.");
+        alert(logoSaveError ? `Settings saved locally. The logo was not updated: ${logoSaveError}` : "Settings saved locally. Server could not be reached.");
     }
 }
 
@@ -7122,6 +7409,9 @@ async function updateDashboard() {
 // ==========================================
 
 let salesAuditTransactions = [];
+const SALES_AUDIT_EXPORT_COLUMNS = [
+    "Branch Name", "Branch Code", "BranchLabels", "Business Brand", "Business Date", "Invoice Number", "Customer TIN number/PAN no.", "Statement Number", "Invoice Date", "Sale Status", "Advance Order", "E-Invoice IRN Status", "E-Invoice IRN Number", "E-Invoice Remarks", "E-Invoice Customer TIN", "Amount Returned", "Return Payment Mode", "Fulfillment Status", "Invoice Type", "Order Number", "Offline Order Number", "Order Source", "Source Order Number", "Source Outlet Id", "Open Order Amount", "Gross Amount", "Discounts", "Direct Charge Amount", "Net Amount", "Other Charge Amount", "Taxes", "Rounding", "Tip", "Total", "Paid Amount", "Balance Due", "% Discount", "Tax paid by Aggregator", "Payment Modes", "Materials Cost", "Supplies Cost", "Channel", "Channel Label", "Session", "Label", "Tags", "Order Notes", "Resource Group Name", "Number of Items", "Total Quantity", "By Reservation", "Reservation Source", "Reservation Reference", "Number Of People", "Duration (Minutes)", "Number of Tickets", "Number of Modified Tickets", "Number of Cancelled Tickets", "Number of Bill Prints", "Modified After Print", "Modified After Close", "Change Logs After Print", "Bill Print Log", "Created Date", "Created By", "Closed By", "Sale By", "Delivery Mode", "Delivery By", "Delivery User ID", "Time to Accept", "Time to Prepare", "Time to Process", "Time to Assign", "Time to Rider Arrive", "Time to Dispatch", "Time to Deliver", "Time to Settle", "Time to Cancel", "Cancel/Void Date", "Cancel/Void By", "Reason For Cancel/Void/Non Chargeable", "Remarks for Cancel/Void/Non Chargeable", "Source Reason for Cancel/Void", "Customer Id", "Customer Name", "Company Name", "Customer Phone", "Phone Prefix", "Deliver To Contact", "Deliver To Phone", "Deliver To Phone Prefix", "Deliver To Address", "Delivery To Latitude", "Delivery To Longitude", "Last Update from Device", "Target Order Number", "Bill Link", "Warnings", "Source Customer Id", "Charges Amount (Initial)", "Charges Amount (Removed)"
+];
 
 async function loadSalesAuditReport() {
     const status = document.getElementById("salesAuditStatus");
@@ -7136,28 +7426,33 @@ async function loadSalesAuditReport() {
     const params = new URLSearchParams({ range });
     if (range === "custom") { params.set("from", from); params.set("to", to); }
     if (status) status.textContent = "Loading sale transactions…";
-    if (body) body.innerHTML = '<tr><td colspan="10">Loading transactions…</td></tr>';
+    if (body) body.innerHTML = '<tr><td colspan="15">Loading sales…</td></tr>';
     try {
         const result = await api(`/reports/sales-audit?${params.toString()}`);
         salesAuditTransactions = Array.isArray(result.transactions) ? result.transactions : [];
         if (!body) return;
         body.innerHTML = salesAuditTransactions.length ? salesAuditTransactions.map(row => `
             <tr>
-                <td>${esc(row.payment_time ? new Date(row.payment_time).toLocaleString() : "-")}</td>
-                <td><strong>${esc(row.order_number || `#${row.order_id}`)}</strong><br><small>${esc(row.invoice_number || "No invoice")}</small></td>
-                <td>${esc(row.order_type || "-")}${row.table_number ? ` · ${esc(row.table_number)}` : ""}</td>
-                <td>${esc(row.payment_method || "-")}${row.payment_status && row.payment_status !== "Success" ? `<br><small>${esc(row.payment_status)}</small>` : ""}</td>
-                <td>${esc(row.transaction_id || "-")}</td>
-                <td>${money(row.transaction_amount)}</td>
+                <td>${esc(row.business_date ? new Date(row.business_date).toLocaleString() : "-")}</td>
+                <td>${esc(row.invoice_date ? new Date(row.invoice_date).toLocaleString() : "-")}</td>
+                <td>${esc(row.invoice_number || "-")}</td>
+                <td><strong>${esc(row.order_number || `#${row.order_id}`)}</strong></td>
+                <td>${esc(row.channel_label || row.order_type || "-")}${row.table_number ? ` · ${esc(row.table_number)}` : ""}</td>
+                <td>${esc(row.customer_name || "-")}</td>
+                <td>${esc(row.payment_modes || "-")}</td>
+                <td>${money(row.subtotal)}</td>
+                <td>${money(row.discount)}</td>
+                <td>${money(row.service_charge)}</td>
+                <td>${money(row.gst)}</td>
                 <td>${money(row.bill_total)}</td>
                 <td>${money(row.amount_collected)}</td>
                 <td>${money(row.amount_due)}</td>
                 <td>${esc(row.order_status || "-")}</td>
-            </tr>`).join("") : '<tr><td colspan="10">No sale transactions found for this period.</td></tr>';
-        if (status) status.textContent = `${salesAuditTransactions.length} payment transaction${salesAuditTransactions.length === 1 ? "" : "s"} loaded. Split payments appear as separate rows; collected and due amounts are order-level totals.`;
+            </tr>`).join("") : '<tr><td colspan="15">No sale transactions found for this period.</td></tr>';
+        if (status) status.textContent = `${salesAuditTransactions.length} completed sale${salesAuditTransactions.length === 1 ? "" : "s"} loaded. Each order is one row; split payment methods are combined.`;
     } catch (error) {
         salesAuditTransactions = [];
-        if (body) body.innerHTML = `<tr><td colspan="10">Unable to load audit: ${esc(error.message)}</td></tr>`;
+        if (body) body.innerHTML = `<tr><td colspan="15">Unable to load audit: ${esc(error.message)}</td></tr>`;
         if (status) status.textContent = "The transaction audit could not be loaded.";
     }
 }
@@ -7165,14 +7460,34 @@ async function loadSalesAuditReport() {
 function downloadSalesAuditCSV() {
     if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
     if (!salesAuditTransactions.length) return alert("Load sale transactions before downloading the audit.");
-    const columns = [
-        ["Payment time", row => row.payment_time], ["Order number", row => row.order_number], ["Invoice number", row => row.invoice_number],
-        ["Order type", row => row.order_type], ["Table", row => row.table_number], ["Payment method", row => row.payment_method],
-        ["Payment status", row => row.payment_status], ["Transaction ID", row => row.transaction_id], ["Transaction amount", row => row.transaction_amount],
-        ["Bill total", row => row.bill_total], ["Order amount collected to date", row => row.amount_collected], ["Order amount due", row => row.amount_due], ["Order status", row => row.order_status]
-    ];
-    const csvCell = value => csvSafeCell(value);
-    const content = "\uFEFF" + [columns.map(([label]) => label), ...salesAuditTransactions.map(row => columns.map(([, get]) => get(row)))].map(row => row.map(csvCell).join(",")).join("\r\n");
+    const auditDate = value => value ? new Date(value).toLocaleString() : "";
+    const content = "\uFEFF" + [SALES_AUDIT_EXPORT_COLUMNS, ...salesAuditTransactions.map(row => {
+        const values = {
+            "Branch Name": row.business_name, "Branch Code": row.business_code, "Business Brand": row.business_name,
+            "Business Date": auditDate(row.business_date), "Invoice Number": row.invoice_number, "Invoice Date": auditDate(row.invoice_date),
+            "Customer TIN number/PAN no.": row.customer_gstin, "E-Invoice Customer TIN": row.customer_gstin,
+            "Sale Status": row.order_status, "Fulfillment Status": row.order_status, "Order Number": row.order_number,
+            "Order Source": row.public_tracking_token ? "QR Menu" : "POS", "Open Order Amount": 0,
+            "Gross Amount": row.subtotal, "Discounts": row.discount, "Net Amount": row.net_amount,
+            "Other Charge Amount": row.service_charge, "Taxes": row.gst, "Rounding": row.rounding_amount,
+            "Total": row.bill_total, "Paid Amount": row.amount_collected, "Balance Due": row.amount_due,
+            "% Discount": row.discount_percent, "Payment Modes": row.payment_modes,
+            "Channel": row.sales_channel_key || row.order_type, "Channel Label": row.channel_label,
+            "Tags": row.marketing_deal_name || row.discount_adjustment_name, "Order Notes": row.notes,
+            "Resource Group Name": row.resource_group_names, "Number of Items": row.item_count,
+            "Total Quantity": row.total_quantity, "Number Of People": row.pax,
+            "Duration (Minutes)": row.duration_minutes, "Number of Tickets": row.number_of_tickets,
+            "Modified After Print": row.modified_after_print, "Modified After Close": row.modified_after_close,
+            "Change Logs After Print": row.changes_after_print, "Bill Print Log": auditDate(row.bill_printed_at),
+            "Created Date": auditDate(row.created_at), "Created By": row.created_by, "Closed By": row.closed_by,
+            "Sale By": row.created_by, "Delivery Mode": /deliver/i.test(String(row.order_type || "")) ? row.order_type : "",
+            "Time to Accept": row.time_to_accept, "Time to Prepare": row.time_to_prepare,
+            "Customer Id": row.customer_id, "Customer Name": row.customer_name, "Customer Phone": row.customer_phone,
+            "Deliver To Address": /deliver/i.test(String(row.order_type || "")) ? row.customer_address : "",
+            "Reason For Cancel/Void/Non Chargeable": row.non_chargeable_reason || row.cancellation_reason
+        };
+        return SALES_AUDIT_EXPORT_COLUMNS.map(column => values[column] ?? "");
+    })].map(row => row.map(csvSafeCell).join(",")).join("\r\n");
     const blobUrl = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = blobUrl;
@@ -8252,7 +8567,7 @@ window.exportCompleteReportCSV = function() {
 
     appendTable(
         "SALE TRANSACTION AUDIT",
-        ["Payment time", "Order / Invoice", "Type / Table", "Payment mode", "Transaction ID", "Transaction", "Bill total", "Order collected to date", "Order due", "Order status"],
+        ["Business date", "Invoice date", "Invoice number", "Order number", "Channel / table", "Customer", "Payment modes", "Gross", "Discount", "Other charges", "Taxes", "Total", "Paid", "Balance due", "Sale status"],
         "salesAuditBody"
     );
 
@@ -8399,7 +8714,7 @@ async function loadSelectedLoyaltyCustomer(){const id=document.getElementById('l
 
 
 function saveInvoiceDesigner(){appSettings.accentLabel=document.getElementById('designerAccent')?.value||'';appSettings.logoUrl=document.getElementById('designerLogo')?.value||'';appSettings.receiptFont=document.getElementById('designerFontSize')?.value||'13';appSettings.designerShowNotes=document.getElementById('designerShowNotes')?.checked!==false;appSettings.designerShowInvoiceMeta=document.getElementById('designerShowInvoiceMeta')?.checked!==false;appSettings.designerCompact=document.getElementById('designerCompact')?.checked===true;localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));renderInvoiceDesignerPreview();api('/settings',{method:'PUT',body:JSON.stringify(appSettings)}).then(()=>alert('Invoice design saved.')).catch(()=>alert('Saved locally; server settings unavailable.'));}
-function renderInvoiceDesignerPreview(){const p=document.getElementById('invoiceDesignerPreview');if(!p)return;const font=document.getElementById('designerFontSize')?.value||'13';const logo=document.getElementById('designerLogo')?.value||appSettings.logoUrl;const name=appSettings.restaurantName||'SLASH POS';p.innerHTML=`${logo?`<img src="${esc(logo)}" alt="logo" class="invoice-preview-logo">`:''}<div class="invoice-preview-name">${esc(name)}</div><div>${esc(document.getElementById('designerAccent')?.value||'Cafe Receipt')}</div><hr><div class="preview-row"><span>Invoice</span><b>INV-000123</b></div><div class="preview-row"><span>Order</span><b>ORD-00123</b></div><hr><div class="preview-line"><span>☕ Cappuccino ×2</span><b>₹240.00</b></div><div class="preview-line"><span>🥪 Sandwich ×1</span><b>₹180.00</b></div><hr><div class="preview-row"><span>Subtotal</span><span>₹420.00</span></div><div class="preview-row"><span>GST</span><span>₹21.00</span></div><div class="preview-row preview-total"><span>Total</span><b>₹441.00</b></div><p style="margin-top:12px">${esc(appSettings.customerMessage||'Thank you for visiting!')}</p>`;p.style.fontSize=font+'px';}
+function renderInvoiceDesignerPreview(){const p=document.getElementById('invoiceDesignerPreview');if(!p)return;const font=document.getElementById('designerFontSize')?.value||'13';const logo=businessLogoUrl()||document.getElementById('designerLogo')?.value||appSettings.logoUrl;const name=appSettings.restaurantName||'SLASH POS';p.innerHTML=`${logo?`<img src="${esc(logo)}" alt="logo" class="invoice-preview-logo">`:''}<div class="invoice-preview-name">${esc(name)}</div><div>${esc(document.getElementById('designerAccent')?.value||'Cafe Receipt')}</div><hr><div class="preview-row"><span>Invoice</span><b>INV-000123</b></div><div class="preview-row"><span>Order</span><b>ORD-00123</b></div><hr><div class="preview-line"><span>☕ Cappuccino ×2</span><b>₹240.00</b></div><div class="preview-line"><span>🥪 Sandwich ×1</span><b>₹180.00</b></div><hr><div class="preview-row"><span>Subtotal</span><span>₹420.00</span></div><div class="preview-row"><span>GST</span><span>₹21.00</span></div><div class="preview-row preview-total"><span>Total</span><b>₹441.00</b></div><p style="margin-top:12px">${esc(appSettings.customerMessage||'Thank you for visiting!')}</p>`;p.style.fontSize=font+'px';}
 
 async function discoverWindowsPrinters(){
     const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
@@ -9081,10 +9396,7 @@ function renderQrStockItems(){
 }
 
 async function printOrderKOT(orderId){
-    try{
-        await api("/orders/"+Number(orderId)+"/kot",{method:"POST"});
-        await printKOT(orderId);
-    }catch(error){alert("Unable to print KOT: "+(error.message||"Check the order and try again."));}
+    await printKOT(orderId);
 }
 let posQrOrderAlertCursor=null;
 let posQrOrderAlertTimer=null;

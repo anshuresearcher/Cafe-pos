@@ -155,7 +155,15 @@ app.use((req, res, next) => {
 });
 const standardJsonParser = express.json({ limit: "100kb" });
 const menuImportJsonParser = express.json({ limit: "25mb" });
-app.use((req, res, next) => (req.path === "/api/menu/import" ? menuImportJsonParser : standardJsonParser)(req, res, next));
+const businessLogoJsonParser = express.json({ limit: "1mb" });
+app.use((req, res, next) => {
+    const parser = req.path === "/api/menu/import"
+        ? menuImportJsonParser
+        : req.path === "/api/business/profile/logo"
+            ? businessLogoJsonParser
+            : standardJsonParser;
+    parser(req, res, next);
+});
 app.use(express.static(path.join(__dirname, "public")));
 
 
@@ -883,6 +891,7 @@ function permissionForRequest(req) {
     if (path === '/customers' && req.query?.export === '1') return 'customers.export';
     if (path.startsWith('/reports/')) return 'reports.view';
     if (path === '/settings') return method === 'GET' ? 'settings.view' : 'settings.edit';
+    if (path === '/business/profile/logo') return method === 'PUT' ? 'settings.edit' : 'settings.view';
     if (path === '/settings/sales-channels') return method === 'GET' ? 'settings.view' : 'settings.edit';
     if (path === '/menu-option-sets') return method === 'GET' ? 'menu.view' : 'menu.edit';
     if (path === '/billing-adjustments' || path.startsWith('/billing-adjustments/')) return method === 'GET' ? 'settings.view' : 'settings.edit';
@@ -910,6 +919,7 @@ function permissionForRequest(req) {
         if (path === '/' + prefix || path.startsWith('/' + prefix + '/')) {
             if (module === 'kitchen') {
                 if (req.query?.print === '1') return 'kitchen.print';
+                if (method === 'GET' && req.query?.orderId !== undefined) return 'orders.view';
                 if (method === 'GET' && req.query?.range === 'all' && req.user?.permissions?.['orders.print_open'] === true) return 'orders.print_open';
                 return method === 'GET' ? 'kitchen.view' : 'kitchen.edit';
             }
@@ -920,6 +930,8 @@ function permissionForRequest(req) {
         }
     }
     if (path.endsWith('/payment-summary')) return 'payments.view';
+    if (/^\/orders\/\d+\/settle$/.test(path) && method === 'POST') return 'payments.create';
+    if (/^\/orders\/\d+\/qr-status$/.test(path) && method === 'PUT') return 'kitchen.edit';
     if (path === '/orders' || path.startsWith('/orders/')) {
         if (/^\/orders\/\d+\/cancel$/.test(path) && method === 'PUT') return 'orders.cancel';
         if (/^\/orders\/\d+\/printed$/.test(path)) return 'orders.print_open';
@@ -952,7 +964,7 @@ async function requireAuth(req, res, next) {
                    u.active, u.permissions_override, u.is_owner,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
-                   b.logo_url, b.currency, b.active AS business_active,
+                   b.currency, b.active AS business_active,
                    p.name AS profile_name, COALESCE(u.permissions_override, p.permissions, '{}'::jsonb) AS permissions,
                    row_to_json(d) AS device_data, row_to_json(l) AS license_data
             FROM app_sessions s
@@ -975,7 +987,7 @@ async function requireAuth(req, res, next) {
             business_id: row.user_business_id, active: row.active, permissions_override: row.permissions_override, is_owner: row.is_owner === true,
             business_name: row.business_name, business_type: row.business_type, owner_name: row.owner_name,
             business_phone: row.business_phone, business_email: row.business_email, business_address: row.business_address,
-            city: row.city, state: row.state, gstin: row.gstin, logo_url: row.logo_url, currency: row.currency,
+            city: row.city, state: row.state, gstin: row.gstin, currency: row.currency,
             business_active: row.business_active, profile_name: row.profile_name, permissions: row.permissions
         };
         if (!user.active) return res.status(401).json({ error: "Session is invalid or user is inactive" });
@@ -2745,15 +2757,7 @@ app.post("/api/menu/import", async (req, res) => {
                 categoriesCreated += 1;
             }
 
-            let kotGroupId = current?.kot_group_id || null;
-            const rawKOTGroup = String(source.kotGroup || source.kot_group || "").trim();
-            if (rawKOTGroup) {
-                const byId = /^\d+$/.test(rawKOTGroup)
-                    ? await client.query(`SELECT id FROM kot_groups WHERE id=$1 AND business_id=$2`, [Number(rawKOTGroup), businessId])
-                    : await client.query(`SELECT id FROM kot_groups WHERE LOWER(name)=LOWER($1) AND business_id=$2`, [rawKOTGroup, businessId]);
-                kotGroupId = byId.rows[0]?.id || null;
-                if (!kotGroupId) warnings.push({ row: Number(source.rowNumber) || index + 2, name, reason: `KOT group "${rawKOTGroup}" was not found for this business; the existing station was kept.` });
-            }
+            const kotGroupId = current?.kot_group_id || null;
 
             const nature = ["Goods", "Service"].includes(source.nature) ? source.nature : current?.nature || "Goods";
             const unit = String(source.unit || current?.unit || "ea").trim().slice(0, 20) || "ea";
@@ -2810,13 +2814,13 @@ app.put(
             const category = String(req.body.category || '').trim();
             const nature = ['Goods','Service'].includes(req.body.nature) ? req.body.nature : 'Goods';
             const unit = String(req.body.unit || 'ea').trim() || 'ea';
-            const kotGroupId = req.body.kotGroupId ? Number(req.body.kotGroupId) : null;
             const tax = normaliseTaxPayload(req.body);
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
-            const currentImage = await client.query("SELECT image_url,sku,description,sales_channels FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
+            const currentImage = await client.query("SELECT image_url,sku,description,sales_channels,kot_group_id FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
             if (!currentImage.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Menu item not found" }); }
+            const kotGroupId = req.body.kotGroupId === undefined ? currentImage.rows[0].kot_group_id : (req.body.kotGroupId ? Number(req.body.kotGroupId) : null);
             const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
             const salesChannels = cleanMenuSalesChannels(req.body.salesChannels === undefined ? currentImage.rows[0].sales_channels : req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const imageUrl = cleanMenuImage(req.body.imageUrl, currentImage.rows[0].image_url);
@@ -3181,13 +3185,13 @@ async function createKOTForOrder(db, businessId, orderId) {
     `, [Number(orderId), Number(businessId)]);
     if (!items.rows.length) return 0;
     const groups = await db.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [Number(businessId)]);
-    const activeGroupIds = new Set(groups.rows.map(group=>Number(group.id)));
+    const activeGroupIds = new Set(groups.rows.map(group => Number(group.id)));
     const values=[];
     const rows=items.rows.map((item,index)=>{
         const itemRoute=groups.rows.find(group=>Number(item.menu_id)>0&&Array.isArray(group.item_ids)&&group.item_ids.map(Number).includes(Number(item.menu_id)));
         const categoryRoute=groups.rows.find(group=>item.category&&Array.isArray(group.category_names)&&group.category_names.some(category=>String(category).toLowerCase()===String(item.category).toLowerCase()));
-        const fallback=activeGroupIds.has(Number(item.kot_group_id))?Number(item.kot_group_id):null;
-        const groupId=Number(itemRoute?.id||categoryRoute?.id||fallback)||null;
+        const legacyGroup=activeGroupIds.has(Number(item.kot_group_id))?Number(item.kot_group_id):null;
+        const groupId=Number(itemRoute?.id||categoryRoute?.id||legacyGroup)||null;
         const offset=index*7;
         values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]),Number(item.order_item_id));
         return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7})`;
@@ -3405,7 +3409,6 @@ app.post(
                 return {
                     source: item, name, price: 0, quantity, menuId,
                     variantId: Number(item.variantId ?? item.variant_id) || null,
-                    kotGroupId: Number(item.kotGroupId ?? item.kot_group_id) || null,
                     options: cleanOrderOptions(item.options),
                     basePrice: 0
                 };
@@ -3469,10 +3472,10 @@ app.post(
             total = Math.round((Math.max(0, subtotal - discountAssigned) + serviceCharge + gst) * 100) / 100;
             const routeGroups = await client.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [businessId]);
             for (const item of normalizedItems) {
-                const menuGroupId = Number(menuMetadataById.get(item.menuId)?.kot_group_id) || null;
                 const itemRoute = routeGroups.rows.find(group => Array.isArray(group.item_ids) && group.item_ids.map(Number).includes(Number(item.menuId)));
                 const categoryRoute = routeGroups.rows.find(group => Array.isArray(group.category_names) && group.category_names.some(category => String(category).toLowerCase() === item.category.toLowerCase()));
-                item.kotGroupId = Number(itemRoute?.id || categoryRoute?.id || item.kotGroupId || menuGroupId) || null;
+                const legacyGroup = Number(menuMetadataById.get(item.menuId)?.kot_group_id) || null;
+                item.kotGroupId = Number(itemRoute?.id || categoryRoute?.id || legacyGroup) || null;
             }
             const kotGroupIds = [...new Set(normalizedItems.map(item => item.kotGroupId).filter(Boolean))];
             const validKotGroupIds = kotGroupIds.length ? await client.query(
@@ -3693,6 +3696,42 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
     }
 });
 
+app.put("/api/orders/:id/qr-status", async (req, res) => {
+    const businessId = Number(req.user?.business_id || 0);
+    const orderId = Number(req.params.id);
+    const nextStatus = String(req.body?.status || "").trim();
+    if (!Number.isInteger(orderId) || orderId <= 0) return res.status(400).json({ error: "Invalid order ID." });
+    if (!["Preparing", "Ready"].includes(nextStatus)) return res.status(400).json({ error: "Choose Accept or Mark Ready." });
+    const client = await rawPoolConnect();
+    try {
+        await client.query("BEGIN");
+        await applyTenantDbContext(client);
+        const found = await client.query("SELECT id,order_number,public_tracking_token,status FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE", [orderId, businessId]);
+        const order = found.rows[0];
+        if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Order not found." }); }
+        if (!order.public_tracking_token && !/^QR-/i.test(String(order.order_number || ""))) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This workflow is only available for QR orders." }); }
+        const currentStatus = String(order.status || "").trim().toLowerCase();
+        const targetStatus = nextStatus.toLowerCase();
+        if (currentStatus !== targetStatus) {
+            const validNext = currentStatus === "pending" ? "preparing" : currentStatus === "preparing" ? "ready" : null;
+            if (validNext !== targetStatus) {
+                await client.query("ROLLBACK");
+                return res.status(409).json({ error: currentStatus === "ready" ? "This QR order is already ready for checkout." : "QR orders must be accepted before they can be marked ready." });
+            }
+            await client.query("UPDATE orders SET status=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3", [nextStatus, orderId, businessId]);
+            const kotStatus = nextStatus === "Preparing" ? "Preparing" : "Ready";
+            await client.query("UPDATE kot SET status=$1 WHERE order_id=$2 AND business_id=$3 AND status IN ('Pending','Preparing')", [kotStatus, orderId, businessId]);
+            await recordOrderActivity(client, orderId, nextStatus === "Preparing" ? "QR order accepted" : "QR order marked ready", nextStatus === "Preparing" ? "QR order accepted and sent to preparation." : "QR order marked ready for checkout.", req);
+        }
+        await client.query("COMMIT");
+        res.json({ success: true, status: nextStatus });
+    } catch (error) {
+        await client.query("ROLLBACK").catch(() => {});
+        console.error("QR order workflow update failed:", error);
+        res.status(500).json({ error: "Could not update the QR order." });
+    } finally { client.release(); }
+});
+
 app.get(
     "/api/orders",
     async (req, res) => {
@@ -3822,6 +3861,10 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     );
     const order = orderResult.rows[0];
     if (!order) throw new Error("Order not found");
+    const isQrOnlineOrder = Boolean(order.public_tracking_token) || /^QR-/i.test(String(order.order_number || ""));
+    if (isQrOnlineOrder && String(order.status || "").trim().toLowerCase() !== "ready") {
+        throw Object.assign(new Error("QR orders must be accepted and marked ready before checkout."), { status: 409 });
+    }
     const collectedBefore = Number(order.collected_before || 0);
     const billTotal = Math.max(0, Number(order.total || 0));
     const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
@@ -3874,7 +3917,7 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         insertedPayments = inserted.rows;
     }
 
-    const nextStatus = keepOpen ? "Open" : "Completed";
+    const nextStatus = keepOpen ? (isQrOnlineOrder ? order.status : "Open") : "Completed";
     const orderUpdate = await client.query(`
         UPDATE orders SET payment_method=$1,status=$2,non_chargeable_reason=$3,updated_at=CURRENT_TIMESTAMP
         WHERE id=$4 AND business_id=$5 RETURNING *
@@ -5388,7 +5431,7 @@ app.get(
                        p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
                        o.order_number,o.order_type,o.table_number,o.pax
                 FROM kot k JOIN orders o ON k.order_id=o.id
-                LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id
+                LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=o.business_id
                 LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=o.business_id
                 WHERE o.business_id=$1 AND ($2::int IS NULL OR o.id=$2::int)
                   AND k.created_at >= ${dateRange.start}
@@ -5419,9 +5462,20 @@ app.put(
             );
             if(!result.rows.length) return res.status(404).json({error:"KOT not found"});
 
-            await recordOrderActivity(pool,result.rows[0].order_id,"Kitchen status changed",`Kitchen ticket marked ${status}.`,req);
+            const savedKot = result.rows[0];
+            const qrOrder = await pool.query("SELECT id,order_number,public_tracking_token,status FROM orders WHERE id=$1 AND business_id=$2 LIMIT 1", [Number(savedKot.order_id), Number(req.user.business_id)]);
+            const order = qrOrder.rows[0];
+            if (order && (order.public_tracking_token || /^QR-/i.test(String(order.order_number || ""))) && !["completed", "cancelled"].includes(String(order.status || "").toLowerCase())) {
+                const ticketStates = await pool.query("SELECT status FROM kot WHERE order_id=$1 AND business_id=$2", [Number(order.id), Number(req.user.business_id)]);
+                const states = ticketStates.rows.map(row => String(row.status || "Pending"));
+                const orderStatus = states.length && states.every(value => ["Ready", "Completed"].includes(value))
+                    ? "Ready"
+                    : states.some(value => ["Preparing", "Ready", "Completed"].includes(value)) ? "Preparing" : "Pending";
+                if (String(order.status || "") !== orderStatus) await pool.query("UPDATE orders SET status=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3 AND status NOT IN ('Completed','Cancelled')", [orderStatus, Number(order.id), Number(req.user.business_id)]);
+            }
+            await recordOrderActivity(pool,savedKot.order_id,"Kitchen status changed",`Kitchen ticket marked ${status}.`,req);
 
-            res.json({success:true,kot:result.rows[0]});
+            res.json({success:true,kot:savedKot});
         } catch(e){
             console.error("KOT update error:",e);
             res.status(500).json({error:"Failed to update KOT"});
@@ -6032,25 +6086,78 @@ app.get("/api/reports/sales-audit", async (req, res) => {
         const businessId = Number(req.user.business_id);
         const dateRange = getReportDateRange(req.query.range || "today", req.query.from, req.query.to);
         const result = await pool.query(`
-            SELECT p.id AS payment_id,p.created_at AS payment_time,p.amount AS transaction_amount,
-                   p.payment_method,p.payment_status,p.transaction_id,
-                   o.id AS order_id,o.order_number,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS order_type,o.table_number,o.total AS bill_total,o.status AS order_status,
-                   i.invoice_number,
-                   COALESCE(paid.amount_collected,0) AS amount_collected,
-                   CASE WHEN o.payment_method='Non-chargeable' THEN 0
-                        ELSE GREATEST(o.total-COALESCE(paid.amount_collected,0),0) END AS amount_due
-            FROM payments p
-            INNER JOIN orders o ON o.id=p.order_id AND o.business_id=p.business_id AND o.status='Completed'
-            LEFT JOIN invoices i ON i.order_id=o.id
+            SELECT b.business_name,b.business_code,
+                   o.id AS order_id,o.order_number,o.order_type,o.table_number,o.pax,
+                   o.created_at,o.updated_at,o.subtotal,o.discount,o.service_charge,o.gst,o.total AS bill_total,
+                   o.status AS order_status,o.notes,o.non_chargeable_reason,o.cancellation_reason,o.bill_printed_at,
+                   o.public_tracking_token,o.marketing_deal_name,o.discount_adjustment_name,
+                   o.customer_id,o.sales_channel_key,
+                   COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS channel_label,
+                   i.invoice_number,i.invoice_date,
+                   c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,
+                   c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
+                   COALESCE(pay.amount_collected,0) AS amount_collected,
+                   CASE WHEN o.payment_method='Non-chargeable' THEN 0 ELSE GREATEST(o.total-COALESCE(pay.amount_collected,0),0) END AS amount_due,
+                   COALESCE(pay.payment_modes,'') AS payment_modes,
+                   COALESCE(pay.transaction_ids,'') AS transaction_ids,
+                   pay.first_payment_time,pay.last_payment_time,
+                   activity.created_by,activity.closed_by,activity.closed_at,activity.accepted_at,activity.ready_at,
+                   COALESCE(activity.modified_after_print,0) AS modified_after_print,
+                   COALESCE(activity.modified_after_close,0) AS modified_after_close,
+                   COALESCE(activity.changes_after_print,'') AS changes_after_print,
+                   COALESCE(items.item_count,0) AS item_count,COALESCE(items.total_quantity,0) AS total_quantity,
+                   COALESCE(kot_summary.resource_group_names,'') AS resource_group_names,
+                   COALESCE(kot_summary.number_of_tickets,0) AS number_of_tickets,
+                   CASE WHEN o.subtotal>0 THEN ROUND((o.discount/o.subtotal)*100,2) ELSE 0 END AS discount_percent,
+                   GREATEST(o.subtotal-o.discount,0) AS net_amount,
+                   o.total-((o.subtotal-o.discount)+o.service_charge+o.gst) AS rounding_amount,
+                   CASE WHEN activity.closed_at IS NOT NULL AND o.created_at IS NOT NULL
+                        THEN ROUND(EXTRACT(EPOCH FROM (activity.closed_at-o.created_at))/60.0,2) ELSE NULL END AS duration_minutes,
+                   CASE WHEN activity.accepted_at IS NOT NULL AND o.created_at IS NOT NULL
+                        THEN ROUND(EXTRACT(EPOCH FROM (activity.accepted_at-o.created_at))/60.0,2) ELSE NULL END AS time_to_accept,
+                   CASE WHEN activity.ready_at IS NOT NULL AND activity.accepted_at IS NOT NULL
+                        THEN ROUND(EXTRACT(EPOCH FROM (activity.ready_at-activity.accepted_at))/60.0,2) ELSE NULL END AS time_to_prepare,
+                   COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) AS business_date
+            FROM orders o
+            INNER JOIN businesses b ON b.id=o.business_id
+            LEFT JOIN invoices i ON i.order_id=o.id AND i.business_id=o.business_id
+            LEFT JOIN customers c ON c.id=o.customer_id AND c.business_id=o.business_id
             LEFT JOIN LATERAL (
-                SELECT SUM(p2.amount) AS amount_collected
-                FROM payments p2
-                WHERE p2.order_id=o.id AND p2.business_id=o.business_id AND p2.payment_status='Success'
-            ) paid ON TRUE
-            WHERE p.business_id=$1
-              AND p.created_at >= ${dateRange.start}
-              AND p.created_at < ${dateRange.end}
-            ORDER BY p.created_at DESC,p.id DESC
+                SELECT SUM(p.amount) AS amount_collected,
+                       STRING_AGG(DISTINCT p.payment_method,', ' ORDER BY p.payment_method) AS payment_modes,
+                       STRING_AGG(DISTINCT p.transaction_id,', ' ORDER BY p.transaction_id) FILTER (WHERE NULLIF(BTRIM(p.transaction_id),'') IS NOT NULL) AS transaction_ids,
+                       MIN(p.created_at) AS first_payment_time,MAX(p.created_at) AS last_payment_time
+                FROM payments p
+                WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
+            ) pay ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT (ARRAY_AGG(a.actor ORDER BY a.created_at ASC) FILTER (WHERE a.event_type='Order created'))[1] AS created_by,
+                       (ARRAY_AGG(a.actor ORDER BY a.created_at DESC) FILTER (WHERE a.event_type='Order completed'))[1] AS closed_by,
+                       MAX(a.created_at) FILTER (WHERE a.event_type='Order completed') AS closed_at,
+                       MAX(a.created_at) FILTER (WHERE a.event_type='QR order accepted') AS accepted_at,
+                       MAX(a.created_at) FILTER (WHERE a.event_type='QR order marked ready') AS ready_at,
+                       COUNT(*) FILTER (WHERE o.bill_printed_at IS NOT NULL AND a.created_at>o.bill_printed_at AND a.event_type='Closed bill edited') AS modified_after_print,
+                       COUNT(*) FILTER (WHERE a.event_type='Closed bill edited') AS modified_after_close,
+                       STRING_AGG(a.event_type || ': ' || NULLIF(a.description,''),' | ' ORDER BY a.created_at)
+                           FILTER (WHERE o.bill_printed_at IS NOT NULL AND a.created_at>o.bill_printed_at) AS changes_after_print
+                FROM order_activity a
+                WHERE a.order_id=o.id AND a.business_id=o.business_id
+            ) activity ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS item_count,COALESCE(SUM(oi.quantity),0) AS total_quantity
+                FROM order_items oi WHERE oi.order_id=o.id AND oi.business_id=o.business_id
+            ) items ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT STRING_AGG(DISTINCT kg.name,', ' ORDER BY kg.name) AS resource_group_names,
+                       COUNT(DISTINCT k.kot_group_id) AS number_of_tickets
+                FROM kot k
+                LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=k.business_id
+                WHERE k.order_id=o.id AND k.business_id=o.business_id
+            ) kot_summary ON TRUE
+            WHERE o.business_id=$1 AND o.status='Completed'
+              AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) >= ${dateRange.start}
+              AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) < ${dateRange.end}
+            ORDER BY COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) DESC,o.id DESC
         `, [businessId]);
         res.json({ transactions: result.rows });
     } catch (error) {
@@ -7982,6 +8089,31 @@ app.post("/api/marketing/push-campaigns", async (req, res) => {
         res.status(500).json({ error: "Could not send this promotion" });
     }
 });
+app.put("/api/business/profile/logo", async (req, res) => {
+    const businessId = Number(req.user?.business_id || 0);
+    const rawLogo = req.body?.logoUrl;
+    if (!Number.isInteger(businessId) || businessId <= 0) return res.status(401).json({ error: "Business session is required." });
+    if (rawLogo !== null && rawLogo !== undefined && typeof rawLogo !== "string") {
+        return res.status(400).json({ error: "Choose a PNG, JPEG or WebP logo image." });
+    }
+    const logoUrl = String(rawLogo || "").trim();
+    if (logoUrl.length > 780000) return res.status(413).json({ error: "Logo is too large. Choose a smaller image." });
+    if (logoUrl && !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(logoUrl)) {
+        return res.status(400).json({ error: "Logo must be a PNG, JPEG or WebP image." });
+    }
+    try {
+        const result = await runSystemContext(() => pool.query(
+            "UPDATE businesses SET logo_url=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 RETURNING id,logo_url",
+            [logoUrl || null, businessId]
+        ));
+        if (!result.rows.length) return res.status(404).json({ error: "Business profile not found." });
+        res.json({ success: true, logoUrl: result.rows[0].logo_url || "" });
+    } catch (error) {
+        console.error("Business logo update error:", error);
+        res.status(500).json({ error: "Could not update the business logo." });
+    }
+});
+
 app.get(
     "/api/settings",
     async (req, res) => {
