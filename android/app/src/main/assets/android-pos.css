@@ -1,0 +1,541 @@
+/* Android and phone billing workspace: one compact, scroll-safe screen. */
+.mobile-billing-bar,
+.mobile-cart-back,
+.mobile-cart-title { display: none; }
+.module-drawer-user{display:flex;align-items:center;gap:10px;min-width:0}
+.module-drawer-avatar{display:grid;flex:0 0 40px;width:40px;height:40px;place-items:center;border-radius:50%;background:#5d7892;color:#fff;font-size:16px;font-weight:700}
+.module-drawer-identity{display:grid;gap:3px;min-width:0}
+.module-drawer-identity strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.module-drawer-identity small{font-size:11px;opacity:.72}
+
+@media (max-width: 760px) {
+  body.android-pos-app:has(#new-order.active-page){height:100dvh;min-height:0;overflow:hidden;background:#f4f6f8}
+  body.android-pos-app:has(#new-order.active-page) .sidebar{position:fixed;inset:0 0 auto;width:100%;height:56px;min-height:56px;display:flex;align-items:center;gap:0;padding:0 12px;background:#fff;color:#14171a;box-shadow:0 1px 8px rgba(18,32,46,.08);z-index:1450}
+  body.android-pos-app:has(#new-order.active-page) .billing-brand-row{display:flex;align-items:center;gap:9px;min-width:0;height:56px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-toggle{display:grid;width:38px;height:40px;place-items:center;padding:0;border-radius:9px;font-size:21px;color:#272b30}
+  body.android-pos-app:has(#new-order.active-page) .billing-brand-row h2{margin:0!important;font-size:21px;text-align:left;color:#20242b}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-nav{position:fixed;inset:auto 0 0;z-index:1450;display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;height:calc(62px + env(safe-area-inset-bottom,0px));padding:0 0 env(safe-area-inset-bottom,0px);border-top:1px solid #e5e8ec;background:#fff;box-shadow:0 -3px 14px rgba(20,33,45,.06)}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:0;height:62px;padding:4px 2px;border:0;border-bottom:0;color:#727a83;font-size:9px;font-weight:700;line-height:1.1;white-space:nowrap}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link::before{font-size:18px;line-height:1}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(1)::before{content:"▤"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(2)::before{content:"＋"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(3)::before{content:"▦"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(2){border-bottom:0;color:#285eb5}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(2)::before{color:#285eb5}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav{position:fixed;inset:0 auto calc(62px + env(safe-area-inset-bottom,0px)) 0;z-index:1600;width:min(300px,84vw);min-width:0;padding:0 10px 14px;background:#fff;box-shadow:12px 0 30px rgba(15,23,42,.18);overflow-x:hidden;overflow-y:auto;transform:translateX(-110%);transition:transform .22s ease}
+  body.android-pos-app.billing-nav-open:has(#new-order.active-page) .app-module-nav{transform:translateX(0)}
+  body.android-pos-app.billing-nav-open:has(#new-order.active-page) .main:before{content:"";position:fixed;inset:0;z-index:1500;background:rgba(14,19,25,.42)}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-header{display:flex;align-items:center;justify-content:space-between;min-height:78px;margin:0 -10px 9px;padding:16px 16px 12px;background:#262626;color:#fff}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-avatar{background:#667f96}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity strong{font-family:Arial,sans-serif;font-size:14px;letter-spacing:0}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity small{color:#d0d0d0}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-close{width:34px;height:34px;border:0;border-radius:50%;background:transparent;color:#fff;font-size:24px}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-caption{display:block;padding:9px 12px 6px;color:#58616a;font-size:10px;font-weight:800;letter-spacing:.12em}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn{flex:0 0 auto;width:100%;min-height:42px;padding:10px 12px;border:0;border-radius:7px;background:transparent;color:#303942;text-align:left;font-size:13px}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn:hover{background:#f0f3f6;color:#111827}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn.active{background:#f1f4f7;color:#111827}
+
+  body.android-pos-app:has(#new-order.active-page) .main{position:relative;width:100%;height:100dvh;min-height:0;margin:0;padding:56px 0 calc(62px + env(safe-area-inset-bottom,0px));overflow:hidden}
+  body.android-pos-app:has(#new-order.active-page) .main>.header{display:none}
+  body.android-pos-app:has(#new-order.active-page) .main>.page.billing-page.active-page{display:block;width:100%;height:calc(100dvh - 56px - 62px - env(safe-area-inset-bottom,0px));min-height:0;margin:0;padding:0;overflow:hidden;background:#f5f6f8}
+  body.android-pos-app:has(#new-order.active-page) .billing-shell{display:flex;width:100%;height:100%;min-height:0;gap:0;overflow:hidden}
+  body.android-pos-app:has(#new-order.active-page) .billing-header{display:flex;flex:0 0 56px;align-items:center;height:56px;min-height:56px;margin:0;padding:5px 10px;border-bottom:1px solid #e8ebee;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-header>div:first-child{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-top-actions{display:grid;width:100%;grid-template-columns:minmax(112px,.8fr) minmax(0,1.2fr);align-items:center;gap:8px;flex-wrap:nowrap}
+  body.android-pos-app:has(#new-order.active-page) .pos-sale-channel{width:100%;min-width:0;gap:2px;font-size:9px}
+  body.android-pos-app:has(#new-order.active-page) .pos-sale-channel select{width:100%;min-height:38px;padding:6px 25px 6px 9px;border-radius:8px;font-size:12px}
+  body.android-pos-app:has(#new-order.active-page) .billing-top-actions .billing-search-wrap{width:100%;min-width:0;height:38px;margin:0;padding:0 9px;border:1px solid #e1e5e9;border-radius:9px;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-search-wrap input{min-width:0;font-size:12px}
+  body.android-pos-app:has(#new-order.active-page) .billing-workspace{display:grid;flex:1 1 auto;width:100%;height:auto;min-height:0;grid-template-columns:98px minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:0;position:relative;overflow:hidden;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-panel{display:flex;grid-column:1;grid-row:1;min-width:0;min-height:0;max-height:none;flex-direction:column;overflow:hidden;border:0;border-right:1px solid #e8ebef;border-radius:0;background:#fff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading{display:grid;flex:0 0 auto;gap:2px;padding:11px 7px 9px;border-bottom:1px solid #eef0f2}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading strong{color:#242a31;font-size:12px;line-height:1.2}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading span{color:#87909a;font-size:9px;letter-spacing:.08em;text-transform:uppercase}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar{display:flex;flex:1 1 auto;align-items:stretch;flex-direction:column;gap:5px;width:100%;min-height:0;padding:8px 6px 10px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;white-space:normal}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn{display:flex;flex:0 0 auto;align-items:center;width:100%;min-height:42px;margin:0;padding:8px 7px;border:1px solid transparent;border-radius:9px;background:#fff;color:#505964;font-size:10px;line-height:1.25;text-align:left;white-space:normal;overflow-wrap:anywhere}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn.active{border-color:#151d2b;background:#151d2b;color:#fff;box-shadow:0 3px 8px rgba(21,29,43,.15)}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-dot{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel{display:flex;grid-column:2;grid-row:1;min-width:0;min-height:0;padding:8px 9px 10px;overflow:hidden;border:0;border-radius:0;background:#fff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading{display:flex;flex:0 0 auto;min-height:37px;align-items:center;margin:0 0 5px}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading .eyebrow{font-size:8px;letter-spacing:.13em}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading h3{margin:1px 0 0;font-size:14px;line-height:1.2}
+  body.android-pos-app:has(#new-order.active-page) .billing-inline-hint{flex:0 0 auto;min-height:31px;margin:0 0 6px;padding:7px 8px;border-radius:7px;font-size:9px;line-height:1.25}
+  body.android-pos-app:has(#new-order.active-page) .billing-tables-area{flex:0 0 auto;max-height:74px;margin:0 0 7px;padding:5px 0;border:0;border-bottom:1px solid #eef0f2;border-radius:0;overflow:auto}
+  body.android-pos-app:has(#new-order.active-page) .billing-tables-heading{margin:0 0 5px;font-size:10px}
+  body.android-pos-app:has(#new-order.active-page) .billing-tables-grid{display:flex;gap:6px;max-height:42px;overflow:auto}
+  body.android-pos-app:has(#new-order.active-page) .billing-table-card{flex:0 0 78px;min-height:38px;padding:5px 8px;border-radius:8px}
+  body.android-pos-app:has(#new-order.active-page) .billing-table-card strong{font-size:11px}
+  body.android-pos-app:has(#new-order.active-page) .billing-table-card span{font-size:9px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .menu-grid{display:grid;flex:1 1 auto;min-height:0;grid-template-columns:minmax(0,1fr);grid-auto-rows:minmax(62px,auto);align-content:start;gap:6px;padding:0 1px 8px 0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card{display:grid;grid-template-columns:44px minmax(0,1fr);align-items:center;gap:8px;min-width:0;min-height:62px;padding:6px!important;border:1px solid #e9edf1;border-radius:9px;background:#fff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-image{width:44px;height:44px!important;border-radius:7px;overflow:hidden}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content{min-width:0;padding:1px!important}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content h3{max-height:none;font-size:11px;line-height:1.25;white-space:normal}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content .food-meta{display:block;margin-top:2px;font-size:9px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-bottom{margin-top:3px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-bottom button{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-bottom strong{font-size:11px}
+  body.android-pos-app:has(#new-order.active-page) .billing-cart-panel{display:none}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar{position:relative;inset:auto;z-index:1;display:flex;flex:0 0 58px;align-items:center;justify-content:space-between;gap:10px;min-height:58px;padding:6px 10px;border-top:1px solid #e8ebef;background:#fff;box-shadow:0 -4px 13px rgba(25,39,51,.07)}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total{display:grid;gap:2px;min-width:0}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total small{overflow:hidden;color:#747d87;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total strong{color:#20242b;font-size:15px}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar>button{display:flex;align-items:center;justify-content:center;gap:8px;min-width:116px;min-height:41px;padding:7px 12px;border:0;border-radius:8px;background:#151d2b;color:#fff;font-size:11px;font-weight:750}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar>button span{font-size:18px;line-height:1}
+
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-header,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-category-panel,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-menu-panel,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-billing-bar{display:none!important}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-workspace{display:block;height:100%;overflow:visible}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-panel{position:fixed;inset:56px 0 calc(62px + env(safe-area-inset-bottom,0px));z-index:1200;display:flex;flex-direction:column;min-width:0;min-height:0;width:100%;padding:0;overflow:hidden;border:0;border-radius:0;background:#fff;box-shadow:0 -3px 15px rgba(20,33,45,.06)}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header{display:flex;flex:0 0 54px;align-items:center;gap:10px;height:54px;padding:5px 12px;border-bottom:1px solid #eceff2;background:#fff}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-cart-back{display:grid;flex:0 0 36px;width:36px;height:36px;place-items:center;border:0;border-radius:8px;background:#f2f4f6;color:#262b31;font-size:22px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-cart-title{display:block;color:#20242b;font-size:16px;font-weight:750}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header .eyebrow{display:none}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header h3{margin:2px 0 0;color:#66707a;font-size:10px;font-weight:600}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions{gap:5px;margin-left:auto}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .billing-customer-open-btn{width:32px;height:32px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .billing-bill-view-btn{min-height:31px;padding:5px 8px;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .clear-bill-btn{min-height:31px;padding:5px 8px;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-pax-field:not([hidden]){display:flex;flex:0 0 42px;align-items:center;justify-content:space-between;margin:0;padding:5px 12px;border-bottom:1px solid #eef1f3;background:#f7f9fb;font-size:11px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-items{display:block;flex:1 1 auto;min-height:70px;margin:0;padding:0 12px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item{grid-template-columns:minmax(0,1fr) auto auto;gap:8px;padding:11px 0;border-bottom:1px solid #edf0f2}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item-name{font-size:12px;line-height:1.35}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item small{font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item .quantity{gap:4px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item .quantity button{width:27px;height:27px;border-radius:7px;font-size:17px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .cart-item>strong{font-size:11px;white-space:nowrap}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-customer-panel{display:none}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-notes{display:block;flex:0 0 auto;margin:4px 8px 0;padding:0}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-notes label{display:block;margin:0 0 3px;font-size:9px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-notes input{min-height:34px;padding:6px 8px;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustments-modern{flex:0 0 auto;margin:6px 10px 0}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustment-launcher{min-height:42px;padding:7px 9px;border-radius:9px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustment-launcher-icon{width:28px;height:28px;font-size:16px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustment-launcher-copy strong{font-size:11px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustment-launcher-copy small{font-size:9px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card{display:grid!important;flex:0 0 auto;gap:3px;margin:5px 10px 0;padding:8px 10px;border:0;border-radius:9px;background:#f5f7f9;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card>div:not(.total):not(#billingTaxBreakdown){min-height:16px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card hr,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card #billingTaxBreakdown{display:none!important}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card .total{padding-top:4px;border-top:1px solid #e1e5e9;font-size:12px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row{position:static;display:grid;flex:0 0 auto;grid-template-columns:minmax(0,.9fr) minmax(0,1.4fr);gap:8px;margin:0;padding:8px 10px calc(9px + env(safe-area-inset-bottom,0px));border-top:1px solid #e9edf0;background:#fff}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row .save-order-btn,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row .pay-btn{min-width:0;min-height:44px;margin:0;padding:8px 5px;border-radius:9px;font-size:10px;white-space:normal}
+
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-cart-panel{inset:56px 0 calc(62px + env(safe-area-inset-bottom,0px));width:100%;height:auto;max-height:none;overflow:hidden;border:0;box-shadow:none}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-step-header{display:flex;flex:0 0 48px;height:48px;padding:0 12px;border-bottom:1px solid #edf0f2}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-step-intro{display:block;flex:0 0 auto;padding:9px 12px;background:#f7f9fb;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-cart-header,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-cart-items,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-notes,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-adjustments-modern,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .modern-bill-card,
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-action-row{display:none!important}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-panel{display:flex;flex:1;flex-direction:column;min-height:0;margin:0;padding:12px;background:#fff;border:0;border-radius:0;overflow:hidden}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-fields{display:flex;flex:1;min-height:0;flex-direction:column;gap:8px;overflow:auto}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-fields .billing-inline-grid{display:grid;grid-template-columns:1fr;gap:8px;margin-top:8px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-shell.customer-step .billing-customer-next{position:static;flex:0 0 48px;height:48px;margin-top:8px;border-radius:8px}
+}
+
+@media (min-width: 561px) and (max-width: 760px) {
+  body.android-pos-app:has(#new-order.active-page) .billing-workspace{grid-template-columns:118px minmax(0,1fr)}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .menu-grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:minmax(86px,auto)}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card{grid-template-columns:40px minmax(0,1fr);min-height:82px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-image{width:40px;height:40px!important}
+}
+
+@media (max-width: 360px) {
+  body.android-pos-app:has(#new-order.active-page) .billing-workspace{grid-template-columns:86px minmax(0,1fr)}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar{padding-right:4px;padding-left:4px}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn{padding-right:5px;padding-left:5px;font-size:9px}
+  body.android-pos-app:has(#new-order.active-page) .billing-top-actions{grid-template-columns:minmax(96px,.75fr) minmax(0,1.25fr);gap:5px}
+}
+
+/* Mobile POS screens tuned to the supplied Create New and My Orders references. */
+.mobile-toolbar-menu-toggle{display:none}
+.mobile-toolbar-icon{display:none}
+.mobile-order-card-content{display:none}
+.orders-mobile-toolbar{display:none}
+.billing-flow-mobile-label{display:none}
+.billing-menu-tag-filters[hidden],.mobile-orders-search[hidden]{display:none!important}
+.billing-menu-tag-filters{display:none}
+.mobile-toolbar-icon svg{width:21px;height:21px;fill:currentColor;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.mobile-toolbar-icon svg circle{fill:none}
+.mobile-toolbar-icon svg circle,.mobile-toolbar-icon svg path{vector-effect:non-scaling-stroke}
+.billing-menu-tag-chip{flex:0 0 auto;min-height:37px;padding:7px 15px;border:1px solid #e3e5e8;border-radius:22px;background:#fff;color:#353b43;font:inherit;font-size:13px;white-space:nowrap;cursor:pointer}
+.billing-menu-tag-chip.active{border-color:#1a2435;background:#1a2435;color:#fff}
+.category-initial{display:none}
+.food-customizable{color:#8a929a;font-size:10px;font-weight:500}
+.food-card-add{display:none}
+.food-icon svg{width:17px;height:17px;fill:none;stroke:#aeb3b8;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+
+@media(max-width:760px){
+  body.android-pos-app:has(#new-order.active-page),body.android-pos-app:has(#orders.active-page),body.android-pos-app:has(#table-view.active-page){width:100%;height:100dvh;min-height:0;overflow:hidden;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .sidebar,body.android-pos-app:has(#orders.active-page) .sidebar,body.android-pos-app:has(#table-view.active-page) .sidebar{position:static;inset:auto;width:0;height:0;min-height:0;padding:0;overflow:visible;background:transparent;color:inherit}
+  body.android-pos-app:has(#new-order.active-page) .billing-brand-row,body.android-pos-app:has(#orders.active-page) .billing-brand-row,body.android-pos-app:has(#table-view.active-page) .billing-brand-row{display:none}
+  body.android-pos-app:has(#new-order.active-page) .main,body.android-pos-app:has(#orders.active-page) .main,body.android-pos-app:has(#table-view.active-page) .main{position:relative;width:100%;height:100dvh;min-height:0;margin:0;padding:0 0 calc(62px + env(safe-area-inset-bottom,0px));overflow:hidden}
+  body.android-pos-app:has(#new-order.active-page) .main>.header,body.android-pos-app:has(#orders.active-page) .main>.header,body.android-pos-app:has(#table-view.active-page) .main>.header{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-nav,body.android-pos-app:has(#orders.active-page) .billing-flow-nav,body.android-pos-app:has(#table-view.active-page) .billing-flow-nav{position:fixed;inset:auto 0 0;z-index:1450;display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr));gap:0;height:calc(62px + env(safe-area-inset-bottom,0px));padding:0 0 env(safe-area-inset-bottom,0px);border-top:1px solid #e5e8ec;background:#fff;box-shadow:0 -3px 14px rgba(20,33,45,.06)}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link,body.android-pos-app:has(#orders.active-page) .billing-flow-link,body.android-pos-app:has(#table-view.active-page) .billing-flow-link{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:0;height:62px;padding:4px 2px;border:0;border-bottom:0;background:#fff;color:#81858b;font-size:11px;font-weight:500;line-height:1.1;text-transform:none;white-space:nowrap}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-desktop-label,body.android-pos-app:has(#orders.active-page) .billing-flow-desktop-label,body.android-pos-app:has(#table-view.active-page) .billing-flow-desktop-label{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-mobile-label,body.android-pos-app:has(#orders.active-page) .billing-flow-mobile-label,body.android-pos-app:has(#table-view.active-page) .billing-flow-mobile-label{display:inline}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link::before,body.android-pos-app:has(#orders.active-page) .billing-flow-link::before,body.android-pos-app:has(#table-view.active-page) .billing-flow-link::before{font-size:19px;line-height:1}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(1)::before,body.android-pos-app:has(#orders.active-page) .billing-flow-link:nth-child(1)::before,body.android-pos-app:has(#table-view.active-page) .billing-flow-link:nth-child(1)::before{content:"▤"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(2)::before,body.android-pos-app:has(#orders.active-page) .billing-flow-link:nth-child(2)::before,body.android-pos-app:has(#table-view.active-page) .billing-flow-link:nth-child(2)::before{content:"✎"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(3)::before,body.android-pos-app:has(#orders.active-page) .billing-flow-link:nth-child(3)::before,body.android-pos-app:has(#table-view.active-page) .billing-flow-link:nth-child(3)::before{content:"▦"}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:nth-child(2){color:#111827}
+  body.android-pos-app:has(#orders.active-page) .billing-flow-link:nth-child(1){color:#111827;font-weight:700}
+  body.android-pos-app:has(#table-view.active-page) .billing-flow-link:nth-child(3){color:#111827;font-weight:700}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav,body.android-pos-app:has(#orders.active-page) .app-module-nav,body.android-pos-app:has(#table-view.active-page) .app-module-nav{position:fixed;inset:0 auto calc(62px + env(safe-area-inset-bottom,0px)) 0;z-index:1600;display:flex;flex-direction:column;width:min(300px,84vw);min-width:0;padding:0 10px 14px;background:#fff;box-shadow:12px 0 30px rgba(15,23,42,.18);overflow-x:hidden;overflow-y:auto;transform:translateX(-110%);transition:transform .22s ease}
+  body.android-pos-app.billing-nav-open:has(#new-order.active-page) .app-module-nav,body.android-pos-app.billing-nav-open:has(#orders.active-page) .app-module-nav,body.android-pos-app.billing-nav-open:has(#table-view.active-page) .app-module-nav{transform:translateX(0)}
+  body.android-pos-app.billing-nav-open:has(#new-order.active-page) .main:before,body.android-pos-app.billing-nav-open:has(#orders.active-page) .main:before,body.android-pos-app.billing-nav-open:has(#table-view.active-page) .main:before{content:"";position:fixed;inset:0;z-index:1500;background:rgba(14,19,25,.42)}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-header,body.android-pos-app:has(#orders.active-page) .module-drawer-header,body.android-pos-app:has(#table-view.active-page) .module-drawer-header{display:flex;align-items:center;justify-content:space-between;min-height:70px;margin:0 -10px 8px;padding:12px 16px;background:#242a32;color:#fff}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity strong,body.android-pos-app:has(#orders.active-page) .module-drawer-identity strong,body.android-pos-app:has(#table-view.active-page) .module-drawer-identity strong{font-family:Arial,sans-serif;font-size:14px;letter-spacing:0}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity small,body.android-pos-app:has(#orders.active-page) .module-drawer-identity small,body.android-pos-app:has(#table-view.active-page) .module-drawer-identity small{color:#d0d0d0}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-close,body.android-pos-app:has(#orders.active-page) .module-drawer-close,body.android-pos-app:has(#table-view.active-page) .module-drawer-close{color:#fff}
+
+  body.android-pos-app:has(#new-order.active-page) #new-order{display:block;width:100%;height:100%;min-height:0;margin:0;padding:0;overflow:hidden;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-shell{display:flex;width:100%;height:100%;min-height:0;flex-direction:column;gap:0;overflow:hidden;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-header{display:flex;flex:0 0 56px;align-items:center;height:56px;min-height:56px;margin:0;padding:5px 10px;border-bottom:1px solid #e8ebee;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-header>div:first-child{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-top-actions{position:relative;display:grid;width:100%;grid-template-columns:36px minmax(0,1fr) 34px 34px 30px;align-items:center;gap:5px}
+  body.android-pos-app:has(#new-order.active-page) .mobile-toolbar-menu-toggle{display:grid;width:34px;height:38px;place-items:center;border:0;background:transparent;color:#171b20;font-size:23px}
+  body.android-pos-app:has(#new-order.active-page) .pos-sale-channel{display:block;width:100%;min-width:0;gap:0;color:#222831;font-size:12px;letter-spacing:0;text-transform:none}
+  body.android-pos-app:has(#new-order.active-page) .pos-sale-channel>span{display:none}
+  body.android-pos-app:has(#new-order.active-page) .pos-sale-channel select{width:100%;min-height:40px;padding:6px 24px 6px 4px;border:0;border-radius:0;background-color:#fff;color:#15191e;font-size:15px;font-weight:500}
+  body.android-pos-app:has(#new-order.active-page) .mobile-toolbar-icon{display:grid;width:32px;height:38px;place-items:center;padding:0;border:0;background:transparent;color:#111820;font-size:24px}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-search-toggle{font-size:25px}
+  body.android-pos-app:has(#new-order.active-page) .billing-top-actions .billing-search-wrap{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-shell.mobile-billing-search-open .billing-search-wrap{position:absolute;z-index:5;top:43px;right:0;left:36px;display:flex;width:auto;height:42px;margin:0;padding:0 11px;border:1px solid #dce2e7;border-radius:9px;background:#fff;box-shadow:0 6px 18px rgba(23,36,47,.12)}
+  body.android-pos-app:has(#new-order.active-page) .billing-shell.mobile-billing-search-open .billing-search-wrap input{min-width:0;font-size:14px}
+  body.android-pos-app:has(#new-order.active-page) .billing-mobile-more-toggle{grid-column:5}
+  body.android-pos-app:has(#new-order.active-page) #billingMobileMoreMenu{position:absolute;z-index:8;top:43px;right:0;width:170px;padding:5px;border:1px solid #e5e8eb;border-radius:10px;background:#fff;box-shadow:0 10px 28px rgba(20,33,45,.16)}
+  body.android-pos-app:has(#new-order.active-page) #billingMobileMoreMenu[hidden]{display:none}
+  body.android-pos-app:has(#new-order.active-page) #billingMobileMoreMenu button{display:block;width:100%;min-height:42px;padding:9px 11px;border:0;border-radius:7px;background:#fff;color:#25313a;text-align:left;font:inherit;font-size:13px}
+  body.android-pos-app:has(#new-order.active-page) #billingMobileMoreMenu button:hover{background:#f3f6f8}
+  body.android-pos-app:has(#new-order.active-page) #billingMenuTagFilters:not([hidden]){display:flex;flex:0 0 57px;align-items:center;gap:10px;width:100%;min-height:57px;padding:7px 10px 8px 13px;overflow-x:auto;overscroll-behavior-x:contain;border-bottom:1px solid #e6e8eb;background:#fbfbfb;scrollbar-width:none}
+  body.android-pos-app:has(#new-order.active-page) #billingMenuTagFilters::-webkit-scrollbar{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-tag-chip{min-height:37px;padding:6px 15px;border-color:#e2e3e5;border-radius:22px;background:#fff;color:#373c42;font-size:13px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-tag-chip.active{border-color:#131c2b;background:#131c2b;color:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-workspace{display:grid;flex:1 1 auto;width:100%;height:auto;min-height:0;grid-template-columns:60px minmax(0,1fr);grid-template-rows:minmax(0,1fr);gap:0;position:relative;overflow:hidden;background:#fff}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-panel{display:flex;grid-column:1;grid-row:1;min-width:0;min-height:0;max-height:none;flex-direction:column;overflow:hidden;border:0;border-right:1px solid #cbd9f3;border-radius:0;background:#e7efff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading{display:grid;flex:0 0 auto;gap:2px;padding:10px 4px 8px;border-bottom:1px solid #d5e1f7}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading strong{color:#242b36;font-size:11px;line-height:1.15}
+  body.android-pos-app:has(#new-order.active-page) .billing-panel-heading span{color:#76839a;font-size:8px;letter-spacing:.08em;text-transform:uppercase}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar{display:flex;flex:1 1 auto;align-items:stretch;flex-direction:column;gap:2px;width:100%;min-height:0;padding:5px 3px 8px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn{display:flex;flex:0 0 auto;align-items:center;flex-direction:column;justify-content:flex-start;gap:4px;width:100%;min-height:53px;margin:0;padding:5px 2px;border:0;border-radius:0;background:transparent;color:#5d6877;font-size:8px;font-weight:500;line-height:1.15;text-align:center;white-space:normal;overflow-wrap:anywhere}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn.active{background:#dce8ff;color:#192b49;box-shadow:inset -2px 0 #4a81d2}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-dot{display:none}
+  body.android-pos-app:has(#new-order.active-page) .category-initial{display:grid;width:26px;height:26px;flex:0 0 26px;place-items:center;border:1.5px solid #4c8bd1;border-radius:8px;background:#fff;color:#347cc7;font-size:13px;font-weight:700}
+  body.android-pos-app:has(#new-order.active-page) .category-btn:nth-child(3n+2) .category-initial{color:#c68a16}
+  body.android-pos-app:has(#new-order.active-page) .category-btn:nth-child(4n+3) .category-initial{color:#cf5ab3}
+  body.android-pos-app:has(#new-order.active-page) .category-label{display:block;width:100%;max-width:54px;overflow-wrap:anywhere}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel{display:flex;grid-column:2;grid-row:1;min-width:0;min-height:0;flex-direction:column;padding:10px 9px 8px;overflow:hidden;border:0;border-radius:0;background:#fff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading{display:flex;flex:0 0 auto;min-height:46px;align-items:center;margin:0 0 5px;padding:0}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading .eyebrow{font-size:8px;letter-spacing:.13em}
+  body.android-pos-app:has(#new-order.active-page) .billing-section-heading h3{margin:2px 0 0;font-size:14px;line-height:1.2}
+  body.android-pos-app:has(#new-order.active-page) .billing-inline-hint{flex:0 0 auto;min-height:31px;margin:0 0 7px;padding:7px 8px;border-radius:7px;background:#f4f5f8;color:#7b828c;font-size:10px;line-height:1.3}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .menu-grid{display:grid;flex:1 1 auto;min-height:0;grid-template-columns:minmax(0,1fr);grid-auto-rows:minmax(57px,auto);align-content:start;gap:0;padding:0 0 10px;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card{display:grid;grid-template-columns:29px minmax(0,1fr) auto;align-items:center;gap:8px;min-width:0;min-height:57px;padding:6px 2px!important;border:0;border-bottom:1px solid #e2e5e8;border-radius:0;background:#fff;box-shadow:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-image{width:28px;height:28px!important;border-radius:2px;overflow:hidden;background:#f0f1f2}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-icon{display:grid;width:100%;height:100%;place-items:center;background:#f0f1f2;color:#a8adb3;font-size:11px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content{display:grid;grid-template-columns:minmax(0,1fr);align-content:center;min-width:0;padding:0!important}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content h3{max-height:none;margin:0;color:#343a40;font-size:11px;font-weight:700;line-height:1.25;white-space:normal}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-content .food-meta{display:none}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-bottom{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;margin-top:3px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-bottom strong{color:#22272c;font-size:11px;font-weight:500}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-customizable{font-size:8px;line-height:1.1}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-add{display:block;align-self:center;min-width:54px;min-height:37px;padding:5px 4px;border:0;background:transparent;color:#3678ce;font-size:12px;font-weight:800;line-height:1;cursor:pointer}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-add:disabled{color:#a0a8b1;cursor:not-allowed}
+  body.android-pos-app:has(#new-order.active-page) .billing-cart-panel{display:none}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar{display:flex;flex:0 0 58px;align-items:center;justify-content:space-between;gap:10px;min-height:58px;padding:6px 10px;border-top:1px solid #e8ebef;background:#fff;box-shadow:0 -4px 13px rgba(25,39,51,.07)}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar[hidden]{display:none!important}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total{display:grid;gap:2px;min-width:0}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total small{overflow:hidden;color:#747d87;font-size:10px;text-overflow:ellipsis;white-space:nowrap}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar-total strong{color:#20242b;font-size:15px}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar>button{display:flex;align-items:center;justify-content:center;gap:8px;min-width:116px;min-height:41px;padding:7px 12px;border:0;border-radius:8px;background:#151d2b;color:#fff;font-size:12px;font-weight:750}
+  body.android-pos-app:has(#new-order.active-page) .mobile-billing-bar>button span{font-size:18px;line-height:1}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-header,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) #billingMenuTagFilters,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-workspace,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-billing-bar{display:none!important}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-panel{position:fixed;inset:0 0 calc(62px + env(safe-area-inset-bottom,0px));z-index:1200;display:flex;flex-direction:column;min-width:0;min-height:0;width:100%;padding:0;overflow:hidden;border:0;border-radius:0;background:#fff;box-shadow:0 -3px 15px rgba(20,33,45,.06)}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header{display:flex;flex:0 0 54px;align-items:center;gap:10px;height:54px;padding:5px 12px;border-bottom:1px solid #eceff2;background:#fff}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-cart-back{display:grid;flex:0 0 36px;width:36px;height:36px;place-items:center;border:0;border-radius:8px;background:#f2f4f6;color:#262b31;font-size:22px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .mobile-cart-title{display:block;color:#20242b;font-size:16px;font-weight:750}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header .eyebrow{display:none}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header h3{margin:2px 0 0;color:#66707a;font-size:10px;font-weight:600}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions{gap:5px;margin-left:auto}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .billing-customer-open-btn{width:32px;height:32px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .billing-bill-view-btn,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-header-actions .clear-bill-btn{min-height:31px;padding:5px 8px;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-cart-items{display:block;flex:1 1 auto;min-height:70px;margin:0;padding:0 12px;overflow-x:hidden;overflow-y:auto}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-customer-panel{display:none}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-notes{display:block;flex:0 0 auto;margin:4px 8px 0;padding:0}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-adjustments-modern{flex:0 0 auto;margin:6px 10px 0}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card{display:grid!important;flex:0 0 auto;gap:3px;margin:5px 10px 0;padding:8px 10px;border:0;border-radius:9px;background:#f5f7f9;font-size:10px}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card hr,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .modern-bill-card #billingTaxBreakdown{display:none!important}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row{position:static;display:grid;flex:0 0 auto;grid-template-columns:minmax(0,.9fr) minmax(0,1.4fr);gap:8px;margin:0;padding:8px 10px calc(9px + env(safe-area-inset-bottom,0px));border-top:1px solid #e9edf0;background:#fff}
+  body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row .save-order-btn,body.android-pos-app.mobile-cart-open:has(#new-order.active-page) .billing-action-row .pay-btn{min-width:0;min-height:44px;margin:0;padding:8px 5px;border-radius:9px;font-size:10px}
+
+  body.android-pos-app:has(#orders.active-page) #orders{display:flex;width:100%;height:100dvh;min-height:0;flex-direction:column;margin:0;padding:0 0 calc(62px + env(safe-area-inset-bottom,0px));overflow:hidden;background:#f2f2f2}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar{position:relative;z-index:4;display:flex;flex:0 0 56px;align-items:center;gap:7px;width:100%;height:56px;min-height:56px;padding:5px 10px;border-bottom:1px solid #e9ebed;background:#fff}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-menu-toggle{display:grid;flex:0 0 34px;width:34px;height:38px;place-items:center;border:0;background:transparent;color:#171b20;font-size:23px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar select{flex:1 1 auto;width:1%;min-width:0;min-height:42px;padding:5px 20px 5px 5px;border:0;background:#fff;color:#171b20;font-size:15px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-icon{display:grid;flex:0 0 32px;width:32px;height:38px;place-items:center;padding:0;border:0;background:transparent;color:#101820;font-size:24px}
+  body.android-pos-app:has(#orders.active-page) .mobile-orders-search{display:flex;flex:0 0 45px;align-items:center;gap:8px;margin:0;padding:4px 13px;border-bottom:1px solid #e4e7e9;background:#fff;color:#69737c}
+  body.android-pos-app:has(#orders.active-page) .mobile-orders-search input{flex:1;min-width:0;height:34px;border:0;outline:0;background:transparent;font:inherit;font-size:14px}
+  body.android-pos-app:has(#orders.active-page) .mobile-orders-search button{width:28px;height:28px;border:0;border-radius:50%;background:#f0f2f4;color:#58616a;font-size:18px}
+  body.android-pos-app:has(#orders.active-page) .orders-tabs{display:flex;flex:0 0 58px;align-items:stretch;justify-content:space-around;gap:0;width:100%;height:58px;min-height:58px;margin:0;padding:0 4px;overflow-x:auto;overflow-y:hidden;border-bottom:1px solid #e3e5e7;background:#fff;scrollbar-width:none}
+  body.android-pos-app:has(#orders.active-page) .orders-tabs::-webkit-scrollbar{display:none}
+  body.android-pos-app:has(#orders.active-page) .orders-tab-btn{display:flex;flex:1 0 auto;align-items:center;justify-content:center;gap:3px;min-width:max-content;height:58px;padding:0 10px;border:0;border-bottom:3px solid transparent;border-radius:0;background:#fff;color:#191d22;font-size:13px;font-weight:700;white-space:nowrap}
+  body.android-pos-app:has(#orders.active-page) .orders-tab-btn.active{border-bottom-color:#1c30d5;color:#192fcb}
+  body.android-pos-app:has(#orders.active-page) .orders-tab-btn>span{display:none}
+  body.android-pos-app:has(#orders.active-page) .orders-header-actions{display:none}
+  body.android-pos-app:has(#orders.active-page) .orders-filter-bar{display:none;flex:0 0 auto;gap:7px;margin:0;padding:10px;border:0;border-bottom:1px solid #e4e7e9;border-radius:0;background:#fff}
+  body.android-pos-app:has(#orders.active-page).mobile-orders-filters-open .orders-filter-bar{display:flex;max-height:38vh;overflow:auto}
+  body.android-pos-app:has(#orders.active-page) .orders-filter-bar label{flex:1 1 43%;min-width:120px;font-size:10px}
+  body.android-pos-app:has(#orders.active-page) .orders-filter-bar select,body.android-pos-app:has(#orders.active-page) .orders-filter-bar input,body.android-pos-app:has(#orders.active-page) .orders-filter-reset{min-height:35px;font-size:11px}
+  body.android-pos-app:has(#orders.active-page) .orders-workspace{display:flex;flex:1 1 auto;min-height:0;min-width:0;flex-direction:column;gap:0;overflow:hidden}
+  body.android-pos-app:has(#orders.active-page) .orders-list-panel{display:flex;flex:1 1 auto;min-height:0;max-height:none;flex-direction:column;overflow:hidden;border:0;border-radius:0;background:#f1f1f1;box-shadow:none}
+  body.android-pos-app:has(#orders.active-page) .orders-list-heading{display:none}
+  body.android-pos-app:has(#orders.active-page) .orders-list{display:grid;flex:1 1 auto;align-content:start;gap:12px;min-height:0;padding:12px 16px 18px;overflow-x:hidden;overflow-y:auto;background:#f1f1f1}
+  body.android-pos-app:has(#orders.active-page) .order-list-card{display:block;width:100%;min-height:102px;padding:15px 16px;border:1px solid #e1e1e1;border-radius:13px;background:#fff;color:#25282c;box-shadow:0 1px 2px rgba(0,0,0,.025)}
+  body.android-pos-app:has(#orders.active-page) .order-list-card.selected{border-color:#e1e1e1;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.025)}
+  body.android-pos-app:has(#orders.active-page) .order-list-card-open{display:block;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left}
+  body.android-pos-app:has(#orders.active-page) .desktop-order-card-content{display:none}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-content{display:block}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head{display:flex;align-items:center;justify-content:space-between;gap:10px;min-width:0}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head strong{overflow:hidden;color:#25282c;font-size:16px;font-weight:750;text-overflow:ellipsis;white-space:nowrap}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head time{flex:0 0 auto;color:#22272c;font-size:13px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-channel{display:block;overflow:hidden;margin-top:3px;color:#81868a;font-size:12px;text-overflow:ellipsis;white-space:nowrap}
+  body.android-pos-app:has(#orders.active-page) .mobile-payment-state{flex:0 0 auto;padding:3px 6px;border:1px solid #86ae74;border-radius:5px;color:#638d50;font-size:9px;font-style:normal;font-weight:800;line-height:1}
+  body.android-pos-app:has(#orders.active-page) .mobile-payment-state.unpaid{border-color:#e3bb75;color:#ad791f}
+  body.android-pos-app:has(#orders.active-page) .mobile-payment-state.partial{border-color:#dfb560;color:#a57419}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-preview{display:block;margin-top:15px;color:#35393d;font-size:13px;line-height:1.45}
+  body.android-pos-app:has(#orders.active-page) .qr-order-list-card{display:block}
+  body.android-pos-app:has(#orders.active-page) .qr-order-list-action{display:flex;width:100%;min-height:38px;margin-top:10px}
+  body.android-pos-app:has(#orders.active-page) .orders-empty-state{display:grid;align-content:center;justify-items:center;gap:8px;min-height:180px;color:#879098;text-align:center}
+  body.android-pos-app:has(#orders.active-page) .orders-detail-panel{display:none}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-list-panel{display:none}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-panel{position:fixed;inset:0 0 calc(62px + env(safe-area-inset-bottom,0px));z-index:1200;display:flex;max-height:none;min-height:0;overflow:hidden;border:0;border-radius:0;box-shadow:none}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-heading{flex:0 0 auto;padding:13px 14px}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-toolbar{flex:0 0 60px}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) #orderDetailsContent{flex:1 1 auto;min-height:0;padding:12px;overflow:auto}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-actions{flex:0 0 auto}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .qr-order-workflow{flex:0 0 auto}
+  body.android-pos-app:has(#table-view.active-page) #table-view{height:100%;min-height:0;margin:0;padding:12px;overflow:auto}
+}
+
+@media(max-width:360px){
+  body.android-pos-app:has(#new-order.active-page) .billing-workspace{grid-template-columns:54px minmax(0,1fr)}
+  body.android-pos-app:has(#new-order.active-page) .billing-category-sidebar .category-btn{font-size:7px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card{grid-template-columns:25px minmax(0,1fr) auto;gap:5px}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-image{width:24px;height:24px!important}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-panel .food-card-add{min-width:47px;font-size:11px}
+}
+
+
+@media(max-width:760px){
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar{display:flex}
+  body.android-pos-app:has(#orders.active-page) .billing-brand-row h2{display:none!important}
+  body.android-pos-app:has(#new-order.active-page) .billing-menu-tag-filters:not([hidden]){display:flex;flex:0 0 57px;align-items:center;gap:10px;width:100%;min-height:57px;padding:7px 10px 8px 13px;overflow-x:auto;border-bottom:1px solid #e6e8eb;background:#fbfbfb}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-icon svg{width:21px;height:21px}
+}
+/* Android-only mobile fit, order access and navigation polish. */
+.android-module-drawer-scrim{display:none}
+@media(max-width:760px){
+  html,body.android-pos-app{width:100%;max-width:100%;min-width:0;overflow-x:hidden}
+  body.android-pos-app .main{width:100%;max-width:100vw;min-width:0;box-sizing:border-box}
+  body.android-pos-app .main>.page.active-page{min-width:0;max-width:100%}
+  body.android-pos-app.billing-nav-open .main:before{display:none!important}
+
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav,
+  body.android-pos-app:has(#orders.active-page) .app-module-nav,
+  body.android-pos-app:has(#table-view.active-page) .app-module-nav{
+    inset:0 auto calc(62px + env(safe-area-inset-bottom,0px)) 0;z-index:1601;width:min(320px,88vw);
+    padding:0 12px 18px;border-right:1px solid #e3e8ed;background:#f8fafc;
+    box-shadow:16px 0 40px rgba(15,23,42,.2);overscroll-behavior:contain
+  }
+  body.android-pos-app.billing-nav-open .android-module-drawer-scrim{
+    position:fixed;inset:0;z-index:1600;display:block;width:100%;height:100%;padding:0;
+    border:0;background:rgba(15,23,42,.46);touch-action:manipulation
+  }
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-header,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-header,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-header{
+    min-height:88px;margin:0 -12px 12px;padding:16px 18px;border-bottom:1px solid #39434d;
+    background:linear-gradient(135deg,#202832,#303b46);color:#fff
+  }
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-user,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-user,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-user{gap:12px}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-avatar,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-avatar,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-avatar{
+    width:42px;height:42px;flex-basis:42px;border:1px solid rgba(255,255,255,.3);
+    background:#476b65;color:#fff;font-size:17px
+  }
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity strong,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-identity strong,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-identity strong{font-size:15px;font-weight:750;letter-spacing:.01em}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-identity small,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-identity small,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-identity small{color:#cbd5df;font-size:11px}
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-close,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-close,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-close{
+    display:grid;width:36px;height:36px;place-items:center;border:1px solid rgba(255,255,255,.18);
+    border-radius:11px;background:rgba(255,255,255,.08);color:#fff;font-size:23px
+  }
+  body.android-pos-app:has(#new-order.active-page) .module-drawer-caption,
+  body.android-pos-app:has(#orders.active-page) .module-drawer-caption,
+  body.android-pos-app:has(#table-view.active-page) .module-drawer-caption{
+    padding:8px 11px 7px;color:#788491;font-size:10px;font-weight:800;letter-spacing:.14em
+  }
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn,
+  body.android-pos-app:has(#orders.active-page) .app-module-nav .nav-btn,
+  body.android-pos-app:has(#table-view.active-page) .app-module-nav .nav-btn{
+    display:flex;flex:0 0 auto;align-items:center;gap:12px;width:100%;min-height:48px;margin:2px 0;
+    padding:9px 13px;border:1px solid transparent;border-radius:12px;background:transparent;
+    color:#394550;text-align:left;font-size:14px;font-weight:600;line-height:1.25;white-space:normal;
+    transition:background .15s ease,color .15s ease,border-color .15s ease
+  }
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn:active,
+  body.android-pos-app:has(#orders.active-page) .app-module-nav .nav-btn:active,
+  body.android-pos-app:has(#table-view.active-page) .app-module-nav .nav-btn:hover{background:#edf2f4;color:#18232c}
+  body.android-pos-app:has(#new-order.active-page) .app-module-nav .nav-btn.active,
+  body.android-pos-app:has(#orders.active-page) .app-module-nav .nav-btn.active,
+  body.android-pos-app:has(#table-view.active-page) .app-module-nav .nav-btn.active{
+    border-color:#dce9e5;background:#eaf4f1;color:#1f5a50;font-weight:750
+  }
+
+  body.android-pos-app:has(#new-order.active-page) .main,
+  body.android-pos-app:has(#orders.active-page) .main,
+  body.android-pos-app:has(#table-view.active-page) .main{
+    height:100dvh;min-height:0;max-height:100dvh;padding-bottom:calc(62px + env(safe-area-inset-bottom,0px));
+    overflow:hidden;overscroll-behavior:none
+  }
+  body.android-pos-app:has(#orders.active-page) #orders{
+    position:relative;display:flex;width:100%;height:100%;min-height:0;max-height:100%;
+    flex-direction:column;margin:0;padding:0;overflow:hidden
+  }
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar{flex-basis:54px;height:54px;min-height:54px;padding:4px 10px;gap:5px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-menu-toggle{flex-basis:38px;width:38px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar select{font-size:14px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-icon{flex-basis:36px;width:36px}
+  body.android-pos-app:has(#orders.active-page) .orders-tabs{flex-basis:54px;height:54px;min-height:54px;padding-inline:2px}
+  body.android-pos-app:has(#orders.active-page) .orders-tab-btn{flex:1 1 0;min-width:0;height:54px;padding:0 4px;font-size:12px}
+  body.android-pos-app:has(#orders.active-page) .orders-list-panel,
+  body.android-pos-app:has(#orders.active-page) .orders-workspace,
+  body.android-pos-app:has(#orders.active-page) .orders-list{min-width:0}
+  body.android-pos-app:has(#orders.active-page) .orders-list{padding:10px 12px calc(16px + env(safe-area-inset-bottom,0px));gap:10px}
+  body.android-pos-app:has(#orders.active-page) .order-list-card{min-height:0;padding:14px;border-radius:14px}
+  body.android-pos-app:has(#orders.active-page) .order-list-card-open{min-width:0;min-height:72px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-content{min-width:0}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head{gap:7px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head strong{flex:1 1 auto;min-width:0;font-size:15px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-head time{font-size:12px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-channel{margin-top:4px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-preview{margin-top:12px}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-bottom{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;padding-top:8px;
+    border-top:1px solid #edf0f2;color:#7c858b;font-size:11px
+  }
+  body.android-pos-app:has(#orders.active-page) .mobile-order-card-bottom strong{color:#202832;font-size:14px;white-space:nowrap}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-panel{
+    inset:0 0 calc(62px + env(safe-area-inset-bottom,0px));flex-direction:column;width:100%;max-width:100vw;
+    box-sizing:border-box
+  }
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-heading{min-width:0}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-heading>div{min-width:0}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-heading h3{overflow-wrap:anywhere}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-toolbar{width:100%;min-width:0}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) #orderDetailsContent{
+    width:100%;max-width:100%;min-width:0;box-sizing:border-box;overflow-x:auto;overflow-y:auto;overscroll-behavior:contain
+  }
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) #orderDetailsContent .table-container{width:100%;max-width:100%;overflow-x:auto}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) #orderDetailsContent table{min-width:440px}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .qr-order-workflow{
+    flex:0 0 auto;max-height:30vh;overflow:auto;overscroll-behavior:contain
+  }
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-actions{
+    flex:0 0 auto;max-height:26vh;overflow:auto;overscroll-behavior:contain;
+    padding:8px 10px calc(8px + env(safe-area-inset-bottom,0px))
+  }
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-actions button{
+    flex:1 1 auto;min-width:calc(50% - 8px);min-height:42px
+  }
+}
+@media(max-width:380px){
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar{gap:3px;padding-inline:6px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-menu-toggle{flex-basis:34px;width:34px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar select{font-size:13px}
+  body.android-pos-app:has(#orders.active-page) .orders-mobile-toolbar .mobile-toolbar-icon{flex-basis:32px;width:32px}
+  body.android-pos-app:has(#orders.active-page) .orders-tab-btn{font-size:11px}
+}
+
+/* Android-only branded sign-in and viewport fitting for every module. */
+@media(max-width:760px){
+  body.android-pos-app #loginScreen.login-screen{
+    display:flex;align-items:center;justify-content:center;width:100%;height:100dvh;min-height:100dvh;
+    box-sizing:border-box;padding:max(18px,env(safe-area-inset-top,0px)) 18px max(18px,env(safe-area-inset-bottom,0px));
+    overflow-x:hidden;overflow-y:auto;background:radial-gradient(ellipse at 85% 8%,rgba(195,164,111,.2),transparent 32%),linear-gradient(155deg,#eef2ef,#f6f4ed 58%,#e8eeeb)
+  }
+  body.android-pos-app #loginScreen .login-showcase{display:none}
+  body.android-pos-app #loginCard.login-card{
+    width:min(440px,100%);max-height:calc(100dvh - 36px - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px));
+    margin:auto;padding:clamp(22px,6vw,34px);overflow-x:hidden;overflow-y:auto;border:1px solid #e3e9e4;
+    border-radius:24px;background:#fff;box-shadow:0 24px 60px rgba(29,49,40,.13)
+  }
+  body.android-pos-app #loginCard .android-login-brand{display:flex;align-items:center;gap:12px;margin:0 0 27px}
+  body.android-pos-app #loginCard .android-login-brand-mark{
+    display:grid;width:50px;height:50px;flex:0 0 50px;place-items:center;border-radius:16px;
+    background:linear-gradient(145deg,#223e35,#386d58);box-shadow:0 8px 18px rgba(34,62,53,.2);
+    color:#fff;font-family:Georgia,serif;font-size:29px;font-weight:700;letter-spacing:-.08em
+  }
+  body.android-pos-app #loginCard .android-login-brand-copy{display:grid;gap:4px}
+  body.android-pos-app #loginCard .android-login-brand-copy strong{color:#21362e;font-size:18px;font-weight:850;letter-spacing:.17em}
+  body.android-pos-app #loginCard .android-login-brand-copy small{color:#829088;font-size:9px;font-weight:800;letter-spacing:.17em}
+  body.android-pos-app #loginCard #loginView .login-logo{display:none}
+  body.android-pos-app #loginCard #loginView>h1{font-size:28px}
+  body.android-pos-app #loginCard #loginView form label{font-size:13px}
+  body.android-pos-app #loginCard input:not([type="checkbox"]):not([type="radio"]){min-height:52px;font-size:16px}
+  body.android-pos-app #loginCard .login-btn{min-height:52px;font-size:15px}
+
+  body.android-pos-app .main,
+  body.android-pos-app .main>.page.active-page{min-width:0;max-width:100vw;box-sizing:border-box}
+  body.android-pos-app .main>.page.active-page{overflow-x:hidden}
+  body.android-pos-app .main .table-container{
+    display:block;width:100%;max-width:100%;min-width:0;box-sizing:border-box;
+    overflow-x:auto;overflow-y:hidden;overscroll-behavior-x:contain;-webkit-overflow-scrolling:touch
+  }
+  body.android-pos-app .main .table-container>table{width:max-content;min-width:100%;max-width:none}
+  body.android-pos-app .main input:not([type="checkbox"]):not([type="radio"]),
+  body.android-pos-app .main select,
+  body.android-pos-app .main textarea{max-width:100%;min-width:0;box-sizing:border-box}
+  body.android-pos-app .main .dashboard-box,
+  body.android-pos-app .main .settings-card,
+  body.android-pos-app .main .settings-section{min-width:0;max-width:100%;box-sizing:border-box}
+
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-heading{display:flex;align-items:center;gap:10px}
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .android-order-back{
+    display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:6px;min-width:76px;height:40px;
+    padding:0 10px;border:1px solid #dce4e1;border-radius:11px;background:#f5f8f6;color:#244c3f;
+    font:inherit;font-size:13px;font-weight:700;white-space:nowrap
+  }
+  body.android-pos-app.mobile-order-detail-open:has(#orders.active-page) .orders-detail-close{display:none}
+  body.android-pos-app:has(#orders.active-page) .order-list-card{padding:15px;border-color:#e5e8eb;border-radius:15px;box-shadow:0 2px 8px rgba(21,31,40,.045)}
+  body.android-pos-app:has(#orders.active-page) .order-list-card:active{background:#f9fbfa;transform:scale(.995)}
+  body.android-pos-app:has(#orders.active-page) .mobile-order-preview{color:#424a50;font-size:13px;line-height:1.55}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link,
+  body.android-pos-app:has(#orders.active-page) .billing-flow-link,
+  body.android-pos-app:has(#table-view.active-page) .billing-flow-link{min-height:62px;color:#68727a;font-size:12px;font-weight:600}
+  body.android-pos-app:has(#new-order.active-page) .billing-flow-link:active,
+  body.android-pos-app:has(#orders.active-page) .billing-flow-link:active,
+  body.android-pos-app:has(#table-view.active-page) .billing-flow-link:active{background:#f2f5f4}
+}
+
+@media(max-height:560px) and (max-width:760px){
+  body.android-pos-app #loginScreen.login-screen{align-items:flex-start;padding-top:10px;padding-bottom:10px}
+  body.android-pos-app #loginCard.login-card{max-height:calc(100dvh - 20px);padding:18px 22px}
+  body.android-pos-app #loginCard .android-login-brand{margin-bottom:16px}
+}
