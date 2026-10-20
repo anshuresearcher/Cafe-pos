@@ -3129,6 +3129,24 @@ body:has(#orders.active-page) #profilePanel{display:none!important}
 .menu-item-description-meta{display:grid;gap:6px;margin-top:10px}
 .menu-admin-sku{width:max-content;max-width:100%;padding:5px 8px;border:1px solid #e6eaf0;border-radius:999px;background:#f8fafc;color:#687486;font-size:10px;font-weight:800;overflow-wrap:anywhere}
 .menu-item-description-meta p{margin:0;color:#747d8a;font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.menu-item-tags,.item-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:3px}
+.menu-item-tag,.item-tag{display:inline-flex;align-items:center;gap:5px;width:max-content;max-width:100%;padding:4px 8px;border:1px solid #dfe5e2;border-radius:6px;background:#f7f9f8;color:#47534d;font-size:10px;font-weight:700;line-height:1.2;overflow-wrap:anywhere}
+.item-tag{font-size:9px;letter-spacing:.02em}
+.menu-tag-picker{position:relative;z-index:6;margin-top:4px}
+.menu-tag-picker>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:42px;padding:9px 12px;border:1px solid #dfe3e8;border-radius:10px;background:#fff;color:#344054;font-size:13px;cursor:pointer;list-style:none}
+.menu-tag-picker>summary::-webkit-details-marker{display:none}
+.menu-tag-picker[open]>summary{border-color:#92a7e8;box-shadow:0 0 0 3px #526de51a}
+.menu-tag-picker-chevron{color:#697586;transition:transform .16s ease}.menu-tag-picker[open] .menu-tag-picker-chevron{transform:rotate(180deg)}
+.menu-tag-options{position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:25;display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:5px;padding:8px;border:1px solid #e0e5eb;border-radius:12px;background:#fff;box-shadow:0 12px 30px rgba(20,30,50,.16)}
+.menu-tag-choice{display:flex;align-items:center;gap:8px;min-height:38px;padding:7px 9px;border:1px solid #edf0f3;border-radius:9px;background:#fff;color:#384150;font-size:12px;font-weight:750;cursor:pointer}
+.menu-tag-choice:has(input:checked){border-color:#b6c7ed;background:#f4f7ff;color:#263f75}.menu-tag-choice input{accent-color:#526de5}
+.menu-tag-option-icon{display:inline-block;flex:none;width:9px;height:9px;border-radius:50%;background:#64748b}
+.menu-tag-dot-veg,.menu-tag-veg .menu-tag-icon{background:#278052}.menu-tag-dot-non-veg,.menu-tag-non-veg .menu-tag-icon{background:#ae5148}.menu-tag-dot-beverage,.menu-tag-beverage .menu-tag-icon{background:#4778a9}.menu-tag-dot-egg,.menu-tag-egg .menu-tag-icon{background:#aa8428}.menu-tag-dot-chef-special,.menu-tag-chef-special .menu-tag-icon{background:#8066a5}
+.menu-legacy-tags{margin-top:6px;color:#737b88;font-size:10px;line-height:1.6}.menu-legacy-tag{display:inline-flex;padding:2px 7px;border-radius:999px;background:#f2f4f7;color:#596170}
+.menu-tag-badge{gap:5px}.menu-tag-icon{display:inline-block;flex:none;width:7px;height:7px;border-radius:50%;background:#64748b}
+.menu-tag-veg{border-color:#d5e8dc;background:#f4faf6;color:#286344}.menu-tag-non-veg{border-color:#eadbd8;background:#fbf6f5;color:#85473f}.menu-tag-beverage{border-color:#d9e3ec;background:#f5f8fb;color:#3d5f7c}.menu-tag-egg{border-color:#e9e1cf;background:#faf8f2;color:#76632d}.menu-tag-chef-special{border-color:#e4deeb;background:#f8f6fa;color:#665477}
+.food-card-tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}.food-card-tags .menu-item-tag{padding:3px 6px;font-size:9px}
+.sales-channel-protected{margin-top:12px;padding:8px 10px;border:1px solid #e6ebf0;border-radius:9px;background:#f8fafc;color:#687486;font-size:10px;font-weight:750}
 #menuDescription{width:100%;min-height:86px;padding:10px 12px;border:1px solid #dfe3e8;border-radius:9px;background:#fff;font:inherit;resize:vertical}
 
 /* Marketing deal schedule controls */

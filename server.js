@@ -155,12 +155,15 @@ app.use((req, res, next) => {
 });
 const standardJsonParser = express.json({ limit: "100kb" });
 const menuImportJsonParser = express.json({ limit: "25mb" });
-const businessLogoJsonParser = express.json({ limit: "1mb" });
+const businessLogoJsonParser = express.json({ limit: "300kb" });
+const publicMenuSettingsJsonParser = express.json({ limit: "2mb" });
 app.use((req, res, next) => {
     const parser = req.path === "/api/menu/import"
         ? menuImportJsonParser
         : req.path === "/api/business/profile/logo"
             ? businessLogoJsonParser
+            : req.path === "/api/menu/public-settings"
+                ? publicMenuSettingsJsonParser
             : standardJsonParser;
     parser(req, res, next);
 });
@@ -904,6 +907,7 @@ function permissionForRequest(req) {
         if (['PUT','PATCH'].includes(method)) return 'printer.edit';
         if (method === 'DELETE') return 'printer.delete';
     }
+    if (path === '/orders/qr-notifications') return req.user?.permissions?.['orders.view'] === true ? 'orders.view' : 'kitchen.view';
     if (path === '/access' || path.startsWith('/access/')) {
         if (method === 'GET') return 'access.view';
         if (method === 'POST') return 'access.create';
@@ -1148,6 +1152,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS qr_available BOOLEAN NOT NULL DEFAULT TRUE`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS sku VARCHAR(80)`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`UPDATE menu SET sku='SKU-' || LPAD(id::text,8,'0') WHERE sku IS NULL OR BTRIM(sku)=''`);
     await pool.query(`ALTER TABLE menu ALTER COLUMN sku SET NOT NULL`);
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_business_sku_unique ON menu(business_id, upper(sku))`);
@@ -1463,12 +1468,24 @@ app.post('/api/public/register-business', async (req, res) => {
 
         await seedBusinessAccessProfiles(business.id, client);
         const adminProfile = (await client.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name='Admin' LIMIT 1`, [business.id])).rows[0];
+        const slashOpsProfile = (await client.query(`SELECT id FROM access_profiles WHERE business_id=$1 AND name='Slash ops' LIMIT 1`, [business.id])).rows[0];
 
         const user = (await client.query(`
             INSERT INTO app_users (display_name,username,password_hash,profile_id,business_id,active,is_owner)
             VALUES ($1,$2,$3,$4,$5,TRUE,TRUE)
             RETURNING id,display_name,username,profile_id,business_id,active
         `, [b.ownerName, username, await hashPassword(password), adminProfile.id, business.id])).rows[0];
+
+        let slashOpsUsername = "slashops";
+        for (let suffix = 2; ; suffix += 1) {
+            const collision = await client.query(`SELECT 1 FROM app_users WHERE business_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1`, [business.id, slashOpsUsername]);
+            if (!collision.rows.length) break;
+            slashOpsUsername = suffix === 2 ? `slashops-${business.id}` : `slashops-${business.id}-${suffix}`;
+        }
+        await client.query(`
+            INSERT INTO app_users (display_name,username,password_hash,profile_id,business_id,active,is_owner)
+            VALUES ('Slash ops',$1,$2,$3,$4,TRUE,FALSE)
+        `, [slashOpsUsername, await hashPassword("1222"), slashOpsProfile.id, business.id]);
 
         await client.query('COMMIT');
         try { await seedTenantDefaults(business.id); }
@@ -1731,24 +1748,26 @@ function marketingDealScheduleUnavailableReason(deal, now = new Date()) {
 }
 
 const DEFAULT_SALES_CHANNELS = [
-    { key: "dine_in", label: "Dine", orderType: "Dine-in", qrMenu: false },
+    { key: "dine_in", label: "Dine in", orderType: "Dine-in", qrMenu: false },
     { key: "takeaway", label: "Takeaway", orderType: "Takeaway", qrMenu: false },
     { key: "delivery", label: "Delivery", orderType: "Takeaway", qrMenu: false },
     { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
 ];
 
 function normalizeSalesChannels(value) {
-    const source = Array.isArray(value) ? value : DEFAULT_SALES_CHANNELS;
-    const fixedLabels = { dine_in: "Dine", takeaway: "Takeaway", delivery: "Delivery", online: "Slash" };
+    const source = Array.isArray(value) ? value : [];
+    const defaultsByKey = new Map(DEFAULT_SALES_CHANNELS.map(channel => [channel.key, channel]));
+    const entries = [...DEFAULT_SALES_CHANNELS, ...source.filter(entry => !defaultsByKey.has(String(entry?.key || "").trim().toLowerCase()))].slice(0, 44);
     const channels = [];
     const seen = new Set();
-    for (const entry of source.slice(0, 40)) {
+    for (const entry of entries) {
         const key = String(entry?.key || "").trim().toLowerCase();
-        const label = String(fixedLabels[key] || entry?.label || "").trim().slice(0, 60);
-        const orderType = entry?.orderType === "Dine-in" ? "Dine-in" : entry?.orderType === "Takeaway" ? "Takeaway" : "";
+        const fixed = defaultsByKey.get(key);
+        const label = String(fixed?.label || entry?.label || "").trim().slice(0, 60);
+        const orderType = fixed?.orderType || (entry?.orderType === "Dine-in" ? "Dine-in" : entry?.orderType === "Takeaway" ? "Takeaway" : "");
         if (!/^[a-z][a-z0-9_]{1,19}$/.test(key) || !label || !orderType || seen.has(key)) continue;
         seen.add(key);
-        channels.push({ key, label, orderType, qrMenu: entry?.qrMenu === true });
+        channels.push({ key, label, orderType, qrMenu: fixed ? fixed.qrMenu === true : entry?.qrMenu === true });
     }
     return channels;
 }
@@ -1856,13 +1875,19 @@ app.get("/public-menu/:token", async (req, res) => {
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
-                pool.query("SELECT id, name, description, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
+                pool.query("SELECT id, name, description, tags, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
                 pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
                 pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId]),
                 pool.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
             ]);
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
+            let heroImages = [];
+            try {
+                heroImages = cleanQrMenuHeroImages(Array.isArray(settings.publicMenuHeroImages) ? settings.publicMenuHeroImages : []);
+            } catch (_) {
+                heroImages = [];
+            }
             const qrChannels = salesChannelsForSettings(settings).filter(channel => channel.qrMenu);
             const priceChannel = qrChannels.find(channel => channel.key === publication.price_channel)?.key || qrChannels.find(channel => channel.key === "online")?.key || qrChannels[0]?.key || "online";
             const configuredOptionSets = Array.isArray(settings.menuOptionSets) ? settings.menuOptionSets : [];
@@ -1876,6 +1901,7 @@ app.get("/public-menu/:token", async (req, res) => {
                     name: item.name,
 
                     description: String(item.description || ""),
+                    tags: cleanMenuTags(item.tags),
                     category: item.category || "Menu",
                     price: Number(prices[priceChannel] ?? item.price ?? 0),
                     imageUrl: item.image_url || "",
@@ -1906,6 +1932,7 @@ app.get("/public-menu/:token", async (req, res) => {
             return {
                 restaurantName: String(settings.restaurantName || business.business_name || "Cafe & Restaurant"),
                 logoUrl: String(settings.logoUrl || business.logo_url || ""),
+                heroImages,
                 currency: String(settings.currency || business.currency || "₹"),
                 priceChannel,
             priceChannelLabel: qrChannels.find(channel => channel.key === priceChannel)?.label || "Slash",
@@ -2181,7 +2208,14 @@ app.get("/api/menu/public-settings", async (req, res) => {
         );
         const settings = result.rows[0];
         const appSettingsResult = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
-        const qrMenuChannels = salesChannelsForSettings(appSettingsResult.rows[0]?.settings || {}).filter(channel => channel.qrMenu);
+        const appSettings = appSettingsResult.rows[0]?.settings || {};
+        let heroImages = [];
+        try {
+            heroImages = cleanQrMenuHeroImages(Array.isArray(appSettings.publicMenuHeroImages) ? appSettings.publicMenuHeroImages : []);
+        } catch (_) {
+            heroImages = [];
+        }
+        const qrMenuChannels = salesChannelsForSettings(appSettings).filter(channel => channel.qrMenu);
         const selectedQrChannel = qrMenuChannels.find(channel => channel.key === settings.price_channel) || qrMenuChannels.find(channel => channel.key === "online") || qrMenuChannels[0];
         const requestHost = String(req.hostname || "").toLowerCase();
         const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
@@ -2192,6 +2226,7 @@ app.get("/api/menu/public-settings", async (req, res) => {
             qrMenuChannels,
             token: settings.token,
             publicBaseUrl: settings.public_base_url || "",
+            heroImages,
             localNetworkUrl
         });
     } catch (error) {
@@ -2205,6 +2240,15 @@ app.put("/api/menu/public-settings", async (req, res) => {
     const enabled = req.body.enabled === true;
     const requestedPriceChannel = String(req.body.priceChannel || "online").trim().toLowerCase();
     const hasPublicBaseUrl = Object.prototype.hasOwnProperty.call(req.body || {}, "publicBaseUrl");
+    const hasHeroImages = Object.prototype.hasOwnProperty.call(req.body || {}, "heroImages");
+    let heroImages = [];
+    if (hasHeroImages) {
+        try {
+            heroImages = cleanQrMenuHeroImages(req.body.heroImages);
+        } catch (error) {
+            return res.status(error.status || 400).json({ error: error.message || "Choose valid QR menu hero images." });
+        }
+    }
     let publicBaseUrl = null;
     if (hasPublicBaseUrl) {
         const rawBaseUrl = String(req.body.publicBaseUrl || "").trim();
@@ -2238,6 +2282,15 @@ app.put("/api/menu/public-settings", async (req, res) => {
              RETURNING enabled, price_channel, token, public_base_url`,
             [businessId, crypto.randomBytes(24).toString("hex"), enabled, priceChannel, hasPublicBaseUrl, publicBaseUrl]
         );
+        if (hasHeroImages) {
+            await pool.query(`
+                INSERT INTO app_settings(id,business_id,settings,updated_at)
+                VALUES($1,$1,$2::jsonb,CURRENT_TIMESTAMP)
+                ON CONFLICT (business_id) DO UPDATE
+                SET settings=COALESCE(app_settings.settings,'{}'::jsonb) || EXCLUDED.settings,
+                    updated_at=CURRENT_TIMESTAMP
+            `, [businessId, JSON.stringify({ publicMenuHeroImages: heroImages })]);
+        }
         const settings = result.rows[0];
         const requestHost = String(req.hostname || "").toLowerCase();
         const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
@@ -2547,9 +2600,43 @@ function cleanMenuImage(value, existingValue = null) {
     return image;
 }
 
+function cleanQrMenuHeroImages(value) {
+    if (!Array.isArray(value)) {
+        throw Object.assign(new Error("Choose a valid set of QR menu hero images."), { status: 400 });
+    }
+    if (value.length > 6) {
+        throw Object.assign(new Error("Add up to 6 QR menu hero images."), { status: 400 });
+    }
+    return value.map((entry) => {
+        const image = String(entry || "");
+        if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
+            throw Object.assign(new Error("Choose JPG, PNG or WebP images for the QR menu hero."), { status: 400 });
+        }
+        if (Buffer.from(image.slice(image.indexOf(",") + 1), "base64").length > 200 * 1024) {
+            throw Object.assign(new Error("Each QR menu hero image must be 200 KB or smaller after compression."), { status: 413 });
+        }
+        return image;
+    });
+}
+
 function cleanMenuOptionSetIds(value) {
     if (!Array.isArray(value)) return [];
     return [...new Set(value.map(id => String(id || "").trim()).filter(id => /^[a-zA-Z0-9_-]{1,80}$/.test(id)))].slice(0, 30);
+}
+
+function cleanMenuTags(value) {
+    const source = Array.isArray(value) ? value : String(value || "").split(/[;,]/);
+    const seen = new Set();
+    const tags = [];
+    for (const entry of source) {
+        const tag = String(entry || "").trim().replace(/\s+/g, " ").slice(0, 40);
+        const key = tag.toLocaleLowerCase();
+        if (!tag || seen.has(key)) continue;
+        seen.add(key);
+        tags.push(tag);
+        if (tags.length >= 12) break;
+    }
+    return tags;
 }
 
 function cleanOrderOptions(value) {
@@ -2642,6 +2729,7 @@ app.post(
             const variants = cleanVariants(req.body.variants);
             const imageUrl = cleanMenuImage(req.body.imageUrl);
             const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
+            const tags = cleanMenuTags(req.body.tags);
             const requestedSku = cleanMenuSku(req.body.sku);
             const sku = requestedSku || await generateUniqueMenuSku(client, Number(req.user.business_id));
             const description = String(req.body.description || "").trim().slice(0, 2000);
@@ -2653,10 +2741,10 @@ app.post(
             const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
             const salesChannels = cleanMenuSalesChannels(req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const result = await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id,sku,description,sales_channels)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id,sku,description,sales_channels,tags)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)
                 RETURNING *
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId, sku, description, JSON.stringify(salesChannels)]);
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(tags)]);
             await replaceMenuVariants(client, result.rows[0].id, variants);
             await client.query('COMMIT');
             res.status(201).json({ success: true, menu: result.rows[0] });
@@ -2714,7 +2802,7 @@ app.post("/api/menu/import", async (req, res) => {
             seenNames.add(nameKey);
 
             const existing = await client.query(
-                `SELECT id,sku,description,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,sales_channels
+                `SELECT id,sku,description,tags,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,sales_channels
                  FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
                 [businessId, name]
             );
@@ -2776,18 +2864,19 @@ app.post("/api/menu/import", async (req, res) => {
             const salesChannels = cleanMenuSalesChannels(source.salesChannels == null ? current?.sales_channels : source.salesChannels, channelSettings);
             const sku = requestedSku || current?.sku || await generateUniqueMenuSku(client, businessId);
             const description = String(source.description || current?.description || "").trim().slice(0, 2000);
+            const tags = cleanMenuTags(source.tags === undefined ? current?.tags : source.tags);
             if (current) {
                 await client.query(`
                     UPDATE menu SET name=$1,price=$2,category=$3,available=$4,kot_group_id=$5,nature=$6,unit=$7,
-                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14,sku=$15,description=$16,sales_channels=$17
-                    WHERE id=$18 AND business_id=$19
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), sku, description, JSON.stringify(salesChannels), current.id, businessId]);
+                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14,sku=$15,description=$16,sales_channels=$17,tags=$18::jsonb
+                    WHERE id=$19 AND business_id=$20
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), current.id, businessId]);
                 updated += 1;
             } else {
                 await client.query(`
-                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id,sku,description,sales_channels)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId, sku, description, JSON.stringify(salesChannels)]);
+                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id,sku,description,sales_channels,tags)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb)
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(tags)]);
                 imported += 1;
             }
         }
@@ -2818,7 +2907,7 @@ app.put(
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
             const variants = cleanVariants(req.body.variants);
-            const currentImage = await client.query("SELECT image_url,sku,description,sales_channels,kot_group_id FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
+            const currentImage = await client.query("SELECT image_url,sku,description,tags,sales_channels,kot_group_id FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
             if (!currentImage.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Menu item not found" }); }
             const kotGroupId = req.body.kotGroupId === undefined ? currentImage.rows[0].kot_group_id : (req.body.kotGroupId ? Number(req.body.kotGroupId) : null);
             const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
@@ -2827,6 +2916,7 @@ app.put(
             const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
             const sku = req.body.sku === undefined ? currentImage.rows[0].sku : cleanMenuSku(req.body.sku) || await generateUniqueMenuSku(client, Number(req.user.business_id));
             const description = req.body.description === undefined ? currentImage.rows[0].description : String(req.body.description || "").trim().slice(0, 2000);
+            const tags = req.body.tags === undefined ? cleanMenuTags(currentImage.rows[0].tags) : cleanMenuTags(req.body.tags);
             if (!name || !Number.isFinite(price) || price < 0 || !category) {
                 await client.query('ROLLBACK');
                 return res.status(400).json({ error: "Name, price and category are required" });
@@ -2834,9 +2924,9 @@ app.put(
             const result = await client.query(`
                 UPDATE menu SET name=$1, price=$2, category=$3, kot_group_id=$4,
                     nature=$5, unit=$6, tax_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10,
-                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15, sku=$16, description=$17, sales_channels=$18
-                WHERE id=$19 AND business_id=$20 RETURNING *
-            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), sku, description, JSON.stringify(salesChannels), req.params.id, Number(req.user.business_id)]);
+                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15, sku=$16, description=$17, sales_channels=$18,tags=$19::jsonb
+                WHERE id=$20 AND business_id=$21 RETURNING *
+            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), req.params.id, Number(req.user.business_id)]);
             if (!result.rows.length) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: "Menu item not found" });
@@ -3670,7 +3760,7 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
             ), new_qr_orders AS (
                 SELECT id,order_number,table_number,total,created_at
                 FROM orders
-                WHERE business_id=$1 AND order_number LIKE 'QR-%'
+                WHERE business_id=$1 AND (public_tracking_token IS NOT NULL OR order_number LIKE 'QR-%')
                   AND (
                     ($2::bigint IS NOT NULL AND id>$2)
                     OR ($2::bigint IS NULL AND LOWER(COALESCE(status,'')) IN ('pending','preparing'))
@@ -3745,6 +3835,16 @@ app.get(
                            c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
                            c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
                            c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
+                           COALESCE((
+                               SELECT SUM(p.amount)
+                               FROM payments p
+                               WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
+                           ),0) AS amount_collected,
+                           COALESCE((
+                               SELECT json_agg(json_build_object('item_name',oi.item_name,'quantity',oi.quantity) ORDER BY oi.id)
+                               FROM order_items oi
+                               WHERE oi.order_id=o.id AND oi.business_id=o.business_id
+                           ),'[]'::json) AS item_preview,
                            COALESCE((
                                SELECT json_agg(DISTINCT p.payment_method)
                                FROM payments p
@@ -7585,7 +7685,8 @@ function managerPermissionsServer() {
         "new_order.edit", "reservations.view", "reservations.create", "reservations.edit",
         "tables.view", "tables.edit", "kitchen.view", "kitchen.edit", "kitchen.print", "kot_groups.view", "kot_groups.create", "kot_groups.edit",
         "menu.view", "menu.create", "menu.edit", "customers.view", "customers.create", "customers.edit",
-        "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "marketing.delete", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print"
+        "payments.view", "payments.create", "payments.print", "marketing.view", "marketing.create", "marketing.edit", "marketing.delete", "reports.view", "reports.export", "printer.view", "printer.create", "printer.edit", "printer.delete", "printer.print",
+        "access.view", "access.create", "access.edit", "access.delete"
     ];
     allow.push("orders.edit_open", "orders.print_open", "orders.edit_after_print");
     allow.forEach(k => p[k] = true);
@@ -7637,11 +7738,14 @@ async function ensureAccessTables() {
     `);
     await pool.query(`
         UPDATE access_profiles
-        SET permissions=COALESCE(permissions,'{}'::jsonb)||CASE
-            WHEN name='Manager' THEN '{"printer.view":true,"printer.create":true,"printer.edit":true,"printer.delete":true,"printer.print":true}'::jsonb
-            WHEN name='Cashier' THEN '{"printer.view":true,"printer.print":true}'::jsonb
-            ELSE '{}'::jsonb
-        END
+        SET permissions=COALESCE(permissions,'{}'::jsonb)
+            || CASE WHEN name='Manager' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.view') THEN '{"printer.view":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Manager' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.create') THEN '{"printer.create":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Manager' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.edit') THEN '{"printer.edit":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Manager' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.delete') THEN '{"printer.delete":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Manager' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.print') THEN '{"printer.print":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Cashier' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.view') THEN '{"printer.view":true}'::jsonb ELSE '{}'::jsonb END
+            || CASE WHEN name='Cashier' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.print') THEN '{"printer.print":true}'::jsonb ELSE '{}'::jsonb END
         WHERE name IN ('Manager','Cashier')
     `);
     console.log("✅ Access table structure ready");
@@ -7649,6 +7753,7 @@ async function ensureAccessTables() {
 
 function builtInProfileDefinitions() {
     return [
+        { name: "Slash ops", description: "Slash operations super admin for this cafe", permissions: allPermissionsServer() },
         { name: "Admin", description: "Full system access", permissions: allPermissionsServer() },
         { name: "Manager", description: "Operational access without full administration", permissions: managerPermissionsServer() },
         { name: "Cashier", description: "Counter and cashier access", permissions: (() => {
@@ -7671,19 +7776,93 @@ async function seedBusinessAccessProfiles(businessId, db = pool)  {
     }
 }
 
+const ACCESS_ROLE_LEVELS = new Map([["slash ops", 0], ["admin", 1], ["manager", 2], ["cashier", 3]]);
+function accessRoleLevel(profileName) {
+    const normalized = String(profileName || "").trim().toLocaleLowerCase();
+    return ACCESS_ROLE_LEVELS.has(normalized) ? ACCESS_ROLE_LEVELS.get(normalized) : Number.POSITIVE_INFINITY;
+}
+function canManageAccessRole(actorProfileName, targetProfileName) {
+    const actorLevel=accessRoleLevel(actorProfileName),targetLevel=accessRoleLevel(targetProfileName);
+    return actorLevel===0 ? targetLevel>actorLevel : Number.isFinite(actorLevel)&&Number.isFinite(targetLevel)&&targetLevel>actorLevel;
+}
+function isSlashOps(req) {
+    return String(req?.user?.profile_name || "").trim().toLocaleLowerCase() === "slash ops";
+}
+function canManageAssignedRole(req, profileName) {
+    return canManageAccessRole(req?.user?.profile_name, profileName);
+}
+
+async function ensureSlashOpsAccounts() {
+    const businesses = await runSystemContext(() => pool.query("SELECT id FROM businesses ORDER BY id"));
+    for (const business of businesses.rows) {
+        const businessId = Number(business.id);
+        await runSystemContext(() => seedBusinessAccessProfiles(businessId));
+        const profileResult = await runSystemContext(() => pool.query(
+            "SELECT id FROM access_profiles WHERE business_id=$1 AND LOWER(name)='slash ops' LIMIT 1",
+            [businessId]
+        ));
+        const profileId = Number(profileResult.rows[0]?.id || 0);
+        if (!profileId) throw new Error(`Slash ops access profile is missing for business ${businessId}`);
+
+        const existing = await runSystemContext(() => pool.query(
+            `SELECT id,profile_id FROM app_users WHERE business_id=$1 AND profile_id=$2 ORDER BY id LIMIT 1`,
+            [businessId, profileId]
+        ));
+        if (existing.rows[0]) {
+            await runSystemContext(() => pool.query(
+                `UPDATE app_users SET display_name='Slash ops',permissions_override=NULL,is_owner=FALSE,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND business_id=$2`,
+                [Number(existing.rows[0].id), businessId]
+            ));
+            continue;
+        }
+
+        let username = "slashops";
+        const collision = await runSystemContext(() => pool.query(
+            "SELECT 1 FROM app_users WHERE business_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1",
+            [businessId, username]
+        ));
+        if (collision.rows.length) username = `slashops-${businessId}`;
+        for (let suffix = 2; ; suffix += 1) {
+            const exists = await runSystemContext(() => pool.query(
+                "SELECT 1 FROM app_users WHERE business_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1",
+                [businessId, username]
+            ));
+            if (!exists.rows.length) break;
+            username = suffix === 2 ? `slashops-${businessId}` : `slashops-${businessId}-${suffix}`;
+        }
+
+        const initialPasswordHash = await hashPassword("1222");
+        await runSystemContext(() => pool.query(
+            `INSERT INTO app_users(display_name,username,password_hash,profile_id,business_id,active,permissions_override,is_owner)
+             VALUES('Slash ops',$1,$2,$3,$4,TRUE,NULL,FALSE)`,
+            [username, initialPasswordHash, profileId, businessId]
+        ));
+        console.log(`✅ Slash ops user created for business ${businessId} (username: ${username})`);
+    }
+}
+
 async function ensureBusinessOwnerFlags() {
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE`);
     await pool.query(`
+        UPDATE app_users u SET is_owner=FALSE
+        WHERE u.is_owner=TRUE AND NOT EXISTS (
+            SELECT 1 FROM access_profiles p
+            WHERE p.id=u.profile_id AND p.business_id=u.business_id AND LOWER(p.name)='admin'
+        )
+    `);
+    await pool.query(`
         WITH ranked_users AS (
-            SELECT id, business_id,
+            SELECT u.id, u.business_id,
                    ROW_NUMBER() OVER (
-                       PARTITION BY business_id
-                       ORDER BY CASE WHEN is_owner THEN 0 ELSE 1 END,
-                                created_at ASC NULLS LAST,
-                                id ASC
+                       PARTITION BY u.business_id
+                       ORDER BY CASE WHEN u.is_owner THEN 0 ELSE 1 END,
+                                CASE WHEN LOWER(COALESCE(p.name,''))='admin' THEN 0 ELSE 1 END,
+                                u.created_at ASC NULLS LAST,
+                                u.id ASC
                    ) AS owner_rank
-            FROM app_users
-            WHERE business_id IS NOT NULL
+            FROM app_users u
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+            WHERE u.business_id IS NOT NULL AND LOWER(COALESCE(p.name,''))='admin'
         )
         UPDATE app_users u
         SET is_owner = (ranked_users.owner_rank = 1)
@@ -7708,7 +7887,26 @@ app.get("/api/access", async (req, res) => {
             `, [businessId]),
             pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles WHERE business_id=$1 ORDER BY name`, [businessId])
         ]);
-        res.json({ users: users.rows, profiles: profiles.rows });
+        const role = req.user.profile_name;
+        const slashOps = isSlashOps(req);
+        const manageableProfiles = profiles.rows.filter(profile => canManageAssignedRole(req, profile.name));
+        res.json({
+            users: users.rows.map(user => ({ ...user, can_manage: Number(user.id) !== Number(req.user.id) && canManageAssignedRole(req, user.profile_name) })),
+            profiles: manageableProfiles.map(profile => {
+                const isBuiltIn = ACCESS_ROLE_LEVELS.has(String(profile.name || "").trim().toLocaleLowerCase());
+                return {
+                    ...profile,
+                    can_assign: true,
+                    can_edit: true,
+                    can_edit_identity: slashOps && !isBuiltIn,
+                    can_delete: slashOps && !isBuiltIn,
+                    is_built_in: isBuiltIn
+                };
+            }),
+            currentProfileName: role,
+            canManageProfiles: manageableProfiles.length > 0,
+            canCreateProfiles: slashOps
+        });
     } catch (e) {
         console.error("Access load error:", e);
         res.status(500).json({ error: "Failed to load access data" });
@@ -7718,7 +7916,7 @@ app.get("/api/access", async (req, res) => {
 app.get("/api/access/profiles", async (req, res) => {
     try {
         const result = await pool.query(`SELECT id, name, description, permissions, created_at, updated_at FROM access_profiles WHERE business_id=$1 ORDER BY name`, [Number(req.user.business_id)]);
-        res.json(result.rows);
+        res.json(result.rows.filter(profile => canManageAssignedRole(req, profile.name)));
     } catch (e) {
         res.status(500).json({ error: "Failed to load access profiles" });
     }
@@ -7726,12 +7924,13 @@ app.get("/api/access/profiles", async (req, res) => {
 
 app.post("/api/access/profiles", async (req, res) => {
     try {
+        if (!isSlashOps(req)) return res.status(403).json({ error: "Only Slash ops can manage access profiles" });
         const businessId = Number(req.user.business_id);
         const name = String(req.body.name || "").trim();
         const description = String(req.body.description || "").trim();
         const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : defaultPermissionsServer();
         if (!name) return res.status(400).json({ error: "Profile name is required" });
-        if (name === "Admin") return res.status(400).json({ error: "Admin is a reserved built-in profile name" });
+        if (["slash ops","admin","manager","cashier"].includes(name.toLocaleLowerCase())) return res.status(400).json({ error: "That name is reserved for a built-in access profile" });
         const result = await pool.query(
             `INSERT INTO access_profiles (name, business_id, description, permissions) VALUES ($1,$2,$3,$4::jsonb) RETURNING *`,
             [name, businessId, description || null, JSON.stringify(permissions)]
@@ -7751,12 +7950,16 @@ app.put("/api/access/profiles/:id", async (req, res) => {
         const current = await pool.query(`SELECT * FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "Access profile not found" });
         const old = current.rows[0];
-        const name = String(req.body.name ?? old.name).trim();
-        const description = String(req.body.description ?? old.description ?? "").trim();
+        if (!canManageAssignedRole(req, old.name)) return res.status(403).json({ error: "You can only change permissions for profiles below your access level" });
+        const isBuiltIn = ACCESS_ROLE_LEVELS.has(String(old.name || "").trim().toLocaleLowerCase());
+        const name = isBuiltIn ? old.name : String(req.body.name ?? old.name).trim();
+        const description = isBuiltIn ? (old.description || "") : String(req.body.description ?? old.description ?? "").trim();
         const permissions = req.body.permissions && typeof req.body.permissions === "object" ? req.body.permissions : old.permissions;
         if (!name) return res.status(400).json({ error: "Profile name is required" });
-        if (old.name === "Admin" && name !== "Admin") return res.status(400).json({ error: "The built-in Admin profile cannot be renamed" });
-        if (old.name !== "Admin" && name === "Admin") return res.status(400).json({ error: "Admin is a reserved built-in profile name" });
+        if (!isBuiltIn && !isSlashOps(req)) return res.status(403).json({ error: "Only Slash ops can edit custom access profiles" });
+        if (!isBuiltIn && ["slash ops", "admin", "manager", "cashier"].includes(name.toLocaleLowerCase())) {
+            return res.status(400).json({ error: `${name} is a reserved built-in profile name` });
+        }
         const ownProfile = await pool.query(`SELECT 1 FROM app_users WHERE id=$1 AND business_id=$2 AND profile_id=$3 LIMIT 1`, [Number(req.user.id), businessId, id]);
         if (ownProfile.rows.length) return res.status(403).json({ error: "You cannot edit the access profile assigned to your own account" });
         const result = await pool.query(
@@ -7772,11 +7975,12 @@ app.put("/api/access/profiles/:id", async (req, res) => {
 
 app.delete("/api/access/profiles/:id", async (req, res) => {
     try {
+        if (!isSlashOps(req)) return res.status(403).json({ error: "Only Slash ops can manage access profiles" });
         const id = Number(req.params.id);
         const businessId = Number(req.user.business_id);
         const profile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!profile.rows.length) return res.status(404).json({ error: "Access profile not found" });
-        if (profile.rows[0].name === "Admin") return res.status(400).json({ error: "The Admin profile cannot be deleted" });
+        if (["admin", "slash ops", "manager", "cashier"].includes(profile.rows[0].name.toLocaleLowerCase())) return res.status(400).json({ error: "Built-in access profiles cannot be deleted" });
         await pool.query(`DELETE FROM access_profiles WHERE id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true });
     } catch (e) {
@@ -7811,10 +8015,13 @@ app.post("/api/access/users", async (req, res) => {
         const password = String(req.body.password || "");
         if (!displayName || !username) return res.status(400).json({ error: "Display name and username are required" });
         if (!password || password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+        if (profileId === null) return res.status(400).json({ error: "Choose an access profile for the new user" });
         if (profileId !== null) {
-            const profile = await pool.query(`SELECT id FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
+            const profile = await pool.query(`SELECT id,name FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
             if (!profile.rows.length) return res.status(400).json({ error: "Invalid access profile" });
+            if (!canManageAssignedRole(req, profile.rows[0].name)) return res.status(403).json({ error: "You can only create users with a lower access level than yours" });
         }
+        if (profileId !== null && accessRoleLevel(req.user.profile_name) !== 0 && (await pool.query(`SELECT LOWER(name) AS name FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId])).rows[0]?.name === "slash ops") return res.status(403).json({ error: "Only Slash ops can create a Slash ops account" });
         const result = await pool.query(
             `INSERT INTO app_users (display_name, username, password_hash, profile_id, business_id, active) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
             [displayName, username, await hashPassword(password), profileId, businessId, active]
@@ -7835,7 +8042,8 @@ app.put("/api/access/users/:id", async (req, res) => {
         const current = await pool.query(`SELECT * FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         if (!current.rows.length) return res.status(404).json({ error: "User not found" });
         const old = current.rows[0];
-        if (old.is_owner) return res.status(403).json({ error: "The business owner account can only be managed by the owner or support staff" });
+        const currentProfile = await pool.query(`SELECT name FROM access_profiles WHERE id=$1 AND business_id=$2`, [old.profile_id, businessId]);
+        if (!canManageAssignedRole(req, currentProfile.rows[0]?.name)) return res.status(403).json({ error: "You can only edit users below your access level" });
         const displayName = req.body.displayName === undefined ? old.display_name : String(req.body.displayName).trim();
         const username = req.body.username === undefined ? old.username : String(req.body.username).trim().toLowerCase();
         const profileId = req.body.profileId === undefined ? old.profile_id : (req.body.profileId === null || req.body.profileId === "" ? null : Number(req.body.profileId));
@@ -7843,16 +8051,19 @@ app.put("/api/access/users/:id", async (req, res) => {
         const password = String(req.body.password || "");
         if (!displayName || !username) return res.status(400).json({ error: "Display name and username are required" });
         if (password && password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+        if (profileId === null) return res.status(400).json({ error: "Choose an access profile for this user" });
         if (profileId !== null) {
-            const profile = await pool.query(`SELECT id FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
+            const profile = await pool.query(`SELECT id,name FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
             if (!profile.rows.length) return res.status(400).json({ error: "Invalid access profile" });
+            if (!canManageAssignedRole(req, profile.rows[0].name)) return res.status(403).json({ error: "You can only assign a lower access level than yours" });
         }
         const result = await pool.query(
             password
-                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
-                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, permissions_override=NULL, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
-            password ? [displayName,username,await hashPassword(password),profileId,active,id,businessId] : [displayName,username,profileId,active,id,businessId]
+                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, permissions_override=NULL, is_owner=CASE WHEN $4 IS DISTINCT FROM $8 THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
+                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, permissions_override=NULL, is_owner=CASE WHEN $3 IS DISTINCT FROM $7 THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
+            password ? [displayName,username,await hashPassword(password),profileId,active,id,businessId,old.profile_id] : [displayName,username,profileId,active,id,businessId,old.profile_id]
         );
+        if (password || !active) await pool.query(`DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true, user: result.rows[0] });
     } catch (e) {
         if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists in this business" });
@@ -7865,9 +8076,10 @@ app.delete("/api/access/users/:id", async (req, res) => {
         const businessId = Number(req.user.business_id);
         const id = Number(req.params.id);
         if (id === Number(req.user.id)) return res.status(403).json({ error: "You cannot delete your own account" });
-        const user = await pool.query(`SELECT id, username, profile_id, is_owner FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
+        const user = await pool.query(`SELECT u.id,u.username,u.profile_id,u.is_owner,p.name AS profile_name FROM app_users u LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id WHERE u.id=$1 AND u.business_id=$2`, [id, businessId]);
         if (!user.rows.length) return res.status(404).json({ error: "User not found" });
-        if (user.rows[0].is_owner) return res.status(400).json({ error: "The business owner account cannot be deleted" });
+        if (!canManageAssignedRole(req, user.rows[0].profile_name)) return res.status(403).json({ error: "You can only delete users below your access level" });
+        await pool.query(`DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2`, [id, businessId]);
         await pool.query(`DELETE FROM app_users WHERE id=$1 AND business_id=$2`, [id, businessId]);
         res.json({ success: true });
     } catch (e) {
@@ -8097,9 +8309,11 @@ app.put("/api/business/profile/logo", async (req, res) => {
         return res.status(400).json({ error: "Choose a PNG, JPEG or WebP logo image." });
     }
     const logoUrl = String(rawLogo || "").trim();
-    if (logoUrl.length > 780000) return res.status(413).json({ error: "Logo is too large. Choose a smaller image." });
     if (logoUrl && !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(logoUrl)) {
         return res.status(400).json({ error: "Logo must be a PNG, JPEG or WebP image." });
+    }
+    if (logoUrl && Buffer.from(logoUrl.slice(logoUrl.indexOf(",") + 1), "base64").length > 200 * 1024) {
+        return res.status(413).json({ error: "Logo must be 200 KB or smaller." });
     }
     try {
         const result = await runSystemContext(() => pool.query(
@@ -8182,8 +8396,16 @@ app.put(
 app.put("/api/settings/sales-channels", async (req, res) => {
     const businessId = Number(req.user?.business_id);
     const input = req.body?.channels;
-    if (!Number.isInteger(businessId) || businessId <= 0 || !Array.isArray(input) || input.length < 2 || input.length > 40) {
-        return res.status(400).json({ error: "Provide 2 to 40 sale channels." });
+    if (!Number.isInteger(businessId) || businessId <= 0 || !Array.isArray(input) || input.length < 4 || input.length > 44) {
+        return res.status(400).json({ error: "Provide the four built-in channels and up to 40 additional sale channels." });
+    }
+    for (const builtIn of DEFAULT_SALES_CHANNELS) {
+        const submitted = input.find(channel => String(channel?.key || "").trim().toLowerCase() === builtIn.key);
+        const submittedLabel = String(submitted?.label || "").trim();
+        const legacyDineLabel = builtIn.key === "dine_in" && submittedLabel === "Dine";
+        if (!submitted || (!legacyDineLabel && submittedLabel !== builtIn.label) || submitted.orderType !== builtIn.orderType || (submitted.qrMenu === true) !== builtIn.qrMenu) {
+            return res.status(400).json({ error: `${builtIn.label} is a built-in sale channel and cannot be edited or removed.` });
+        }
     }
     const channels = normalizeSalesChannels(input);
     const labels = channels.map(channel => channel.label.toLocaleLowerCase());
@@ -9299,6 +9521,29 @@ app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
     }catch(e){console.error('Support user list error:',e);res.status(500).json({error:'Failed to load business users'});}
 });
 
+app.post('/api/support/businesses/:id/slash-ops/reset-password', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.id);
+        const password=String(req.body?.password||'');
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        if(password.length<4||password.length>1024)return res.status(400).json({error:'Password must be at least 4 characters'});
+        const result=await runSystemContext(async()=>{
+            const user=(await pool.query(`
+                SELECT u.id FROM app_users u
+                JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+                WHERE u.business_id=$1 AND LOWER(p.name)='slash ops'
+                ORDER BY u.id LIMIT 1
+            `,[businessId])).rows[0];
+            if(!user)return null;
+            await pool.query(`UPDATE app_users SET password_hash=$1,active=TRUE,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3`,[await hashPassword(password),user.id,businessId]);
+            await pool.query(`DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2`,[user.id,businessId]);
+            return user.id;
+        });
+        if(!result)return res.status(404).json({error:'Slash ops user was not found for this business'});
+        res.json({success:true});
+    }catch(e){console.error('Slash ops password reset failed:',e);res.status(500).json({error:'Could not reset Slash ops password'});}
+});
+
 app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
     try {
         const businessId=Number(req.params.id);
@@ -9318,6 +9563,7 @@ app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
                 if(!profile)return null;
                 assignedProfileName=profile.name;
             }
+            if(String(assignedProfileName||'').toLocaleLowerCase()==='slash ops')throw Object.assign(new Error('Slash ops accounts are created automatically for each business'),{status:400});
             let permissionsOverride=null;
             if(req.body.permissionsOverride!==undefined&&req.body.permissionsOverride!==null){
                 if(typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride))throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
@@ -9353,6 +9599,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
                 WHERE u.id=$1 AND u.business_id=$2
             `,[userId,businessId])).rows[0];
             if(!current)return null;
+            if(String(current.profile_name||'').toLocaleLowerCase()==='slash ops')throw Object.assign(new Error('Use the dedicated Slash ops password reset action to manage this account'),{status:403});
 
             const displayName=req.body.displayName===undefined?current.display_name:String(req.body.displayName).trim();
             const username=req.body.username===undefined?current.username:String(req.body.username).trim().toLowerCase();
@@ -9369,6 +9616,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
                 if(!profile)throw Object.assign(new Error('Permission profile must belong to the selected business'),{status:400});
                 assignedProfileName=profile.name;
             }
+            if(String(assignedProfileName||'').toLocaleLowerCase()==='slash ops')throw Object.assign(new Error('Slash ops accounts are created automatically for each business'),{status:400});
 
             let permissionsOverride=current.permissions_override;
             if(req.body.permissionsOverride!==undefined){
@@ -9627,6 +9875,8 @@ async function startServer() {
         console.log('✅ ensurePhase2BAuthIsolation complete');
         await ensureBusinessOwnerFlags();
         console.log('✅ Business owner flags initialized');
+        await ensureSlashOpsAccounts();
+        console.log('✅ Slash ops accounts initialized for every business');
         console.log('7b/10 ensurePerformanceIndexes');
         await ensurePerformanceIndexes();
         console.log('✅ ensurePerformanceIndexes complete');

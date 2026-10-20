@@ -574,7 +574,7 @@ async function loginUser(event) {
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();kotAlertInitialized=false;knownPendingKOTIds=new Set();try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){try {
     const r = await api("/auth/me");
 
@@ -1695,23 +1695,26 @@ function refreshSideBillPreview() {
 // ==========================================
 
 const DEFAULT_POS_CHANNELS = [
-    { key: "dine_in", label: "Dine", orderType: "Dine-in" },
+    { key: "dine_in", label: "Dine in", orderType: "Dine-in" },
     { key: "takeaway", label: "Takeaway", orderType: "Takeaway" },
     { key: "delivery", label: "Delivery", orderType: "Takeaway" },
     { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
 ];
+const BUILT_IN_POS_CHANNEL_KEYS = new Set(DEFAULT_POS_CHANNELS.map(channel => channel.key));
 let POS_CHANNELS = DEFAULT_POS_CHANNELS.map(channel => ({ ...channel }));
 function normalizePOSChannels(value) {
-    const source = Array.isArray(value) && value.length ? value : DEFAULT_POS_CHANNELS;
-    const fixedLabels = { dine_in: "Dine", takeaway: "Takeaway", delivery: "Delivery", online: "Slash" };
+    const source = Array.isArray(value) ? value : [];
+    const defaultsByKey = new Map(DEFAULT_POS_CHANNELS.map(channel => [channel.key, channel]));
+    const entries = [...DEFAULT_POS_CHANNELS, ...source.filter(channel => !defaultsByKey.has(String(channel?.key || "").trim().toLowerCase()))].slice(0, 44);
     const seen = new Set();
-    const channels = source.slice(0, 40).map(channel => {
+    const channels = entries.map(channel => {
         const key = String(channel?.key || "").trim().toLowerCase();
+        const fixed = defaultsByKey.get(key);
         return {
             key,
-            label: String(fixedLabels[key] || channel?.label || "").trim().slice(0, 60),
-            orderType: channel?.orderType === "Dine-in" ? "Dine-in" : channel?.orderType === "Takeaway" ? "Takeaway" : "",
-            qrMenu: channel?.qrMenu === true
+            label: String(fixed?.label || channel?.label || "").trim().slice(0, 60),
+            orderType: fixed?.orderType || (channel?.orderType === "Dine-in" ? "Dine-in" : channel?.orderType === "Takeaway" ? "Takeaway" : ""),
+            qrMenu: fixed ? fixed.qrMenu === true : channel?.qrMenu === true
         };
     }).filter(channel => {
         if (!/^[a-z][a-z0-9_]{1,19}$/.test(channel.key) || !channel.label || !channel.orderType || seen.has(channel.key)) return false;
@@ -2173,6 +2176,7 @@ async function loadMenu() {
                 <div class="food-card-content">
                     <h3>${esc(item.name)}</h3>
                     <p class="food-meta">${esc(item.category || "Uncategorized")} · ${esc(item.unit || "ea")}</p>
+                    ${renderMenuItemTagBadges(item.tags,"food-card-tags")}
                     <div class="food-card-bottom"><strong>${variants.length ? `From ${money(startingPrice)}` : variantsUnavailable ? "Unavailable" : money(startingPrice)}</strong><button type="button" ${variantsUnavailable ? "disabled" : ""}>${hasVariants ? "Choose" : "Add"}</button></div>
                 </div>`;
             const addBtn = card.querySelector("button");
@@ -4772,6 +4776,8 @@ let kotAlertTimer=null;
 let kotAlertInitialized=false;
 let knownPendingKOTIds=new Set();
 let kotAlertAudioContext=null;
+let pendingKOTAlertSounds=0;
+let pendingQrAlertSounds=0;
 
 function setKOTTab(tab){
     kotState.tab=tab;
@@ -4798,41 +4804,71 @@ async function applyKOTFilter(){
 }
 
 function canKitchenReceiveKOTAlerts(){
-    return Boolean(appSettings.kotEnabled !== false && currentUser && hasPermission("kitchen","view") && appSettings.enableKOTSound !== false);
+    return Boolean(appSettings.kotEnabled !== false && currentUser && hasPermission("kitchen","view"));
 }
 
 function ensureKOTAlertAudio(){
     try{
         if(!kotAlertAudioContext) kotAlertAudioContext = new (window.AudioContext || window.webkitAudioContext)();
-        if(kotAlertAudioContext.state === "suspended") kotAlertAudioContext.resume().catch(()=>{});
     }catch(e){ console.warn("KOT alert audio unavailable:",e.message); }
+    return kotAlertAudioContext;
 }
 
 function primeKOTAlertAudio(){
-    // Called from the staff login click/submit gesture so browsers allow later alert sounds.
-    ensureKOTAlertAudio();
+    // Resume only from a real login/pointer/key gesture, then replay alerts queued while audio was locked.
+    const context=ensureKOTAlertAudio();
+    if(!context)return;
+    const flush=()=>{
+        if(context.state!=="running")return;
+        const qrCount=Math.min(3,pendingQrAlertSounds),kotCount=Math.min(3,pendingKOTAlertSounds);
+        pendingQrAlertSounds=0;pendingKOTAlertSounds=0;
+        for(let i=0;i<qrCount;i++)emitPOSQrOrderAlertSound();
+        for(let i=0;i<kotCount;i++)emitKOTAlertSound();
+    };
+    if(context.state==="running"){flush();return;}
+    context.resume().then(flush).catch(()=>{});
+}
+
+function emitPOSNotificationBuzzer(){
+    try{
+        const context=ensureKOTAlertAudio();
+        if(!context||context.state!=="running")return;
+        const now=context.currentTime;
+        [
+            {offset:0,frequency:220,duration:0.17},
+            {offset:0.23,frequency:185,duration:0.18},
+            {offset:0.48,frequency:220,duration:0.17}
+        ].forEach(pulse=>{
+            const osc=context.createOscillator();
+            const gain=context.createGain();
+            const at=now+pulse.offset;
+            osc.type="square";
+            osc.frequency.setValueAtTime(pulse.frequency,at);
+            osc.frequency.exponentialRampToValueAtTime(pulse.frequency*0.78,at+pulse.duration);
+            gain.gain.setValueAtTime(0.0001,at);
+            gain.gain.exponentialRampToValueAtTime(0.12,at+0.012);
+            gain.gain.setValueAtTime(0.12,at+pulse.duration*0.68);
+            gain.gain.exponentialRampToValueAtTime(0.0001,at+pulse.duration);
+            osc.connect(gain);
+            gain.connect(context.destination);
+            osc.start(at);
+            osc.stop(at+pulse.duration+0.01);
+        });
+    }catch(e){ console.warn("POS buzzer alert failed:",e.message); }
+}
+
+function emitKOTAlertSound(){
+    emitPOSNotificationBuzzer();
 }
 
 function playKOTAlertSound(){
-    if(!canKitchenReceiveKOTAlerts()) return;
-    try{
-        ensureKOTAlertAudio();
-        if(!kotAlertAudioContext) return;
-        const now=kotAlertAudioContext.currentTime;
-        [0,0.18,0.36].forEach((offset,index)=>{
-            const osc=kotAlertAudioContext.createOscillator();
-            const gain=kotAlertAudioContext.createGain();
-            osc.type="sine";
-            osc.frequency.value=index===1?920:740;
-            gain.gain.setValueAtTime(0.0001,now+offset);
-            gain.gain.exponentialRampToValueAtTime(0.22,now+offset+0.02);
-            gain.gain.exponentialRampToValueAtTime(0.0001,now+offset+0.14);
-            osc.connect(gain);
-            gain.connect(kotAlertAudioContext.destination);
-            osc.start(now+offset);
-            osc.stop(now+offset+0.16);
-        });
-    }catch(e){ console.warn("KOT alert sound failed:",e.message); }
+    if(!canKitchenReceiveKOTAlerts()||appSettings.enableKOTSound===false)return;
+    const context=ensureKOTAlertAudio();
+    if(!context||context.state!=="running"){
+        pendingKOTAlertSounds=Math.min(3,pendingKOTAlertSounds+1);
+        return;
+    }
+    emitKOTAlertSound();
 }
 
 function showKOTArrivalToast(count){
@@ -4852,7 +4888,10 @@ function showKOTArrivalToast(count){
 
 function inspectNewKOTAlerts(items){
     if(!canKitchenReceiveKOTAlerts()) return;
-    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)&&!/^QR-/i.test(String(i.order_number||""))).map(i=>Number(i.id)));
+    // QR tickets are announced by the QR order poll so they still alert when
+    // the POS opens after they arrived. Keep this poll for non-QR KOTs to avoid
+    // playing two sounds for the same QR order.
+    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)&&!isQrTrackedOrder(i)).map(i=>Number(i.id)));
     if(!kotAlertInitialized){
         knownPendingKOTIds=pendingIds;
         kotAlertInitialized=true;
@@ -5115,6 +5154,49 @@ async function printKOT(orderId, onlyGroupId){
 // MENU MANAGEMENT
 // ==========================================
 
+const MENU_ITEM_TAG_OPTIONS=[
+    {label:"Veg",key:"veg"},
+    {label:"Non-Veg",key:"non-veg"},
+    {label:"Beverage",key:"beverage"},
+    {label:"Egg",key:"egg"},
+    {label:"Chef Special",key:"chef-special"}
+];
+function menuTagKey(value){return String(value||"").trim().toLocaleLowerCase().replace(/[^a-z0-9]/g,"");}
+function menuTagOption(value){
+    const key=menuTagKey(value);
+    return MENU_ITEM_TAG_OPTIONS.find(option=>menuTagKey(option.label)===key||option.key.replace(/-/g,"")===key)||null;
+}
+function renderMenuItemTagBadges(tags,containerClass="menu-item-tags"){
+    const values=Array.isArray(tags)?tags:[];
+    if(!values.length)return "";
+    return `<div class="${containerClass}">${values.map(value=>{
+        const option=menuTagOption(value),label=option?.label||String(value||"").trim();
+        if(!label)return "";
+        const token=(option?.key||"other").replace(/[^a-z0-9-]/g,"");
+        return `<span class="menu-item-tag menu-tag-badge menu-tag-${token}" title="${esc(label)}"><span class="menu-tag-icon" aria-hidden="true"></span><span>${esc(label)}</span></span>`;
+    }).join("")}</div>`;
+}
+function setMenuTagPicker(tags=[]){
+    const values=Array.isArray(tags)?tags:[];
+    const selected=new Set(values.map(menuTagKey));
+    document.querySelectorAll("#menuTagPicker input[type=checkbox]").forEach(input=>{input.checked=selected.has(menuTagKey(input.value));if(!input.dataset.summaryBound){input.addEventListener("change",updateMenuTagPickerSummary);input.dataset.summaryBound="true";}});
+    updateMenuTagPickerSummary();
+    const legacy=values.filter(value=>!menuTagOption(value));
+    const legacyBox=document.getElementById("menuLegacyTags");
+    if(legacyBox){legacyBox.hidden=!legacy.length;legacyBox.innerHTML=legacy.length?`Existing custom tags will be kept: ${legacy.map(value=>`<span class="menu-legacy-tag">${esc(value)}</span>`).join(" ")}`:"";}
+}
+function updateMenuTagPickerSummary(){
+    const summary=document.getElementById("menuTagPickerSummary");
+    if(!summary)return;
+    const selected=[...document.querySelectorAll("#menuTagPicker input[type=checkbox]:checked")].map(input=>input.value);
+    summary.textContent=selected.length?selected.map(value=>menuTagOption(value)?.label||value).join(", "):"Choose item tags";
+}
+function selectedMenuItemTags(existingTags=[]){
+    const selected=[...document.querySelectorAll("#menuTagPicker input[type=checkbox]:checked")].map(input=>menuTagOption(input.value)?.label||input.value);
+    const legacy=(Array.isArray(existingTags)?existingTags:[]).filter(value=>!menuTagOption(value));
+    return [...new Set([...selected,...legacy])];
+}
+
 async function loadMenuManagement(){
     try{
         await loadMenuCategories();
@@ -5138,14 +5220,14 @@ function renderMenuManagementCards(){
     const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
     const nature=String(document.getElementById('menuManagementNature')?.value||'');
     const items=currentMenu.filter(item=>{
-        const hay=`${item.name} ${item.sku||''} ${item.description||''} ${item.category} ${item.nature} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
+        const hay=`${item.name} ${item.sku||''} ${item.description||''} ${(item.tags||[]).join(' ')} ${item.category} ${item.nature} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
         return(!q||hay.includes(q))&&(!nature||item.nature===nature);
     });
     grid.innerHTML=items.length?items.map(item=>{
         const channel=item.channel_prices||{},variants=item.variants||[],available=item.available!==false;
         return `<article class="menu-admin-card ${available?'':'disabled'}">
           <div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
-          <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}</div>
+          <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}${renderMenuItemTagBadges(item.tags)}</div>
           <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div></div>
           <div class="menu-channel-chips">${POS_CHANNELS.filter(saleChannel=>!Array.isArray(item.sales_channels)||item.sales_channels.includes(saleChannel.key)).map(saleChannel=>`<span>${esc(saleChannel.label)} ${money(channel[saleChannel.key]??item.price)}</span>`).join('')}</div>
           ${variants.length?`<div class="menu-variant-list"><strong>Variants</strong>${variants.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}
@@ -5208,6 +5290,7 @@ function openAddMenuModal(item=null){
     document.getElementById('menuName').value=item?.name||'';
     document.getElementById('menuSku').value=item?.sku||'';
     document.getElementById('menuDescription').value=item?.description||'';
+    setMenuTagPicker(item?.tags||[]);
     document.getElementById('menuPrice').value=item?.price??'';
     document.getElementById('menuCategory').value=item?.category||'';
     document.getElementById('menuNature').value=item?.nature||'Goods';
@@ -5223,7 +5306,7 @@ function openAddMenuModal(item=null){
     renderMenuVariantsEditor(item?.variants||[]);
     document.getElementById('addMenuModal').style.display='flex';
 }
-function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';editingMenuItemId=null;currentMenuImageData=null;}
+function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';document.getElementById('menuTagPicker')?.removeAttribute('open');editingMenuItemId=null;currentMenuImageData=null;}
 function menuVariantEditorRow(variant={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
 function renderMenuVariantsEditor(variants=[]){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(variants||[]).map(menuVariantEditorRow).join('');}
 function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
@@ -5260,7 +5343,7 @@ async function saveMenuItemV2(){
     for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
     const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
-    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
     try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(wasEditing?'Menu item updated.':'Menu item added.');}catch(error){alert(error.message);}
 }
 
@@ -5671,6 +5754,23 @@ async function loadAccess() {
         const result = await api("/access");
         accessUsers = Array.isArray(result.users) ? result.users : [];
         accessProfiles = Array.isArray(result.profiles) ? result.profiles : [];
+        accessCanManageProfiles = result.canManageProfiles === true;
+        accessCanCreateProfiles = result.canCreateProfiles === true;
+        const profilesTab=document.getElementById("accessProfilesTab");
+        const addProfileButton=document.querySelector("#accessProfilesPanel .access-toolbar .big-btn");
+        if(profilesTab)profilesTab.hidden=!accessCanManageProfiles;
+        if(addProfileButton)addProfileButton.hidden=!accessCanCreateProfiles;
+        const scopeNote=document.getElementById("accessProfilesScopeNote");
+        const roleName=String(result.currentProfileName||"").trim().toLocaleLowerCase();
+        if(scopeNote){
+            scopeNote.textContent=roleName==="admin"
+                ? "You can view and change Manager and Cashier permissions."
+                : roleName==="manager"
+                    ? "You can view and change Cashier permissions."
+                    : roleName==="slash ops"
+                        ? "Manage access permissions across the business roles."
+                        : "You can manage access profiles below your role.";
+        }
         renderAccessUsers();
         renderAccessProfiles();
         populateAccessProfileSelect();
@@ -5685,7 +5785,7 @@ function showAccessTab(tab) {
     const profilesPanel = document.getElementById("accessProfilesPanel");
     const usersTab = document.getElementById("accessUsersTab");
     const profilesTab = document.getElementById("accessProfilesTab");
-    const users = tab === "users";
+    const users = tab === "users" || !accessCanManageProfiles;
     if (usersPanel) usersPanel.style.display = users ? "block" : "none";
     if (profilesPanel) profilesPanel.style.display = users ? "none" : "block";
     if (usersTab) usersTab.classList.toggle("active", users);
@@ -5711,9 +5811,11 @@ function renderAccessUsers() {
             <td><span class="access-status ${user.active ? "active" : "inactive"}">${user.active ? "Active" : "Inactive"}</span></td>
             <td>${user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</td>
             <td>
+                ${user.can_manage ? `
                 <button onclick="editAccessUser(${user.id})">✏️ Edit</button>
                 <button onclick="toggleAccessUser(${user.id}, ${user.active ? "false" : "true"})">${user.active ? "⏸️ Disable" : "▶️ Enable"}</button>
-                ${user.username !== "admin" ? `<button onclick="deleteAccessUser(${user.id})">🗑️ Delete</button>` : ""}
+                <button onclick="deleteAccessUser(${user.id})">🗑️ Delete</button>
+                ` : '<span class="access-muted">You cannot manage users at your level or above.</span>'}
             </td>
         `;
         body.appendChild(tr);
@@ -5749,10 +5851,10 @@ function renderAccessProfiles() {
                     return `<div class="access-summary-item"><strong>${esc(mod.label)}</strong><span>${count}/${ACCESS_ACTIONS.length}</span></div>`;
                 }).join("")}
             </div>
-            <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
+            ${profile.can_edit === true ? `<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
                 <button onclick="editAccessProfile(${profile.id})">✏️ Edit</button>
-                ${profile.name !== "Admin" ? `<button onclick="deleteAccessProfile(${profile.id})">🗑️ Delete</button>` : ""}
-            </div>
+                ${profile.can_delete === true ? `<button onclick="deleteAccessProfile(${profile.id})">🗑️ Delete</button>` : ""}
+            </div>` : ''}
         `;
         container.appendChild(card);
     });
@@ -5761,7 +5863,8 @@ function renderAccessProfiles() {
 function populateAccessProfileSelect(selectedId) {
     const select = document.getElementById("accessUserProfile");
     if (!select) return;
-    select.innerHTML = '<option value="">-- No profile --</option>' + accessProfiles.map(function(profile) {
+    const available=accessProfiles.filter(profile=>profile.can_assign===true);
+    select.innerHTML = '<option value="">-- Choose access profile --</option>' + available.map(function(profile) {
         return `<option value="${profile.id}">${esc(profile.name)}</option>`;
     }).join("");
     if (selectedId !== undefined && selectedId !== null) select.value = String(selectedId);
@@ -5878,11 +5981,20 @@ function readAccessPermissionEditor() {
 }
 
 function openAccessProfileModal(profile) {
+    if (profile && profile.can_edit !== true) return;
+    if (!profile && !accessCanCreateProfiles) return;
     editingAccessProfileId = profile?.id || null;
     document.getElementById("accessProfileModalTitle").textContent = editingAccessProfileId ? "Edit Access Profile" : "Add Access Profile";
     document.getElementById("accessProfileId").value = editingAccessProfileId || "";
-    document.getElementById("accessProfileName").value = profile?.name || "";
-    document.getElementById("accessProfileDescription").value = profile?.description || "";
+    const nameInput = document.getElementById("accessProfileName");
+    const descriptionInput = document.getElementById("accessProfileDescription");
+    const identityNote = document.getElementById("accessProfileIdentityNote");
+    nameInput.value = profile?.name || "";
+    descriptionInput.value = profile?.description || "";
+    const identityLocked = Boolean(profile) && profile.is_built_in === true;
+    nameInput.readOnly = identityLocked || !accessCanCreateProfiles;
+    descriptionInput.readOnly = identityLocked || !accessCanCreateProfiles;
+    if (identityNote) identityNote.hidden = !identityLocked;
     buildAccessPermissionEditor(profile?.permissions || defaultAccessPermissions());
     document.getElementById("accessProfileModal").style.display = "flex";
 }
@@ -5894,6 +6006,12 @@ function closeAccessProfileModal() {
 }
 
 async function saveAccessProfile() {
+    if (editingAccessProfileId) {
+        const profile = accessProfiles.find(item => Number(item.id) === Number(editingAccessProfileId));
+        if (!profile || profile.can_edit !== true) return;
+    } else if (!accessCanCreateProfiles) {
+        return;
+    }
     const name = document.getElementById("accessProfileName").value.trim();
     const description = document.getElementById("accessProfileDescription").value.trim();
     if (!name) return alert("Profile name is required.");
@@ -5913,10 +6031,12 @@ async function saveAccessProfile() {
 
 function editAccessProfile(id) {
     const profile = accessProfiles.find(p => Number(p.id) === Number(id));
-    if (profile) openAccessProfileModal(profile);
+    if (profile?.can_edit === true) openAccessProfileModal(profile);
 }
 
 async function deleteAccessProfile(id) {
+    const profile = accessProfiles.find(item => Number(item.id) === Number(id));
+    if (!profile || profile.can_delete !== true) return;
     if (!confirm("Delete this access profile? Users assigned to it will become unassigned.")) return;
     try {
         await api(`/access/profiles/${id}`, { method: "DELETE" });
@@ -6445,13 +6565,14 @@ function renderPOSPreferences() {
 function renderSalesChannels() {
     const list = document.getElementById("salesChannelsList");
     if (!list) return;
-    list.innerHTML = POS_CHANNELS.map(channel => `<article class="sales-channel-card">
+    list.innerHTML = POS_CHANNELS.map(channel => {const isBuiltIn=BUILT_IN_POS_CHANNEL_KEYS.has(channel.key);return `<article class="sales-channel-card">
         <div class="sales-channel-card-top"><div><h4>${esc(channel.label)}</h4><p>${channel.orderType === "Dine-in" ? "Dine-in / table flow" : "Takeaway / delivery flow"}</p></div><span class="sales-channel-badge">${channel.qrMenu ? "QR Menu" : "POS channel"}</span></div>
-        <div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>
-    </article>`).join("");
+        ${isBuiltIn?'<div class="sales-channel-protected">Built-in channel · name and settings are protected</div>':`<div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>`}
+    </article>`;}).join("");
 }
 function openSalesChannelModal(key = "") {
     const channel = getSaleChannel(key);
+    if(channel&&BUILT_IN_POS_CHANNEL_KEYS.has(channel.key)){showProfileToast("Built-in sale channels are protected.");return;}
     document.getElementById("salesChannelEditingKey").value = channel?.key || "";
     document.getElementById("salesChannelModalTitle").textContent = channel ? "Edit sale channel" : "Create sale channel";
     const nameInput = document.getElementById("salesChannelName");
@@ -6493,6 +6614,7 @@ async function persistSalesChannels(nextChannels) {
 }
 async function saveSalesChannel() {
     const editingKey = document.getElementById("salesChannelEditingKey").value;
+    if(editingKey&&BUILT_IN_POS_CHANNEL_KEYS.has(editingKey)){showProfileToast("Built-in sale channels are protected.");return;}
     const label = document.getElementById("salesChannelName").value.trim();
     const orderType = document.getElementById("salesChannelOrderType").value;
     const qrMenu = document.getElementById("salesChannelQrMenu").checked;
@@ -6513,6 +6635,7 @@ async function saveSalesChannel() {
 async function deleteSalesChannel(key) {
     const channel = getSaleChannel(key);
     if (!channel) return;
+    if(BUILT_IN_POS_CHANNEL_KEYS.has(channel.key)){showProfileToast("Built-in sale channels cannot be deleted.");return;}
     if (!confirm(`Remove ${channel.label}? Items, discounts and deals assigned only to this channel will no longer be available there.`)) return;
     const next = POS_CHANNELS.filter(entry => entry.key !== key);
     if (!next.some(entry => entry.orderType === "Dine-in") || !next.some(entry => entry.orderType === "Takeaway")) return alert("Keep at least one Dine-in channel and one Takeaway / delivery channel active.");
@@ -6660,9 +6783,9 @@ async function handleRestaurantLogoUpload(input) {
         input.value = "";
         return alert("Choose a PNG, JPG or WebP image.");
     }
-    if (file.size > 12 * 1024 * 1024) {
+    if (file.size > 200 * 1024) {
         input.value = "";
-        return alert("Choose a logo image smaller than 12 MB.");
+        return alert("Choose a logo image that is 200 KB or smaller.");
     }
     try {
         const bitmap = await createImageBitmap(file);
@@ -6681,13 +6804,13 @@ async function handleRestaurantLogoUpload(input) {
             context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
             for (const quality of [0.84, 0.72, 0.6]) {
                 result = canvas.toDataURL("image/webp", quality);
-                if (result.length <= 760000) break;
+                if (atob(result.slice(result.indexOf(",") + 1)).length <= 200 * 1024) break;
             }
-            if (result.length <= 760000) break;
+            if (atob(result.slice(result.indexOf(",") + 1)).length <= 200 * 1024) break;
         }
         bitmap.close?.();
-        if (!result.startsWith("data:image/webp;base64,") || result.length > 760000) {
-            throw new Error("This logo could not be compressed enough. Choose a smaller or simpler image.");
+        if (!result.startsWith("data:image/webp;base64,") || atob(result.slice(result.indexOf(",") + 1)).length > 200 * 1024) {
+            throw new Error("This logo could not be compressed below 200 KB. Choose a smaller or simpler image.");
         }
         pendingBusinessLogoUrl = result;
         businessLogoChanged = true;
@@ -9257,6 +9380,70 @@ async function createGenzTableQrPoster(table,qrDataUrl){
 tableQrMenuTables=[];
 tableQrMenuItems=[];
 tableQrMenuQrData=new Map();
+let tableQrMenuHeroImages=[];
+
+function renderQrHeroImages(unsaved=false){
+    const grid=document.getElementById("qrHeroImageList"),note=document.getElementById("qrHeroImageNote"),count=document.getElementById("qrHeroImageCount"),uploadButton=document.getElementById("qrHeroUploadButton");
+    if(!grid)return;
+    if(count)count.textContent=tableQrMenuHeroImages.length+"/6";
+    if(uploadButton)uploadButton.disabled=tableQrMenuHeroImages.length>=6;
+    if(!tableQrMenuHeroImages.length){
+        grid.innerHTML='<div class="qr-hero-empty">No photos added. The existing welcome artwork will be shown.</div>';
+    }else{
+        grid.innerHTML=tableQrMenuHeroImages.map((image,index)=>'<article class="qr-hero-image-card"><img src="'+esc(image)+'" alt="QR menu hero image '+(index+1)+'" loading="lazy"><div class="qr-hero-image-card-footer"><span>Image '+(index+1)+'</span><div class="qr-hero-image-actions"><button type="button" '+(index===0?'disabled':'')+' title="Move image earlier" aria-label="Move image '+(index+1)+' earlier" onclick="moveQrHeroImage('+index+',-1)">↑</button><button type="button" '+(index===tableQrMenuHeroImages.length-1?'disabled':'')+' title="Move image later" aria-label="Move image '+(index+1)+' later" onclick="moveQrHeroImage('+index+',1)">↓</button><button type="button" class="qr-hero-remove" title="Remove image" aria-label="Remove image '+(index+1)+'" onclick="removeQrHeroImage('+index+')">×</button></div></div></article>').join("");
+    }
+    if(note)note.textContent=(unsaved?"Unsaved image changes — save them to update the guest menu. ":"")+"Add up to 6 JPG, PNG or WebP images, up to 200 KB each after compression. Use the arrows to choose their order.";
+}
+
+function moveQrHeroImage(index,direction){
+    const target=index+direction;
+    if(index<0||target<0||target>=tableQrMenuHeroImages.length)return;
+    const [image]=tableQrMenuHeroImages.splice(index,1);
+    tableQrMenuHeroImages.splice(target,0,image);
+    renderQrHeroImages(true);
+}
+
+function removeQrHeroImage(index){
+    if(index<0||index>=tableQrMenuHeroImages.length)return;
+    tableQrMenuHeroImages.splice(index,1);
+    renderQrHeroImages(true);
+}
+
+async function compressQrHeroImage(file){
+    if(!["image/jpeg","image/png","image/webp"].includes(file.type))throw new Error(file.name+": choose a JPG, PNG or WebP image.");
+    if(file.size>12*1024*1024)throw new Error(file.name+": choose an image smaller than 12 MB.");
+    const bitmap=await createImageBitmap(file);
+    try{
+        const canvas=document.createElement("canvas"),context=canvas.getContext("2d",{alpha:false});
+        if(!context)throw new Error("This browser cannot prepare the selected image.");
+        let longest=Math.min(2000,Math.max(bitmap.width,bitmap.height)),quality=.86,encoded="";
+        for(let attempt=0;attempt<32;attempt++){
+            const scale=Math.min(1,longest/Math.max(bitmap.width,bitmap.height));
+            canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+            context.fillStyle="#ffffff";context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+            encoded=canvas.toDataURL("image/jpeg",quality);
+            if(atob(encoded.slice(encoded.indexOf(",")+1)).length<=200*1024)return encoded;
+            if(quality>.5)quality=Math.max(.48,quality-.08);else longest=Math.max(320,Math.floor(longest*.82));
+        }
+        throw new Error(file.name+": could not resize this image enough. Choose a smaller image.");
+    }finally{bitmap.close?.();}
+}
+
+async function addQrHeroImages(input){
+    const files=[...(input?.files||[])],available=Math.max(0,6-tableQrMenuHeroImages.length),selected=files.slice(0,available),errors=[];
+    if(files.length>available)errors.push("You can add up to 6 images in total.");
+    const addButton=document.getElementById("qrHeroUploadButton");
+    if(addButton)addButton.disabled=true;
+    try{
+        const additions=[];
+        for(const file of selected){try{additions.push(await compressQrHeroImage(file));}catch(error){errors.push(error.message||"Could not read "+file.name+".");}}
+        if(additions.length){tableQrMenuHeroImages.push(...additions);renderQrHeroImages(true);}
+    }finally{
+        if(input)input.value="";
+        if(addButton)addButton.disabled=tableQrMenuHeroImages.length>=6;
+    }
+    if(errors.length)alert(errors.join("\n"));
+}
 
 async function loadTableQrMenuModule(){
     const grid=document.getElementById("tableQrGrid"),stock=document.getElementById("qrStockGrid");
@@ -9268,6 +9455,8 @@ async function loadTableQrMenuModule(){
         tableQrMenuItems=Array.isArray(items)?items:[];
         restaurantMenuPublication=publication;
         const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),baseField=document.getElementById("publicMenuBaseUrl"),status=document.getElementById("publicMenuStatus");
+        tableQrMenuHeroImages=Array.isArray(publication.heroImages)?publication.heroImages.slice(0,6):[];
+        renderQrHeroImages();
         if(enabled)enabled.checked=publication.enabled===true;
         if(channel){const choices=Array.isArray(publication.qrMenuChannels)?publication.qrMenuChannels:POS_CHANNELS.filter(entry=>entry.qrMenu);channel.innerHTML=choices.map(entry=>`<option value="${esc(entry.key)}">${esc(entry.label)}</option>`).join("");channel.value=choices.some(entry=>entry.key===publication.priceChannel)?publication.priceChannel:choices[0]?.key||"online";}
         const isLoopback=["localhost","127.0.0.1","::1"].includes(window.location.hostname.toLowerCase());
@@ -9293,9 +9482,9 @@ async function saveRestaurantMenuSettings(){
     try{publicBaseUrl=parseQrMenuBaseUrl(document.getElementById("publicMenuBaseUrl")?.value||getQrMenuBaseUrl());}
     catch(error){if(status)status.textContent=error.message||"Enter a valid QR website address.";return;}
     try{
-        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel,publicBaseUrl})});
+        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel,publicBaseUrl,heroImages:tableQrMenuHeroImages})});
         await loadTableQrMenuModule();
-        showProfileToast(enabled?"QR menu settings saved.":"QR menu turned off.");
+        showProfileToast("QR menu settings and hero images saved.");
     }catch(error){
         if(status)status.textContent=error.message||"Could not save the QR menu settings.";
     }
@@ -9404,35 +9593,15 @@ let posQrOrderAlertCursor=null;
 let posQrOrderAlertTimer=null;
 let posQrOrderAlertBusy=false;
 function playPOSQrOrderAlertSound(){
-    try{
-        ensureKOTAlertAudio();
-        const context=kotAlertAudioContext;
-        if(!context)return;
-        if(context.state==="suspended"){
-            context.resume().then(()=>{
-                if(context.state==="running")playPOSQrOrderAlertSound();
-            }).catch(()=>{});
-            return;
-        }
-        if(context.state!=="running")return;
-        const now=context.currentTime;
-        [0,0.24,0.5].forEach((offset,index)=>{
-            const at=now+offset;
-            const oscillator=context.createOscillator();
-            const gain=context.createGain();
-            oscillator.type="square";
-            oscillator.frequency.setValueAtTime(index===1?235:285,at);
-            oscillator.frequency.exponentialRampToValueAtTime(155,at+0.19);
-            gain.gain.setValueAtTime(0.0001,at);
-            gain.gain.exponentialRampToValueAtTime(0.13,at+0.018);
-            gain.gain.setValueAtTime(0.13,at+0.13);
-            gain.gain.exponentialRampToValueAtTime(0.0001,at+0.2);
-            oscillator.connect(gain);
-            gain.connect(context.destination);
-            oscillator.start(at);
-            oscillator.stop(at+0.22);
-        });
-    }catch(error){console.warn("QR order alert sound failed:",error.message);}
+    const context=ensureKOTAlertAudio();
+    if(!context||context.state!=="running"){
+        pendingQrAlertSounds=Math.min(3,pendingQrAlertSounds+1);
+        return;
+    }
+    emitPOSQrOrderAlertSound();
+}
+function emitPOSQrOrderAlertSound(){
+    emitPOSNotificationBuzzer();
 }
 function showQROrderArrivalToast(arrivals){
     const items=Array.isArray(arrivals)?arrivals:[];
@@ -9449,8 +9618,9 @@ function showQROrderArrivalToast(arrivals){
     const first=items[0];
     const table=first.table_number?` · Table ${first.table_number}`:"";
     const orderText=items.length===1?`${first.order_number||"New QR order"}${table}`:`${items.length} new QR orders have arrived`;
-    toast.innerHTML=`<span class="qr-order-arrival-icon" aria-hidden="true">▦</span><span class="qr-order-arrival-copy"><strong>${items.length===1?"New QR order received":"New QR orders received"}</strong><span>${esc(orderText)}</span></span><button type="button" class="qr-order-arrival-view">View orders</button><button type="button" class="qr-order-arrival-close" aria-label="Dismiss notification">×</button>`;
-    toast.querySelector(".qr-order-arrival-view")?.addEventListener("click",()=>{showPage("orders");updateOrdersTable(true,false);toast.classList.remove("show");});
+    const canViewOrders=hasPermission("orders","view");
+    toast.innerHTML=`<span class="qr-order-arrival-icon" aria-hidden="true">▦</span><span class="qr-order-arrival-copy"><strong>${items.length===1?"New QR order received":"New QR orders received"}</strong><span>${esc(orderText)}</span></span><button type="button" class="qr-order-arrival-view">${canViewOrders?"View orders":"Open kitchen"}</button><button type="button" class="qr-order-arrival-close" aria-label="Dismiss notification">×</button>`;
+    toast.querySelector(".qr-order-arrival-view")?.addEventListener("click",()=>{if(canViewOrders){showPage("orders");updateOrdersTable(true,false);}else{showPage("kitchen");loadKOT(false);}toast.classList.remove("show");});
     toast.querySelector(".qr-order-arrival-close")?.addEventListener("click",()=>toast.classList.remove("show"));
     toast.classList.add("show");
     clearTimeout(toast._hideTimer);
@@ -9458,7 +9628,7 @@ function showQROrderArrivalToast(arrivals){
 }
 async function pollPOSQrOrderAlerts(){
     if(!currentUser){stopPOSQrOrderAlerts();return;}
-    if(!hasPermission("orders","view")||posQrOrderAlertBusy)return;
+    if((!hasPermission("orders","view")&&!hasPermission("kitchen","view"))||posQrOrderAlertBusy)return;
     posQrOrderAlertBusy=true;
     try{
         const url=posQrOrderAlertCursor===null?"/orders/qr-notifications":"/orders/qr-notifications?afterId="+encodeURIComponent(posQrOrderAlertCursor);
@@ -9467,16 +9637,25 @@ async function pollPOSQrOrderAlerts(){
         const arrivals=Array.isArray(result.orders)?result.orders:[];
         posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
         if(!arrivals.length)return;
-        playPOSQrOrderAlertSound();
+        // QR orders are a separate arrival source from regular POS KOTs. Alert
+        // kitchen users here instead of relying on the KOT poll's initial seed.
+        if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
+        else playPOSQrOrderAlertSound();
         showQROrderArrivalToast(arrivals);
-        if(document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
     }catch(error){console.warn("QR order notification check failed:",error.message);}
     finally{posQrOrderAlertBusy=false;}
 }
 function startPOSQrOrderAlerts(){
     if(posQrOrderAlertTimer){clearInterval(posQrOrderAlertTimer);posQrOrderAlertTimer=null;}
     posQrOrderAlertCursor=null;
-    if(!currentUser||!hasPermission("orders","view"))return;
+    if(!currentUser||(!hasPermission("orders","view")&&!hasPermission("kitchen","view")))return;
+    if(!window.__qrKitchenAlertVisibilityListener){
+        document.addEventListener("visibilitychange",()=>{
+            if(document.visibilityState==="visible"&&currentUser){pollPOSQrOrderAlerts();pollKOTAlerts();}
+        });
+        window.__qrKitchenAlertVisibilityListener=true;
+    }
     document.addEventListener("pointerdown",primeKOTAlertAudio,{once:true,capture:true});
     document.addEventListener("keydown",primeKOTAlertAudio,{once:true,capture:true});
     pollPOSQrOrderAlerts();
