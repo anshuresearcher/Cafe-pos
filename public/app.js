@@ -50,6 +50,7 @@ function scheduleSessionExpiry(expiresAt) {
 function handleAutomaticLogout(message = "Your session has expired. Please login again.") {
     clearSessionExpiryTimer();
     stopSessionHeartbeat();
+    stopReservationAutoRefresh();
     stopPOSQrOrderAlerts?.();
 
     if (typeof stopKOTAlertPolling === "function") {
@@ -93,6 +94,7 @@ let currentOrders = [];
 let currentMenu = [];
 let currentCustomers = [];
 let currentReservations = [];
+let reservationAutoRefreshTimer = null;
 let billingAdjustments = [];
 let currentPayments = [];
 let accessUsers = [];
@@ -135,6 +137,7 @@ let appSettings = {
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
     sessionTimeout: 12, auditLog: false,
     uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide",
+    customerInfoRequirements: {},
     posSalesChannels: [
         { key: "dine_in", label: "Dine", orderType: "Dine-in", qrMenu: false },
         { key: "takeaway", label: "Takeaway", orderType: "Takeaway", qrMenu: false },
@@ -496,14 +499,34 @@ function hasPermission(moduleKey, action="view") {
     if (currentUser.is_owner === true && currentUser.permissions_override === null) return true;
     return currentUser.permissions?.[`${moduleKey}.${action}`] === true;
 }
+window.loginDeviceRegistered = false;
+window.setLoginDeviceRegistrationState = function (registered) {
+    window.loginDeviceRegistered = registered === true;
+    const loading = document.getElementById("loginFlowLoading");
+    if (loading) loading.style.display = "none";
+
+    if (window.loginDeviceRegistered) {
+        window.showLoginViewFromDeviceRegistration?.();
+    } else {
+        window.showDeviceRegistrationView?.();
+    }
+};
+
 function showRegisterBusiness() {
     document.getElementById("loginCard")?.classList.add("registration-mode");
     document.getElementById("loginView")?.style.setProperty("display", "none");
+    document.getElementById("deviceRegistrationView")?.style.setProperty("display", "none");
     document.getElementById("registerView")?.style.setProperty("display", "block");
     document.getElementById("registerError")?.replaceChildren();
+    const backButton = document.getElementById("registerBusinessBackButton");
+    if (backButton) backButton.textContent = window.loginDeviceRegistered === true ? "← Back to login" : "← Back to device registration";
 }
 
 function showLoginView() {
+    if (window.loginDeviceRegistered !== true) {
+        window.showDeviceRegistrationView?.();
+        return;
+    }
     document.getElementById("loginCard")?.classList.remove("registration-mode");
     document.getElementById("registerView")?.style.setProperty("display", "none");
     document.getElementById("loginView")?.style.setProperty("display", "block");
@@ -529,9 +552,21 @@ async function registerBusiness(event) {
     try {
         const r=await fetch(API+"/public/register-business",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
         const data=await r.json().catch(()=>({})); if(!r.ok) throw new Error(data.error||"Registration failed");
-        alert("Business profile created successfully! Please login.");
-        document.getElementById("loginUsername").value=payload.username;
-        showLoginView();
+        const usernameInput=document.getElementById("loginUsername");
+        if(usernameInput)usernameInput.value=payload.username;
+        const registrationKey=String(data.initialRegistrationKey||"").trim();
+        if(registrationKey){
+            window.loginDeviceRegistered=false;
+            document.getElementById("loginCard")?.classList.remove("registration-mode");
+            window.showDeviceRegistrationView?.();
+            const keyInput=document.getElementById("deviceRegistrationKey");
+            if(keyInput)keyInput.value=registrationKey;
+            const message=document.getElementById("deviceRegistrationMessage");
+            if(message){message.textContent=`${payload.businessName} is registered. Confirm this device to continue to sign in.`;message.className="device-registration-message success";}
+        }else{
+            alert("Business profile created successfully. Please register this device before signing in.");
+            showLoginView();
+        }
     } catch(e) { if(box) box.textContent=e.message; }
 }
 
@@ -549,13 +584,25 @@ function cacheLoginBusinessName(name) {
     renderLoginBusinessWelcome(cleanName);
 }
 async function loadLoginBusinessWelcome() {
-    renderLoginBusinessWelcome(localStorage.getItem(LOGIN_BUSINESS_NAME_KEY) || "");
+    const cachedBusinessName = localStorage.getItem(LOGIN_BUSINESS_NAME_KEY) || "";
     try {
-        const response = await fetch(API + "/public/device-business");
-        if (!response.ok) return;
+        const response = await fetch(API + "/public/device-business", { credentials: "same-origin" });
+        if (!response.ok) throw new Error("Could not check device registration");
         const data = await response.json();
-        cacheLoginBusinessName(data.businessName || "");
-    } catch (_) {}
+        const businessName = String(data.businessName || "").trim();
+        if (businessName) {
+            cacheLoginBusinessName(businessName);
+        } else {
+            localStorage.removeItem(LOGIN_BUSINESS_NAME_KEY);
+            renderLoginBusinessWelcome("");
+        }
+        window.setLoginDeviceRegistrationState?.(Boolean(businessName));
+        return Boolean(businessName);
+    } catch (_) {
+        renderLoginBusinessWelcome(cachedBusinessName);
+        window.setLoginDeviceRegistrationState?.(Boolean(cachedBusinessName));
+        return Boolean(cachedBusinessName);
+    }
 }
 async function loginUser(event) {
     event?.preventDefault();
@@ -574,7 +621,7 @@ async function loginUser(event) {
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){try {
     const r = await api("/auth/me");
 
@@ -636,6 +683,11 @@ function applyPermissionsToUI(){
         }
 
         btn.style.display = visible ? "" : "none";
+    });
+
+    document.querySelectorAll(".billing-flow-link[data-pos-flow-page]").forEach(button=>{
+        const module=button.dataset.posFlowPage==="new-order"?"new_order":button.dataset.posFlowPage==="table-view"?"tables":"orders";
+        button.hidden=!hasPermission(module,"view");
     });
 
     const loyaltySection = document.getElementById("loyalty");
@@ -737,17 +789,99 @@ function handleProfilePanelEscape(e){
     if(e.key==="Escape") closeProfilePanel();
 }
 
+function handleModuleDrawerOutsideClick(event){
+    if(!document.body.classList.contains("billing-nav-open")) return;
+    const drawer=document.querySelector(".app-module-nav");
+    const toggle=document.querySelector(".billing-menu-toggle");
+    if(drawer?.contains(event.target) || toggle?.contains(event.target)) return;
+    document.body.classList.remove("billing-nav-open");
+}
+document.addEventListener("click",handleModuleDrawerOutsideClick);
+
 function profileAction(action){
     closeProfilePanel();
     switch(action){
         case "notification": showProfileToast("🔔 Test notification sent."); break;
-        case "sync": showProfileToast("🔄 Syncing data…"); break;
+        case "sync": syncPOSData(); break;
         case "whats-new": showProfileToast("✨ You're on the latest version of Slash."); break;
         case "change-business": showBusinessProfileDialog(); break;
         case "about": openBusinessAboutDialog(); break;
     }
 }
-function showProfileToast(message){
+let posSyncInProgress=false;
+async function syncPOSData(){
+    if(posSyncInProgress)return;
+    posSyncInProgress=true;
+    const startedAt=Date.now();
+    const activePage=document.querySelector(".page.active-page");
+    const scrollPosition={x:window.scrollX,y:window.scrollY,pageTop:activePage?.scrollTop||0};
+    let overlay=document.getElementById("posSyncOverlay");
+    if(!overlay){
+        overlay=document.createElement("div");
+        overlay.id="posSyncOverlay";
+        overlay.className="pos-sync-overlay";
+        overlay.setAttribute("role","status");
+        overlay.setAttribute("aria-live","polite");
+        document.body.appendChild(overlay);
+    }
+    overlay.innerHTML='<div class="pos-sync-card"><span class="pos-sync-spinner" aria-hidden="true"></span><strong>Refreshing your POS</strong><span id="posSyncStatus">Getting the latest data…</span><div class="pos-sync-progress"><i id="posSyncProgressBar"></i></div></div>';
+    overlay.classList.add("active");
+    document.body.classList.add("pos-syncing");
+
+    const jobs=[{label:"Settings",run:loadSettings}];
+    if(hasPermission("new_order","view")||hasPermission("menu","view"))jobs.push({label:"Menu",run:loadMenu});
+    if(hasPermission("customers","view"))jobs.push({label:"Customers",run:loadCustomers});
+    if(hasPermission("tables","view")||hasPermission("new_order","view"))jobs.push({label:"Tables",run:loadTables});
+    if(hasPermission("orders","view"))jobs.push({label:"Orders",run:()=>updateOrdersTable(true,true)});
+    if(hasPermission("kitchen","view"))jobs.push({label:"Kitchen",run:()=>loadKOT(false)});
+    if(hasPermission("reservations","view"))jobs.push({label:"Reservations",run:loadReservations});
+    if(hasPermission("new_order","view")){
+        jobs.push({label:"Discounts and charges",run:loadBillingAdjustments});
+        jobs.push({label:"Marketing deals",run:loadMarketingDeals});
+    }
+    if(hasPermission("dashboard","view")||hasPermission("dashboard"))jobs.push({label:"Dashboard",run:updateDashboard});
+    const pageId=activePage?.id||"";
+    if(pageId==="menu"&&hasPermission("menu","view"))jobs.push({label:"Menu setup",run:loadMenuManagement});
+    if(pageId==="kot-groups"&&hasPermission("kot_groups","view"))jobs.push({label:"KOT groups",run:loadKOTGroups});
+    if(pageId==="payments"&&hasPermission("payments","view"))jobs.push({label:"Payments",run:loadPayments});
+    if(pageId==="reports")jobs.push({label:"Reports",run:async()=>{await loadReports();await loadSalesAuditReport();await loadOrderCategoryReports();}});
+    if(pageId==="advanced-reports"&&hasPermission("advanced_reports","view"))jobs.push({label:"Advanced reports",run:loadAdvancedReports});
+    if(pageId==="printer"&&hasPermission("printer","view"))jobs.push({label:"Printers",run:loadPrinters});
+    if(pageId==="expenses"&&hasPermission("expenses","view"))jobs.push({label:"Expenses",run:loadExpenses});
+
+    let completed=0,failed=0;
+    const status=document.getElementById("posSyncStatus");
+    const progress=document.getElementById("posSyncProgressBar");
+    const updateProgress=()=>{
+        const percent=Math.round(completed/jobs.length*100);
+        if(progress)progress.style.width=percent+"%";
+        if(status)status.textContent=completed<jobs.length?`Refreshing ${jobs[Math.min(completed,jobs.length-1)]?.label||"POS data"}… ${completed}/${jobs.length}`:"Finishing refresh…";
+    };
+    updateProgress();
+    try{
+        let settingsOk=true;
+        try{await jobs[0].run();}catch(error){settingsOk=false;console.warn("POS sync failed for Settings:",error.message);}
+        completed=1;
+        updateProgress();
+        const outcomes=[settingsOk,...await Promise.all(jobs.slice(1).map(async job=>{
+            try{await job.run();return true;}
+            catch(error){console.warn(`POS sync failed for ${job.label}:`,error.message);return false;}
+            finally{completed++;updateProgress();}
+        }))];
+        failed=outcomes.filter(ok=>!ok).length;
+        await new Promise(resolve=>setTimeout(resolve,Math.max(0,420-(Date.now()-startedAt))));
+        if(activePage&&activePage.isConnected)activePage.scrollTop=scrollPosition.pageTop;
+        window.scrollTo(scrollPosition.x,scrollPosition.y);
+        overlay.classList.remove("active");
+        document.body.classList.remove("pos-syncing");
+        showProfileToast(failed?`POS refreshed with ${failed} section${failed===1?"":"s"} unavailable.`:"✓ POS data refreshed.",true);
+    }finally{
+        posSyncInProgress=false;
+        overlay.classList.remove("active");
+        document.body.classList.remove("pos-syncing");
+    }
+}
+function showProfileToast(message, centered=false){
     let toast=document.getElementById("profileToast");
     if(!toast){
         toast=document.createElement("div");
@@ -756,29 +890,30 @@ function showProfileToast(message){
         document.body.appendChild(toast);
     }
     toast.textContent=message;
+    toast.classList.toggle("centered",centered===true);
     toast.classList.add("show");
     clearTimeout(toast._hideTimer);
-    toast._hideTimer=setTimeout(function(){ toast.classList.remove("show"); },2600);
+    const duration=Math.min(6500,Math.max(2600,1800+String(message??"").length*28));
+    toast._hideTimer=setTimeout(function(){ toast.classList.remove("show"); },duration);
 }
+
+// Keep all legacy module alerts in the same bottom-center toast as save confirmations.
+const nativeBrowserAlert = window.alert.bind(window);
+window.alert = function(message){
+    if(!document.body){nativeBrowserAlert(message);return;}
+    showProfileToast(String(message??""),true);
+};
+
 function setAboutText(id, value) {
     const element = document.getElementById(id);
     if (element) element.textContent = String(value || "—");
 }
 function openBusinessAboutDialog() {
     if (!currentUser) return showProfileToast("Sign in to view business information.");
-    const location = [currentUser.business_address, currentUser.city, currentUser.state].filter(Boolean).join(", ");
     const branch = [currentUser.business_code, currentUser.city].filter(Boolean).join(" · ") || currentUser.business_name;
-    setAboutText("aboutBusinessName", currentUser.business_name || "Current Business");
-    setAboutText("aboutBusinessMeta", [currentUser.business_code, currentUser.business_type].filter(Boolean).join(" · "));
     setAboutText("aboutBranch", branch);
     setAboutText("aboutBusinessType", currentUser.business_type || "Cafe");
-    setAboutText("aboutOwner", currentUser.owner_name || currentUser.display_name || "—");
     setAboutText("aboutDevice", currentDevice ? [currentDevice.device_name, currentDevice.device_type].filter(Boolean).join(" · ") : "—");
-    setAboutText("aboutPhone", currentUser.business_phone || "—");
-    setAboutText("aboutEmail", currentUser.business_email || "—");
-    setAboutText("aboutAddress", location || "—");
-    setAboutText("aboutGstin", currentUser.gstin || "—");
-    setAboutText("aboutCurrency", currentUser.currency || appSettings.currency || "₹");
     const modal = document.getElementById("businessAboutModal");
     if (modal) modal.style.display = "flex";
 }
@@ -820,6 +955,7 @@ async function startAuthenticatedApp(){
     applyPermissionsToUI();
     await loadSettings();
     startSessionHeartbeat();
+    startReservationAutoRefresh();
     startPOSQrOrderAlerts();
     stopKOTAlertPolling();
     kotAlertInitialized=false;
@@ -898,6 +1034,15 @@ function showPage(pageName) {
 
     }
 
+    if (pageName === "new-order" && isBillingCustomerInfoRequired()) openBillingCustomerPanel();
+
+    document.querySelectorAll(".billing-flow-link[data-pos-flow-page]").forEach(button => {
+        const isActive = button.dataset.posFlowPage === pageName;
+        button.classList.toggle("active", isActive);
+        if (isActive) button.setAttribute("aria-current", "page");
+        else button.removeAttribute("aria-current");
+    });
+
     if (pageName === "menu") showMenuModuleView("overview");
     if (pageName === "settings") showSettingsFeature("");
     if (pageName === "kot-groups") showKOTGroupsView("overview");
@@ -973,7 +1118,6 @@ function showPage(pageName) {
 
         loadTables();
         loadReservations();
-
     }
 
 
@@ -1053,6 +1197,7 @@ const SETTINGS_FEATURES = [
     { key: "gst", title: "GST", icon: "％", description: "Enable or disable GST calculation on orders." },
     { key: "general-currency", title: "General / Currency", icon: "💱", description: "Set currency and the default GST rate." },
     { key: "pos-preferences", title: "POS Preferences", icon: "🧭", description: "Choose sales channels and defaults for each POS module." },
+    { key: "customer-details", title: "Customer Details", icon: "👤", description: "Choose which sale channels require customer name and mobile number." },
     { key: "sales-channels", title: "Sales Channels", icon: "🛍️", description: "Create and manage where menu items can be sold." },
     { key: "billing-rules", title: "Billing Rules", icon: "🧮", description: "Set payment, invoice numbering and bill rounding rules." },
     { key: "non-chargeable", title: "Non-chargeable Reasons", icon: "📝", description: "Choose the reasons staff can use for no-charge bills." },
@@ -1366,6 +1511,65 @@ function marketingDealAppliesToLine(deal, line) {
     return true;
 }
 
+function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))) {
+    if (!deal) return { eligible: false, messages: ["Select a marketing deal."] };
+    const type = String(deal.type || "").trim().toLowerCase();
+    const eligibleIndexes = lines.map((line, index) => marketingDealAppliesToLine(deal, line) ? index : -1).filter(index => index >= 0);
+    const eligibleQuantity = eligibleIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
+    const buyQuantity = Math.max(1, Number(deal.buyQuantity || 1));
+    const getQuantity = Math.max(1, Math.floor(Number(deal.getQuantity || 1)));
+    const minimumQuantity = Math.max(buyQuantity, Number(deal.minGroupSize || 0));
+    const selectedIds = Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : [];
+    const names = selectedIds.length
+        ? (Array.isArray(deal.itemNames) && deal.itemNames.length ? deal.itemNames : currentMenu.filter(item => selectedIds.includes(String(item.id))).map(item => item.name))
+        : [];
+    const scope = names.length ? ` for ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more items` : ""}`
+        : deal.category ? ` in ${deal.category}` : " from any category";
+    const messages = [];
+    const isBundle = ["buy x get x", "buy x get y", "meal deals"].includes(type);
+
+    if (isBundle) {
+        const rewardId = type === "buy x get x"
+            ? (selectedIds.length ? null : deal.itemId)
+            : (deal.rewardItemId || (type === "meal deals" ? deal.itemId : null));
+        const rewardIndexes = lines.map((line, index) => {
+            const itemId = line.item?.id ?? line.item?.menuId ?? line.item?.menu_id;
+            return rewardId ? (String(itemId) === String(rewardId) ? index : -1) : (marketingDealAppliesToLine(deal, line) ? index : -1);
+        }).filter(index => index >= 0);
+        const rewardQuantity = rewardIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
+        const rewardIsAlsoEligible = !rewardId || rewardIndexes.some(index => eligibleIndexes.includes(index));
+
+        if (rewardIsAlsoEligible) {
+            const neededForFirstReward = Math.max(minimumQuantity, buyQuantity + getQuantity);
+            if (eligibleQuantity < neededForFirstReward) {
+                messages.push(`Add ${neededForFirstReward - eligibleQuantity} more eligible item(s)${scope} to reach ${neededForFirstReward} total for Buy ${buyQuantity}, Get ${getQuantity}. Current order: ${eligibleQuantity}/${neededForFirstReward}.`);
+            } else {
+                const possibleFreeQuantity = Math.floor(eligibleQuantity / (buyQuantity + getQuantity)) * getQuantity;
+                if (rewardQuantity < possibleFreeQuantity) {
+                    const rewardName = rewardIndexes.length ? lines[rewardIndexes[0]].item.name : "reward";
+                    messages.push(`Add ${possibleFreeQuantity - rewardQuantity} more ${rewardName} reward item(s) to receive the full deal.`);
+                }
+            }
+        } else {
+            if (eligibleQuantity < minimumQuantity) {
+                messages.push(`Add ${minimumQuantity - eligibleQuantity} more qualifying item(s)${scope} (current order: ${eligibleQuantity}/${minimumQuantity} for Buy ${buyQuantity}).`);
+            }
+            const possibleFreeQuantity = Math.floor(eligibleQuantity / buyQuantity) * getQuantity;
+            const requiredRewardQuantity = Math.max(getQuantity, possibleFreeQuantity);
+            if (rewardQuantity < requiredRewardQuantity) {
+                const rewardName = rewardId
+                    ? (currentMenu.find(item => String(item.id) === String(rewardId))?.name || "selected")
+                    : "eligible";
+                messages.push(`Add ${requiredRewardQuantity - rewardQuantity} more ${rewardName} reward item(s) (current order: ${rewardQuantity}/${requiredRewardQuantity}).`);
+            }
+        }
+    } else if (eligibleQuantity < minimumQuantity) {
+        messages.push(`Add ${minimumQuantity - eligibleQuantity} more eligible item(s)${scope} (current order: ${eligibleQuantity}/${minimumQuantity} required).`);
+    }
+
+    return { eligible: messages.length === 0, eligibleQuantity, minimumQuantity, messages };
+}
+
 function marketingDiscountPlan(rule, lines) {
     const discounts = lines.map(() => 0);
     const isMarketingDeal = rule?.source === "marketing";
@@ -1444,6 +1648,10 @@ function getBillingBreakdown() {
 
     const discountPlan = marketingDiscountPlan(discountRule, lines);
     const discount = discountPlan.discount;
+    const marketingEligibility = discountRule?.source === "marketing"
+        ? marketingDealCartEligibility(discountRule, lines)
+        : null;
+    const marketingDealApplied = Boolean(marketingEligibility?.eligible && discount > 0);
     let gst = 0;
     let inclusiveTax = 0;
     let exclusiveTax = 0;
@@ -1489,10 +1697,10 @@ function getBillingBreakdown() {
         total, unroundedTotal, roundingAdjustment: total - unroundedTotal, roundingMode, taxable, gstRate: null, taxesByRate, taxBreakdown,
         discountId: discountRule?.source === "marketing" ? null : discountRule?.id || null,
         chargeId: chargeRule?.id || null,
-        discountName: discountRule?.name || "",
+        discountName: discountRule?.source === "marketing" ? (marketingDealApplied ? String(discountRule.name || "") : "") : (discountRule?.name || ""),
         chargeName: chargeRule?.name || "",
-        marketingDealId: discountRule?.source === "marketing" ? String(discountRule.id) : null,
-        marketingDealName: discountRule?.source === "marketing" ? String(discountRule.name || "") : ""
+        marketingDealId: marketingDealApplied ? String(discountRule.id) : null,
+        marketingDealName: marketingDealApplied ? String(discountRule.name || "") : ""
     };
 }
 
@@ -1789,6 +1997,7 @@ function renderBillingSaleChannelOptions() {
         select.value = selectedPOSChannelKey;
     }
     updateBillingChannelLabels();
+    updateBillingCustomerRequirementUI();
 }
 
 function clearNewOrderDraft() {
@@ -1852,13 +2061,70 @@ async function selectBillingSaleChannel(channelKey) {
     }).filter(Boolean);
     if (unavailable.length) showProfileToast(unavailable.length === 1 ? `${unavailable[0].name} is unavailable on ${channel.label} and was removed.` : `${unavailable.length} unavailable items were removed for ${channel.label}.`);
     updateCart();
+    updateBillingCustomerRequirementUI();
+    if (isBillingCustomerInfoRequired()) openBillingCustomerPanel();
 }
 function currentSaleChannelKey() {
     return selectedPOSChannelKey || POS_CHANNELS.find(channel=>channel.orderType===orderType)?.key || "";
 }
+function normalizeCustomerInfoRequirements(value = appSettings.customerInfoRequirements) {
+    const saved = value && typeof value === "object" ? value : {};
+    return Object.fromEntries(POS_CHANNELS.map(channel => [channel.key, saved[channel.key] === "required" ? "required" : "optional"]));
+}
+function isBillingCustomerInfoRequired(channelKey = currentSaleChannelKey()) {
+    return normalizeCustomerInfoRequirements()[channelKey] === "required";
+}
+function updateBillingCustomerRequirementUI() {
+    const required = isBillingCustomerInfoRequired();
+    const badge = document.getElementById("billingCustomerRequirementLabel");
+    if (badge) badge.textContent = required ? "Required · name + mobile" : "Optional";
+    const name = document.getElementById("billingCustomerNameQuick");
+    const phone = document.getElementById("billingCustomerPhoneQuick");
+    [name, phone].forEach(field => {
+        if (!field) return;
+        field.required = required;
+        field.setAttribute("aria-required", String(required));
+    });
+    const button = document.querySelector(".billing-customer-open-btn");
+    if (button) {
+        button.title = required ? "Customer name and mobile number are required for this channel" : "Customer information is optional";
+        button.setAttribute("aria-label", required ? "Required customer information" : "Optional customer information");
+    }
+}
+function validateBillingCustomerInfo() {
+    if (!isBillingCustomerInfoRequired()) return true;
+    const name = document.getElementById("billingCustomerNameQuick");
+    const phone = document.getElementById("billingCustomerPhoneQuick");
+    const missing = !name?.value.trim() ? name : !phone?.value.trim() ? phone : null;
+    if (!missing) return true;
+    alert(`Customer name and mobile number are required for ${getSaleChannel(currentSaleChannelKey())?.label || "this sale channel"}.`);
+    if (document.querySelector("#new-order .billing-shell")?.classList.contains("customer-step")) missing.focus();
+    else openBillingCustomerPanel().then(() => missing.focus());
+    return false;
+}
+function continueFromBillingCustomerPanel() {
+    if (!validateBillingCustomerInfo()) return;
+    closeBillingCustomerPanel();
+}
+function normalizeMenuSaleChannelKeys(value) {
+    if (value === undefined || value === null) return null;
+    let source = value;
+    if (typeof source === "string") {
+        const raw = source.trim();
+        if (!raw) return [];
+        try {
+            const parsed = JSON.parse(raw);
+            source = Array.isArray(parsed) ? parsed : [parsed];
+        } catch (_) {
+            source = [raw];
+        }
+    }
+    if (!Array.isArray(source)) return [];
+    return [...new Set(source.map(key => String(key || "").trim().toLowerCase().replace(/[\s-]+/g, "_")).filter(Boolean))];
+}
 function isMenuItemAvailableOnSaleChannel(item, channelKey = currentSaleChannelKey()) {
-    const channels = item?.sales_channels;
-    return !Array.isArray(channels) || channels.map(value => String(value).toLowerCase()).includes(String(channelKey).toLowerCase());
+    const channels = normalizeMenuSaleChannelKeys(item?.sales_channels);
+    return channels === null || channels.includes(String(channelKey).trim().toLowerCase().replace(/[\s-]+/g, "_"));
 }
 function resolveMenuPrice(item, variant=null) {
     const channel = currentSaleChannelKey();
@@ -1943,7 +2209,12 @@ function openItemOptionPicker(item,variant=null){
     if(!sets.length){addToCart(item.id,variant?`${item.name} — ${variant.name}`:item.name,basePrice,item,variant,[],basePrice);return;}
     if(!modal||!body)return;
     modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(variant?.id||'');
-    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}${variant?` — ${esc(variant.name)}`:''}</strong><span>${money(basePrice)}</span></div>${sets.map(set=>`<fieldset class="item-option-set"><legend>${esc(set.name)} <small>${Number(set.minSelections||0)?`Choose at least ${Number(set.minSelections)}`:'Optional'}</small></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><input type="${Number(set.maxSelections||1)===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}"><span>${esc(option.name)}</span><strong>${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</strong></label>`).join('')}</div></fieldset>`).join('')}`;
+    const optionSetMarkup=sets.map(set=>{
+        const min=Number(set.minSelections||0),max=Number(set.maxSelections||1);
+        const guidance=min?`Required · choose ${min===max?min:`${min}–${max}`}`:`Optional · up to ${max} choice${max===1?'':'s'}`;
+        return `<fieldset class="item-option-set"><legend><span>${esc(set.name)}</span><small class="${min?'required':'optional'}">${guidance}</small></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><input type="${max===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}"><span>${esc(option.name)}</span><strong class="${Number(option.price||0)>0?'has-extra':'included'}">${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</strong></label>`).join('')}</div></fieldset>`;
+    }).join('');
+    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}${variant?` — ${esc(variant.name)}`:''}</strong><span>${money(basePrice)}</span></div>${optionSetMarkup}`;
     modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;modal.style.display='flex';
 }
 function closeItemOptions(){document.getElementById('itemOptionsModal')?.style.setProperty('display','none');}
@@ -2440,6 +2711,7 @@ let clearNewOrderDraftAfterPayment = false;
 async function completeOrder(paymentMethod, paymentOptions = {}) {
     if (completingOrder) return;
     if (!cart.length) return alert("There are no items in the order.");
+    if (!validateBillingCustomerInfo()) return;
     completingOrder = true;
     const b = getCurrentCheckoutBreakdown();
     const subtotal = b.subtotal;
@@ -2575,6 +2847,7 @@ async function saveOpenOrder() {
     if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) {
         return alert("Please select a table for Dine-in.");
     }
+    if (!validateBillingCustomerInfo()) return;
 
     const openOrderId = currentOpenOrderId;
     const openOrderData = currentOpenOrderData;
@@ -3141,6 +3414,15 @@ window.printThermalBill = async function(options = {}) {
 // ORDERS
 // ==========================================
 
+function getOrderAmountDue(order) {
+    const reportedDue = Number(order?.amount_due);
+    if (Number.isFinite(reportedDue)) return Math.max(0, reportedDue);
+    if (/non.?chargeable/i.test(String(order?.payment_method || ""))) return 0;
+    const total = Number(order?.total || 0);
+    const collected = Number(order?.amount_collected || 0);
+    return Math.max(0, Math.round((total - collected) * 100) / 100);
+}
+
 async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) {
     try {
         if (refresh || !Array.isArray(currentOrders)) currentOrders = await api("/orders");
@@ -3152,13 +3434,20 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
             const status = String(order.status || "").toLowerCase();
             return status === "completed" ? "closed" : status === "cancelled" ? "cancelled" : "open";
         };
+        const hasAmountDue = order => group(order) === "closed" && getOrderAmountDue(order) > 0;
         const openOrders = allOrders.filter(order => group(order) === "open");
-        const closedOrders = allOrders.filter(order => group(order) === "closed");
+        const closedOrders = allOrders.filter(order => group(order) === "closed" && !hasAmountDue(order));
+        const amountDueOrders = allOrders.filter(hasAmountDue);
         const cancelledOrders = allOrders.filter(order => group(order) === "cancelled");
         const statusFilter = document.getElementById("ordersStatusFilter")?.value || "";
         const activeTab = window.currentOrdersTab || "open";
         document.querySelectorAll(".orders-tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === (statusFilter || activeTab)));
-        const baseOrders = allOrders.filter(order => group(order) === (statusFilter || activeTab));
+        const selectedGroup = statusFilter || activeTab;
+        const baseOrders = allOrders.filter(order => {
+            if (selectedGroup === "amount_due") return hasAmountDue(order);
+            if (selectedGroup === "closed") return group(order) === "closed" && !hasAmountDue(order);
+            return group(order) === selectedGroup;
+        });
         const query = String(document.getElementById("ordersSearch")?.value || "").trim().toLocaleLowerCase();
         const fromDate = document.getElementById("ordersDateFrom")?.value || "";
         const toDate = document.getElementById("ordersDateTo")?.value || "";
@@ -3186,25 +3475,28 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
             const selected = Number(window.selectedOrderId) === Number(order.id);
             const status = String(order.status || "Open");
             const statusClass = group(order);
+            const dueOrder = hasAmountDue(order);
             const orderDate = order.created_at ? new Date(order.created_at).toLocaleString() : "";
             const tableMeta = [order.sale_channel || order.order_type, order.table_number ? `Table ${esc(order.table_number)}${Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}` : ""].filter(Boolean).map(esc).join(" · ") || "-";
             const orderId = Number(order.id);
             const cardClass = `order-list-card ${selected ? "selected" : ""}`;
-            const heading = `<span class="order-list-card-top"><strong>${esc(order.order_number || `#${order.id}`)}</strong><span class="order-status-pill ${statusClass}">${esc(status)}</span></span>`;
+            const heading = `<span class="order-list-card-top"><strong>${esc(order.order_number || `#${order.id}`)}</strong><span class="order-status-pill ${dueOrder ? "due" : statusClass}">${dueOrder ? "Amount Due" : esc(status)}</span></span>`;
             const normalizedStatus = status.trim().toLowerCase();
             if (isQrTrackedOrder(order) && !["completed", "cancelled"].includes(normalizedStatus)) {
                 const customerMeta = order.customer_name || (statusClass === "open" ? "Unpaid" : "");
                 return `<article class="${cardClass} qr-order-list-card" data-order-id="${orderId}" role="listitem" tabindex="0" onclick="viewOrder(${orderId})" onkeydown="if(event.target===this&&(event.key==='Enter'||event.key===' ')){event.preventDefault();viewOrder(${orderId})}"><button type="button" class="order-list-card-open" onclick="event.stopPropagation();viewOrder(${orderId})" aria-label="Open ${esc(order.order_number || `order ${orderId}`)}">${heading}</button><div class="qr-order-list-meta"><span>${tableMeta}</span>${customerMeta ? `<span>${esc(customerMeta)}</span>` : ""}</div>${renderQrOrderListAction(order)}</article>`;
             }
-            return `<article class="${cardClass}" data-order-id="${orderId}" role="listitem"><button type="button" class="order-list-card-open" onclick="viewOrder(${orderId})" aria-label="Open ${esc(order.order_number || `order ${orderId}`)}">${heading}<span class="order-list-card-meta"><span>${tableMeta}</span><span>${esc(orderDate)}</span></span><span class="order-list-card-bottom"><span>${esc(order.customer_name || order.payment_method || (statusClass === "open" ? "Unpaid" : ""))}</span><strong>${money(order.total)}</strong></span></button></article>`;
+            return `<article class="${cardClass}" data-order-id="${orderId}" role="listitem"><button type="button" class="order-list-card-open" onclick="viewOrder(${orderId})" aria-label="Open ${esc(order.order_number || `order ${orderId}`)}">${heading}<span class="order-list-card-meta"><span>${tableMeta}</span><span>${esc(orderDate)}</span></span><span class="order-list-card-bottom"><span>${dueOrder ? "Outstanding balance" : esc(order.customer_name || order.payment_method || (statusClass === "open" ? "Unpaid" : ""))}</span><strong>${money(dueOrder ? getOrderAmountDue(order) : order.total)}</strong></span></button></article>`;
         }).join("") || `<div class="orders-empty-state"><span>⌕</span><strong>No matching orders</strong><small>Try changing the search or filters.</small></div>`;
 
         const openCount = document.getElementById("openOrdersCount");
         const closedCount = document.getElementById("closedOrdersCount");
         const cancelledCount = document.getElementById("cancelledOrdersCount");
+        const amountDueCount = document.getElementById("amountDueOrdersCount");
         if (openCount) openCount.textContent = openOrders.length;
         if (closedCount) closedCount.textContent = closedOrders.length;
         if (cancelledCount) cancelledCount.textContent = cancelledOrders.length;
+        if (amountDueCount) amountDueCount.textContent = amountDueOrders.length;
 
         const selectedVisible = visibleOrders.find(order => Number(order.id) === Number(window.selectedOrderId));
         if (visibleOrders.length && (!selectedVisible || (refresh && refreshSelectedDetails))) {
@@ -3235,7 +3527,29 @@ function renderOrderFilterOptions() {
 }
 
 function filterOrders() {
+    syncOrdersFilterToggle();
     updateOrdersTable(false);
+}
+
+function toggleOrdersFilters() {
+    const panel = document.getElementById("ordersFilterBar");
+    const button = document.getElementById("ordersFilterToggle");
+    if (!panel || !button) return;
+    const expanded = panel.hidden;
+    panel.hidden = !expanded;
+    button.setAttribute("aria-expanded", String(expanded));
+    button.title = expanded ? "Hide order filters" : "Show order filters";
+    button.classList.toggle("expanded", expanded);
+}
+
+function syncOrdersFilterToggle() {
+    const badge = document.getElementById("ordersFilterBadge");
+    if (!badge) return;
+    const activeCount = ["ordersStatusFilter", "ordersDateFrom", "ordersDateTo", "ordersChannelFilter", "ordersPaymentFilter"]
+        .filter(id => String(document.getElementById(id)?.value || "").trim()).length;
+    badge.textContent = String(activeCount);
+    badge.hidden = activeCount === 0;
+    document.getElementById("ordersFilterToggle")?.classList.toggle("has-active-filters", activeCount > 0);
 }
 
 function clearOrdersSearch() {
@@ -3250,6 +3564,7 @@ function resetOrdersFilters() {
         const input = document.getElementById(id);
         if (input) input.value = "";
     });
+    syncOrdersFilterToggle();
     switchOrdersTab("open");
 }
 
@@ -3258,7 +3573,9 @@ function downloadOrdersCSV() {
         const statusFilter = document.getElementById("ordersStatusFilter")?.value || window.currentOrdersTab || "open";
         const status = String(order.status || "").toLowerCase();
         const group = status === "completed" ? "closed" : status === "cancelled" ? "cancelled" : "open";
-        if (group !== statusFilter) return false;
+        const dueOrder = group === "closed" && getOrderAmountDue(order) > 0;
+        const inSelectedBucket = statusFilter === "amount_due" ? dueOrder : group === statusFilter && !(statusFilter === "closed" && dueOrder);
+        if (!inSelectedBucket) return false;
         const date = new Date(order.created_at);
         const dateKey = Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
         const from = document.getElementById("ordersDateFrom")?.value || "";
@@ -3271,7 +3588,7 @@ function downloadOrdersCSV() {
         return (!from || dateKey >= from) && (!to || dateKey <= to) && (!channel || String(order.sale_channel || order.order_type || "").toLowerCase() === channel) && (!payment || (payment === "__unpaid" ? !methods.length && (!method || method === "unpaid" || method === "partially paid") : methods.includes(payment.toLowerCase()) || method === payment.toLowerCase())) && (!query || [order.order_number,order.id,order.order_type,order.table_number,order.pax,order.status,order.payment_method,methods.join(" "),order.customer_name,order.customer_phone].some(value => String(value || "").toLowerCase().includes(query)));
     });
     if (!orders.length) return alert("No orders match the current filters.");
-    const columns = [["Order number","order_number"],["Order ID","id"],["Date","created_at"],["Status","status"],["Sale channel","sale_channel"],["Table","table_number"],["PAX","pax"],["Customer","customer_name"],["Phone","customer_phone"],["Payment mode","payment_method"],["Subtotal","subtotal"],["Discount","discount"],["Charges","service_charge"],["GST","gst"],["Total","total"]];
+    const columns = [["Order number","order_number"],["Order ID","id"],["Date","created_at"],["Status","status"],["Sale channel","sale_channel"],["Table","table_number"],["PAX","pax"],["Customer","customer_name"],["Phone","customer_phone"],["Payment mode","payment_method"],["Subtotal","subtotal"],["Discount","discount"],["Charges","service_charge"],["GST","gst"],["Total","total"],["Amount due","amount_due"]];
     const cell = value => '"' + String(value ?? "").replace(/"/g, '""') + '"';
     const csv = "\uFEFF" + [columns.map(([label]) => label),...orders.map(order => columns.map(([,key]) => key === "created_at" && order[key] ? new Date(order[key]).toLocaleString() : key === "payment_method" && Array.isArray(order.payment_modes) && order.payment_modes.length ? order.payment_modes.join(" + ") : order[key]))].map(row => row.map(cell).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
@@ -3283,7 +3600,7 @@ function downloadOrdersCSV() {
 }
 
 window.switchOrdersTab = function(tab) {
-    window.currentOrdersTab = ["closed","cancelled"].includes(tab) ? tab : "open";
+    window.currentOrdersTab = ["closed","cancelled","amount_due"].includes(tab) ? tab : "open";
     const statusFilter = document.getElementById("ordersStatusFilter");
     if (statusFilter) statusFilter.value = "";
     document.querySelectorAll(".orders-tab-btn").forEach(btn => btn.classList.toggle("active", btn.dataset.tab === window.currentOrdersTab));
@@ -4293,6 +4610,33 @@ async function deleteTable(id) {
 // RESERVATIONS
 // ==========================================
 
+let reservationAutoRefreshBusy = false;
+function startReservationAutoRefresh(){
+    if(reservationAutoRefreshTimer)clearInterval(reservationAutoRefreshTimer);
+    if(!currentUser)return;
+    const syncDueReservations=async()=>{
+        if(!currentUser||document.visibilityState!=="visible"||reservationAutoRefreshBusy)return;
+        reservationAutoRefreshBusy=true;
+        try{
+            await loadTables();
+            if(document.getElementById("reservations")?.classList.contains("active-page"))await loadReservations();
+        }catch(error){console.warn("Reservation schedule sync failed:",error.message);}
+        finally{reservationAutoRefreshBusy=false;}
+    };
+    syncDueReservations();
+    reservationAutoRefreshTimer=setInterval(syncDueReservations,30000);
+    if(!window.__reservationAutoRefreshVisibilityListener){
+        document.addEventListener("visibilitychange",()=>{
+            if(document.visibilityState==="visible"&&currentUser)syncDueReservations();
+        });
+        window.__reservationAutoRefreshVisibilityListener=true;
+    }
+}
+function stopReservationAutoRefresh(){
+    if(reservationAutoRefreshTimer){clearInterval(reservationAutoRefreshTimer);reservationAutoRefreshTimer=null;}
+    reservationAutoRefreshBusy=false;
+}
+
 async function loadReservations() {
 
     try {
@@ -4320,13 +4664,7 @@ async function loadReservations() {
         currentReservations.forEach(
             function(reservation) {
 
-                const active =
-                    [
-                        "Reserved",
-                        "Confirmed"
-                    ].includes(
-                        reservation.status
-                    );
+                const active = ["Reserved", "Confirmed", "Arrived"].includes(reservation.status);
 
 
                 const tr =
@@ -4383,39 +4721,11 @@ async function loadReservations() {
 
                     <td>
 
-                        ${
-                            active
-                                ? `
-
-                                    <button
-                                        onclick="updateReservationStatus(${reservation.id}, 'Confirmed')"
-                                    >
-                                        Confirm
-                                    </button>
-
-                                    <button
-                                        onclick="updateReservationStatus(${reservation.id}, 'Arrived')"
-                                    >
-                                        Arrived
-                                    </button>
-
-                                    <button
-                                        onclick="updateReservationStatus(${reservation.id}, 'Cancelled')"
-                                    >
-                                        Cancel
-                                    </button>
-
-                                `
-                                : `
-
-                                    <button
-                                        onclick="updateReservationStatus(${reservation.id}, 'Reserved')"
-                                    >
-                                        Reserve
-                                    </button>
-
-                                `
-                        }
+                        ${active ? `
+                            ${reservation.status === "Reserved" ? `<button type="button" onclick="updateReservationStatus(${reservation.id}, 'Confirmed')">Confirm</button>` : ""}
+                            ${["Reserved", "Confirmed"].includes(reservation.status) ? `<button type="button" onclick="updateReservationStatus(${reservation.id}, 'Arrived')">Arrived</button>` : ""}
+                            ${reservation.status === "Arrived" ? `<button type="button" onclick="updateReservationStatus(${reservation.id}, 'Completed')">Complete</button>` : `<button type="button" onclick="updateReservationStatus(${reservation.id}, 'Cancelled')">Cancel</button>`}
+                        ` : `<button type="button" onclick="updateReservationStatus(${reservation.id}, 'Reserved')">Reserve</button>`}
 
                     </td>
 
@@ -4448,14 +4758,7 @@ function openReservationForm() {
         );
 
 
-    if (form) {
-
-        form.style.display =
-            form.style.display === "none"
-                ? "block"
-                : "none";
-
-    }
+    if (form) form.hidden = !form.hidden;
 
 
     loadTables();
@@ -4549,15 +4852,10 @@ async function addReservation() {
         );
 
 
-        alert(
-            "Reservation created! 📅"
-        );
+        showProfileToast("Reservation created successfully.", true);
 
 
-        document.getElementById(
-            "reservationForm"
-        ).style.display =
-            "none";
+        document.getElementById("reservationForm").hidden = true;
 
 
         [
@@ -5278,7 +5576,8 @@ let restaurantMenuPublication=null;
 async function editMenuItem(id){const item=currentMenu.find(x=>Number(x.id)===Number(id));if(item)openAddMenuModal(item);}
 function renderMenuChannelFields(selectedChannels=null, channelPrices={}, basePrice=0){
     const availability=document.getElementById('menuChannelAvailability'),prices=document.getElementById('menuChannelPriceGrid');
-    const selected=new Set(Array.isArray(selectedChannels)?selectedChannels.map(String):POS_CHANNELS.map(channel=>channel.key));
+    const normalizedSelection=normalizeMenuSaleChannelKeys(selectedChannels);
+    const selected=new Set(normalizedSelection===null?POS_CHANNELS.map(channel=>channel.key):normalizedSelection);
     if(availability)availability.innerHTML=POS_CHANNELS.map(channel=>`<label class="menu-channel-availability-choice"><input type="checkbox" value="${esc(channel.key)}" ${selected.has(channel.key)?'checked':''}><span><strong>${esc(channel.label)}</strong>${channel.qrMenu?'<small>Guest QR ordering</small>':''}</span></label>`).join('');
     if(prices)prices.innerHTML=POS_CHANNELS.map(channel=>`<div class="form-group"><label for="menuPrice_${channel.key}">${esc(channel.label)} price</label><input id="menuPrice_${channel.key}" type="number" min="0" step="0.01" value="${Number(channelPrices[channel.key]??basePrice??0)}"></div>`).join('');
 }
@@ -5302,6 +5601,8 @@ function openAddMenuModal(item=null){
     const file=document.getElementById('menuImageFile');
     if(file)file.value='';
     renderMenuItemImagePreview();
+    const optionDisclosure=document.getElementById('menuOptionSetDisclosure');
+    if(optionDisclosure)optionDisclosure.open=false;
     renderMenuOptionSetPicker(item?.option_set_ids||[]);
     renderMenuVariantsEditor(item?.variants||[]);
     document.getElementById('addMenuModal').style.display='flex';
@@ -5332,7 +5633,8 @@ async function previewMenuItemImage(file){
     }catch(error){alert(error.message||'Unable to read this image.');}
 }
 function clearMenuItemImage(){currentMenuImageData=null;const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();}
-function renderMenuOptionSetPicker(selected=[]){const box=document.getElementById('menuOptionSetPicker');if(!box)return;const selectedIds=new Set((selected||[]).map(String));box.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<label class="menu-option-set-choice"><input type="checkbox" value="${esc(set.id)}" ${selectedIds.has(String(set.id))?'checked':''}><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<span class="access-muted">No option sets yet. Create one to attach it to this item.</span>';}
+function renderMenuOptionSetPicker(selected=[]){const box=document.getElementById('menuOptionSetPicker');if(!box)return;const selectedIds=new Set((selected||[]).map(String));box.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<label class="menu-option-set-choice"><input type="checkbox" value="${esc(set.id)}" ${selectedIds.has(String(set.id))?'checked':''} onchange="updateMenuOptionSetDisclosure()"><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<span class="access-muted">No option sets yet. Create one to attach it to this item.</span>';updateMenuOptionSetDisclosure();}
+function updateMenuOptionSetDisclosure(){const summary=document.getElementById('menuOptionSetSelectionSummary');if(!summary)return;const count=document.querySelectorAll('#menuOptionSetPicker input[type="checkbox"]:checked').length;summary.textContent=count?`${count} option set${count===1?'':'s'} selected`:menuOptionSets.length?'Choose from your saved option sets':'No saved option sets yet';}
 async function saveMenuItemV2(){
     const wasEditing=Boolean(editingMenuItemId),name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();
     if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');
@@ -5344,7 +5646,7 @@ async function saveMenuItemV2(){
     const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
     const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
-    try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();alert(wasEditing?'Menu item updated.':'Menu item added.');}catch(error){alert(error.message);}
+    try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();showProfileToast(wasEditing?'Menu item updated successfully.':'Menu item added successfully.',true);}catch(error){alert(error.message);}
 }
 
 function optionSetNewId(){return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;}
@@ -5398,7 +5700,7 @@ async function saveOptionSet(){
     if(!name||!options.length||options.some(option=>!Number.isFinite(option.price)||option.price<0)||new Set(options.map(option=>Number(option.menuItemId))).size!==options.length)return alert('Choose a set name and at least one unique, available menu item with a valid extra price.');
     if(!Number.isInteger(minSelections)||!Number.isInteger(maxSelections)||minSelections<0||maxSelections<1||minSelections>maxSelections||maxSelections>options.length)return alert('Check the minimum and maximum selections against the number of options.');
     const item={id:existingId,name,minSelections,maxSelections,options},next=menuOptionSets.filter(set=>String(set.id)!==String(existingId)).concat(item);
-    try{const result=await api('/menu-option-sets',{method:'PUT',body:JSON.stringify({optionSets:next})});menuOptionSets=result.optionSets||next;renderMenuOptionSetsOverview();renderOptionSetList(item.id);selectOptionSetForEdit(item.id);renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));showProfileToast('Option set saved.');}catch(error){alert(error.message);}
+    try{const result=await api('/menu-option-sets',{method:'PUT',body:JSON.stringify({optionSets:next})});menuOptionSets=result.optionSets||next;renderMenuOptionSetsOverview();renderOptionSetList(item.id);selectOptionSetForEdit(item.id);renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));showProfileToast('Option set saved successfully.',true);}catch(error){alert(error.message);}
 }
 async function deleteOptionSet(){const id=document.getElementById('optionSetId').value;if(!id)return;const next=menuOptionSets.filter(set=>String(set.id)!==String(id));try{const result=await api('/menu-option-sets',{method:'PUT',body:JSON.stringify({optionSets:next})});menuOptionSets=result.optionSets||next;renderMenuOptionSetsOverview();renderOptionSetList();newOptionSet();renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));}catch(error){alert(error.message);}}
 async function disableMenuItem(id){if(!confirm('Disable this menu item?'))return;try{await api(`/menu/${id}`,{method:'DELETE'});await loadMenuManagement();await loadMenu();}catch(e){alert(e.message);}}
@@ -6140,13 +6442,38 @@ function clearBillingAdjustmentsDialog(){
 }
 
 function updateBillingAdjustmentSummary(){
-    const discount=getSelectedBillingAdjustment(document.getElementById("billingDiscountSelect")?.value||"");
+    const discountSelect=document.getElementById("billingDiscountSelect");
+    const discountId=discountSelect?.value||"";
+    const selectedDeal=discountId.startsWith("marketing:")
+        ? marketingDeals.find(deal=>String(deal.id)===discountId.slice("marketing:".length))
+        : null;
+    const unavailableReason=selectedDeal?marketingDealUnavailableReason(selectedDeal):"";
+    const eligibility=selectedDeal?marketingDealCartEligibility(selectedDeal):null;
+    const discount=getSelectedBillingAdjustment(discountId);
     const charge=getSelectedBillingAdjustment(document.getElementById("billingChargeSelect")?.value||"");
-    const summary=[discount?`Discount: ${discount.name}`:"",charge?`Charge: ${charge.name}`:""].filter(Boolean).join(" · ")||"No adjustments selected";
+    const dealSummary=selectedDeal
+        ? (unavailableReason?`Unavailable: ${selectedDeal.name}`:eligibility?.eligible?`Discount: ${selectedDeal.name}`:`Deal criteria pending: ${selectedDeal.name}`)
+        : discount?`Discount: ${discount.name}`:"";
+    const summary=[dealSummary,charge?`Charge: ${charge.name}`:""].filter(Boolean).join(" · ")||"No adjustments selected";
     setText("billingAdjustmentsSummary",summary);
     const ruleText=rule=>rule?`${rule.name} · ${rule.calculation==="percent"||rule.valueType==="percentage"?`${Number(rule.value||0)}%`:money(rule.value)}`:"";
-    setText("billingDiscountRuleHelp",discount?ruleText(discount):"No discount selected.");
+    const help=document.getElementById("billingDiscountRuleHelp");
+    let helpText=discount?ruleText(discount):"No discount selected.";
+    let helpState="";
+    if(selectedDeal){
+        if(unavailableReason){helpText=`Cannot apply this deal: ${unavailableReason}.`;helpState="is-warning";}
+        else if(eligibility?.eligible){helpText="Eligible — all required items are in this order.";helpState="is-success";}
+        else{helpText=`Not eligible yet. ${(eligibility?.messages||[]).join(" ")}`;helpState="is-warning";}
+    }
+    if(help){help.textContent=helpText;help.classList.toggle("is-warning",helpState==="is-warning");help.classList.toggle("is-success",helpState==="is-success");}
     setText("billingChargeRuleHelp",charge?ruleText(charge):"No charge selected.");
+    const applyButton=document.getElementById("billingAdjustmentApplyButton");
+    if(applyButton){
+        const blocked=Boolean(selectedDeal&&(unavailableReason||!eligibility?.eligible));
+        applyButton.disabled=blocked;
+        applyButton.title=blocked?helpText:"";
+        applyButton.textContent=blocked?"Add required items first":"Apply";
+    }
     const breakdown=getBillingBreakdown();
     setText("billingAdjustmentDialogTotal",`Order total: ${money(breakdown.total)}`);
 }
@@ -6562,6 +6889,22 @@ function renderPOSPreferences() {
         return "<div class=\"pos-preferences-row\"><strong>" + esc(module.label) + "</strong><div class=\"pos-channel-checks\">" + checks + "</div><select id=\"posDefault_" + module.key + "\" aria-label=\"" + esc(module.label) + " default channel\">" + options + "</select></div>";
     }).join("");
 }
+function renderCustomerInfoRequirements() {
+    const container = document.getElementById("customerInfoRequirementsRows");
+    if (!container) return;
+    const requirements = normalizeCustomerInfoRequirements();
+    container.innerHTML = POS_CHANNELS.map(channel => `
+        <div class="customer-info-requirement-row">
+            <div class="customer-info-requirement-channel"><span class="customer-info-channel-icon" aria-hidden="true">${channel.qrMenu ? "⌁" : channel.orderType === "Dine-in" ? "⌂" : "↗"}</span><div><strong>${esc(channel.label)}</strong><small>${channel.qrMenu ? "Guest QR orders" : channel.orderType === "Dine-in" ? "Dine-in billing" : "Takeaway / delivery billing"}</small></div></div>
+            <label class="customer-info-requirement-control" for="customerInfoRequirement_${esc(channel.key)}"><span>Customer details</span><select id="customerInfoRequirement_${esc(channel.key)}" aria-label="Customer information requirement for ${esc(channel.label)}"><option value="optional" ${requirements[channel.key] === "optional" ? "selected" : ""}>Optional</option><option value="required" ${requirements[channel.key] === "required" ? "selected" : ""}>Required</option></select></label>
+        </div>`).join("") || '<p class="access-muted">Add a sale channel to configure its customer information requirement.</p>';
+}
+function readCustomerInfoRequirementsFromForm() {
+    return Object.fromEntries(POS_CHANNELS.map(channel => [
+        channel.key,
+        document.getElementById("customerInfoRequirement_" + channel.key)?.value === "required" ? "required" : "optional"
+    ]));
+}
 function renderSalesChannels() {
     const list = document.getElementById("salesChannelsList");
     if (!list) return;
@@ -6596,6 +6939,7 @@ async function persistSalesChannels(nextChannels) {
     const response = await api("/settings/sales-channels", { method: "PUT", body: JSON.stringify({ channels: nextChannels }) });
     if (response.settings) appSettings = { ...appSettings, ...response.settings };
     else appSettings.posSalesChannels = response.channels || nextChannels;
+    delete appSettings.publicMenuHeroImages;
     syncPOSChannelsFromSettings();
     appSettings.posChannelPreferences = normalizePOSChannelPreferences(appSettings.posChannelPreferences);
     if (!getSaleChannel(selectedPOSChannelKey) || getSaleChannel(selectedPOSChannelKey).orderType !== orderType) {
@@ -6603,6 +6947,7 @@ async function persistSalesChannels(nextChannels) {
     }
     renderSalesChannels();
     renderPOSPreferences();
+    renderCustomerInfoRequirements();
     renderBillingSaleChannelOptions();
     renderBillingAdjustmentAppliesOptions();
     renderBillingAdjustmentSelectors();
@@ -6695,6 +7040,7 @@ async function loadSettings() {
     try {
         const local = JSON.parse(localStorage.getItem(settingsLocalStorageKey()) || "null");
         if (local && typeof local === "object") {
+            delete local.publicMenuHeroImages;
             appSettings = { ...appSettings, ...local };
             if (!Object.prototype.hasOwnProperty.call(local, "totalRoundingMode")) appSettings.totalRoundingMode = local.roundTotals ? "nearest" : "none";
         }
@@ -6703,6 +7049,7 @@ async function loadSettings() {
     try {
         const saved = await api("/settings");
         if (saved && typeof saved === "object") {
+            delete saved.publicMenuHeroImages;
             appSettings = { ...appSettings, ...saved };
             if (!Object.prototype.hasOwnProperty.call(saved, "totalRoundingMode")) appSettings.totalRoundingMode = saved.roundTotals ? "nearest" : "none";
         }
@@ -6710,8 +7057,13 @@ async function loadSettings() {
         console.warn("Settings API unavailable:", error.message);
     }
 
+    // Migrate older local caches that kept QR hero data in general POS settings.
+    delete appSettings.publicMenuHeroImages;
+    try { localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings)); } catch (_) {}
+
     syncPOSChannelsFromSettings();
     appSettings.posChannelPreferences=normalizePOSChannelPreferences(appSettings.posChannelPreferences);
+    appSettings.customerInfoRequirements=normalizeCustomerInfoRequirements(appSettings.customerInfoRequirements);
     appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
     appSettings.defaultPayment = preferredPaymentMethod();
 
@@ -6762,6 +7114,7 @@ async function loadSettings() {
     setSettingValue("settingKOTEnabled", appSettings.kotEnabled !== false); setSettingValue("settingKOTDisabledBehavior", appSettings.kotDisabledBehavior || "hide");
     renderPaymentModeManager();
     renderPOSPreferences();
+    renderCustomerInfoRequirements();
     renderSalesChannels();
     renderBillingSaleChannelOptions();
     renderBillingAdjustmentAppliesOptions();
@@ -6877,10 +7230,11 @@ async function saveSettings() {
         customerMessage: readSettingValue("settingCustomerMessage") || "Thank you for visiting!", enableNotifications: readSettingValue("settingEnableNotifications"), enableKOTSound: readSettingValue("settingEnableKOTSound"), kotAlertInterval: Math.min(60, Math.max(3, Number(readSettingValue("settingKOTAlertInterval")) || 5)),
         sessionTimeout: Number(readSettingValue("settingSessionTimeout")) || 12, auditLog: readSettingValue("settingAuditLog"),
         uiDensity: readSettingValue("settingUiDensity") || "comfortable", accentLabel: readSettingValue("settingAccentLabel") || "", largeBilling: readSettingValue("settingLargeBilling"),
-        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm(), posSalesChannels: POS_CHANNELS.map(channel=>({...channel}))
+        kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm(), customerInfoRequirements: readCustomerInfoRequirementsFromForm(), posSalesChannels: POS_CHANNELS.map(channel=>({...channel}))
     };
 
     appSettings = { ...appSettings, ...next };
+    delete appSettings.publicMenuHeroImages;
     if (!currentOpenOrderId) {
         setOrderType(orderType === "Dine-in" ? "Dine-in" : "Takeaway");
     } else {
@@ -6904,9 +7258,9 @@ async function saveSettings() {
     }
     try {
         await api("/settings", { method: "PUT", body: JSON.stringify(appSettings) });
-        alert(logoSaveError ? `Settings saved, but the logo was not updated: ${logoSaveError}` : "Settings saved successfully! ✅");
+        showProfileToast(logoSaveError ? `Settings saved, but the logo was not updated: ${logoSaveError}` : "✓ Settings saved successfully.", true);
     } catch (error) {
-        alert(logoSaveError ? `Settings saved locally. The logo was not updated: ${logoSaveError}` : "Settings saved locally. Server could not be reached.");
+        showProfileToast(logoSaveError ? `Settings saved locally, but the logo was not updated: ${logoSaveError}` : `Settings saved on this device, but server sync failed: ${error.message || "Please try again."}`, true);
     }
 }
 
@@ -6925,7 +7279,7 @@ function resetSettings() {
         cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
         allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
         printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
-        defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
+        defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5, customerInfoRequirements: {},
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
         sessionTimeout: 12, auditLog: false,
         uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide"
@@ -7085,14 +7439,7 @@ function openCustomerForm() {
         );
 
 
-    if (form) {
-
-        form.style.display =
-            form.style.display === "none"
-                ? "block"
-                : "none";
-
-    }
+    if (form) form.hidden = !form.hidden;
 
 }
 
@@ -7160,10 +7507,7 @@ async function addCustomer() {
         });
 
 
-        document.getElementById(
-            "customerForm"
-        ).style.display =
-            "none";
+        document.getElementById("customerForm").hidden = true;
 
 
         await loadCustomers();
@@ -7171,9 +7515,7 @@ async function addCustomer() {
         await updateDashboard();
 
 
-        alert(
-            "Customer added! 🎉"
-        );
+        showProfileToast("Customer added successfully.", true);
 
 
     } catch (error) {
@@ -9225,6 +9567,9 @@ window.addEventListener(
 
         console.log("🚀 Slash POS started");
         await loadLoginBusinessWelcome();
+        if (new URLSearchParams(window.location.search).get("view") === "register-business") {
+            showRegisterBusiness();
+        }
 
         // Settings are loaded after session validation.
 

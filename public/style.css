@@ -1839,6 +1839,9 @@ body{
 .billing-flow-link{height:56px;padding:0 4px;border:0;border-bottom:3px solid transparent;background:transparent;color:#50545a;font-size:12px;font-weight:700;letter-spacing:.02em;white-space:nowrap;cursor:pointer}
 .billing-flow-link:nth-child(2){border-bottom-color:#111827;color:#111827}
 .app-module-nav{display:flex;align-items:center;gap:10px;flex:1;min-width:0;overflow-x:auto;overflow-y:hidden}
+.module-icon-library{position:absolute;width:0;height:0;overflow:hidden}
+.app-module-nav .nav-btn{display:inline-flex;align-items:center;gap:10px}
+.module-nav-icon{width:17px;height:17px;flex:0 0 17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;opacity:.9}
 .module-drawer-header,.module-drawer-caption{display:none}
 .billing-customer-step-header{display:none}
 .billing-customer-step-intro{display:none}
@@ -2131,6 +2134,148 @@ body:has(#table-view.active-page) .billing-table-view-page .billing-table-card.r
 .business-about-dialog{width:min(600px,calc(100vw - 28px));padding:25px;border:1px solid #e6e6e6;border-radius:18px;background:#fff;box-shadow:0 20px 65px #0003}.business-about-brand{display:flex;align-items:center;gap:11px;margin-bottom:24px}.business-about-mark{display:grid;width:43px;height:43px;place-items:center;border-radius:13px;background:#111;color:white;font-size:21px}.business-about-brand>div{display:grid;gap:3px}.business-about-brand>div strong{color:#111;font-size:16px}.business-about-brand>div span,.business-about-meta{color:#777;font-size:12px}.business-about-brand button{margin-left:auto;border:0;background:transparent;color:#666;font-size:20px;cursor:pointer}.business-about-dialog h2{margin:0;color:#111;font-size:24px}.business-about-meta{margin:6px 0 19px}.business-about-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.business-about-grid>div{display:grid;gap:6px;padding:12px;border:1px solid #eee;border-radius:10px;background:#fafafa}.business-about-grid span,.business-about-footer span{color:#777;font-size:11px}.business-about-grid strong,.business-about-footer strong{overflow-wrap:anywhere;color:#222;font-size:13px}.business-about-grid .business-about-wide{grid-column:1/-1}.business-about-footer{display:flex;justify-content:space-between;gap:8px;margin:17px 0;padding-top:13px;border-top:1px solid #eee}.business-about-dialog>.big-btn{width:100%;background:#111}
 #paymentModal{align-items:center;justify-content:center;padding:14px}.pos-payment-dialog{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(275px,.85fr);width:min(1000px,100%);max-height:94vh;overflow:auto;border-radius:16px;background:#fff;box-shadow:0 22px 70px #0004}.pos-payment-workspace{padding:23px}.pos-payment-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.pos-payment-header h2{margin:4px 0 0;color:#111}.pos-payment-close{width:36px;height:36px;border:0;border-radius:9px;background:#f3f3f3;color:#333;font-size:19px;cursor:pointer}.pos-payment-categories{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:20px}.pos-payment-categories label{cursor:pointer}.pos-payment-categories input{position:absolute;opacity:0}.pos-payment-categories span{display:block;padding:11px;border:1px solid #ddd;border-radius:9px;color:#333;text-align:center;font-size:13px;font-weight:700}.pos-payment-categories input:checked+span{border-color:#111;background:#111;color:white}.non-chargeable-notice{margin:12px 0;padding:13px;border:1px solid #ddd;border-radius:10px;background:#f6f6f6;color:#333;font-size:13px}.pos-payment-entry{margin:14px 0}.payment-amount-input{display:flex;align-items:center;gap:8px;padding:0 12px;border:1px solid #d7d7d7;border-radius:9px}.payment-amount-input span{color:#666}.payment-amount-input input{width:100%;min-height:43px;border:0;outline:0}.payment-change-line{display:flex;justify-content:space-between;margin-top:8px;color:#777;font-size:12px}.pos-payment-section-heading{display:flex;justify-content:space-between;gap:10px;margin:17px 0 10px;color:#222;font-size:13px}.pos-payment-section-heading span{color:#777;font-weight:400}.pos-payment-method-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.pos-payment-method-grid button{display:grid;gap:5px;min-height:59px;place-items:center;padding:7px 3px;border:1px solid #e2e2e2;border-radius:9px;background:#fff;color:#333;font-size:16px;cursor:pointer}.pos-payment-method-grid button span{font-size:11px}.pos-payment-method-grid button.selected{border-color:#111;background:#f4f4f4;box-shadow:inset 0 0 0 1px #111;color:#111}.split-payment-entry{display:flex;align-items:end;flex-wrap:wrap;gap:9px;margin:13px 0}.split-payment-entry .form-group{flex:1;min-width:170px;margin:0}.split-payment-list{display:grid;flex:0 0 100%;gap:6px}.split-payment-row,.payment-allocation-list>div{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border-radius:8px;background:#f5f5f5;color:#444;font-size:12px}.split-payment-row button{border:0;background:transparent;color:#777;font-size:18px;cursor:pointer}.pos-payment-footer{display:flex;justify-content:flex-end;gap:9px;margin-top:20px}.pos-confirm-payment{background:#111}.pos-payment-summary{display:flex;flex-direction:column;gap:16px;padding:24px;background:#f7f7f7;border-left:1px solid #e9e9e9}.pos-payment-summary-header{display:flex;justify-content:space-between;align-items:start;gap:10px;padding-bottom:14px;border-bottom:1px solid #e1e1e1}.pos-payment-summary-header>div{display:grid;gap:5px}.pos-payment-summary-header small{color:#888;font-size:11px}.pos-payment-summary-header span{color:#444;font-size:13px}.pos-payment-summary-header>strong{color:#111;font-size:22px}.pos-payment-summary-lines{display:grid;gap:12px}.pos-payment-summary-lines>div,.payment-collected-due>div{display:flex;justify-content:space-between;gap:12px;color:#666;font-size:13px}.pos-payment-summary-lines strong,.payment-collected-due strong{color:#222}.pos-payment-summary-lines .payment-summary-total{padding-top:13px;border-top:1px solid #ddd;color:#111;font-weight:700}.pos-payment-summary-lines .payment-summary-total strong{color:#111;font-size:17px}.payment-allocation-list{display:grid;gap:6px}.payment-collected-due{display:grid;gap:12px;margin-top:auto;padding-top:14px;border-top:1px solid #ddd}.payment-collected-due>div:last-child{color:#111;font-weight:700}.payment-collected-due>div:last-child strong{color:#111;font-size:16px}
 [hidden]{display:none!important}
+
+/* Save and status confirmations stay near the bottom center of the viewport. */
+.profile-toast.centered{top:auto;bottom:clamp(36px,7vh,80px);left:50%;max-width:min(520px,calc(100vw - 32px));max-height:32vh;overflow:auto;padding:14px 20px;border:1px solid rgba(255,255,255,.18);border-radius:14px;background:#17231f;box-shadow:0 22px 70px rgba(15,23,42,.3);font-size:15px;font-weight:700;line-height:1.45;white-space:pre-line;overflow-wrap:anywhere;transform:translate(-50%,20px)}
+.profile-toast.centered.show{transform:translate(-50%,0)}
+
+/* Customer creation and customer list. */
+#customers.customers-page{color:#17212f}
+#customers.customers-page>h2{margin:0 0 15px;color:#17212f;font-size:clamp(22px,2vw,28px);font-weight:750;letter-spacing:-.035em}
+#customers.customers-page>.dashboard-box{padding:clamp(15px,2vw,22px);border:1px solid #e4e9ef;border-radius:16px;background:linear-gradient(145deg,#fff,#fbfcfe);box-shadow:0 8px 24px rgba(27,43,65,.05)}
+#customers .customer-header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 14px;padding-bottom:13px;border-bottom:1px solid #edf0f3}
+#customers .customer-header h3{margin:0 auto 0 0;color:#263442;font-size:17px;font-weight:750}
+#customers .customer-header .big-btn{margin:0;min-height:40px;padding:10px 15px;border:0;border-radius:10px;background:#17212f;color:#fff;font-weight:700;box-shadow:0 5px 13px rgba(23,33,47,.13)}
+#customers .customer-header .big-btn:hover{background:#29384a;transform:translateY(-1px)}
+.customer-create-form:not([hidden]){display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 18px;padding:16px;border:1px solid #dfe7ee;border-radius:13px;background:#f7f9fc;box-shadow:inset 0 1px 0 #fff}
+.customer-form-field,.reservation-form-field{display:grid;align-content:start;gap:6px;min-width:0;color:#556271;font-size:12px;font-weight:700}
+.customer-form-field>span,.reservation-form-field>span{display:inline;color:#87919d;font-size:10px;font-weight:500}
+.customer-form-field input,.reservation-form-field input,.reservation-form-field select{width:100%;min-width:0;min-height:42px;margin:0;padding:10px 11px;border:1px solid #d8e0e8;border-radius:9px;background:#fff;color:#202b35;font:inherit;font-size:13px;box-shadow:0 1px 2px rgba(20,30,40,.025);transition:border-color .16s,box-shadow .16s}
+.customer-form-field input:focus,.reservation-form-field input:focus,.reservation-form-field select:focus{outline:0;border-color:#527aa6;box-shadow:0 0 0 3px rgba(82,122,166,.13)}
+.customer-form-actions,.reservation-form-actions{display:flex;align-items:center;justify-content:flex-end;gap:9px;grid-column:1/-1;padding-top:3px}
+.customer-form-actions .big-btn,.reservation-form-actions .big-btn{margin:0;min-height:40px;padding:10px 16px;border:0;border-radius:9px;background:#17212f;color:#fff;font-weight:700}
+.customer-form-actions .cancel-btn,.reservation-form-actions .cancel-btn{min-height:40px;padding:9px 14px;border:1px solid #d8e0e8;border-radius:9px;background:#fff;color:#4c5968;font-weight:650}
+#customers .table-container{overflow:auto;border:1px solid #e5eaf0;border-radius:12px;background:#fff}
+#customers table{min-width:620px}
+#customers thead th{padding:12px 14px;background:#f6f8fb;color:#657282;font-size:11px;font-weight:750;letter-spacing:.045em;text-transform:uppercase}
+#customers tbody td{padding:12px 14px;color:#354251;font-size:13px}
+#customers tbody tr:hover{background:#f9fbfd}
+
+/* Printer setup cards and saved-device list. */
+#printer>.page-header{align-items:center;gap:16px;margin-bottom:16px;padding:19px 22px;border:1px solid #e4e9ef;border-radius:16px;background:linear-gradient(120deg,#fff,#f7f9fc);box-shadow:0 7px 22px rgba(27,43,65,.045)}
+#printer>.page-header h2{margin:0;color:#17212f;font-size:clamp(21px,2vw,27px);letter-spacing:-.035em}
+#printer>.page-header p{max-width:740px;margin:6px 0 0;color:#6d7887;font-size:13px;line-height:1.55}
+#printer>.page-header .big-btn{flex:0 0 auto;margin:0;min-height:40px;padding:10px 15px;border:0;border-radius:10px;background:#17212f;color:#fff;font-weight:700}
+#printer>.dashboard-box{margin:0 0 16px;padding:clamp(15px,2vw,22px);border:1px solid #e4e9ef;border-radius:16px;background:#fff;box-shadow:0 8px 24px rgba(27,43,65,.05)}
+#printer>.dashboard-box>h3,#printerFormTitle{margin:0 0 15px;color:#263442;font-size:17px;font-weight:750}
+#printerForm{display:grid;gap:12px}
+#printer .printer-form-grid{gap:12px}
+#printer .form-group{min-width:0;margin:0}
+#printer .form-group label{display:block;margin:0 0 6px;color:#556271;font-size:12px;font-weight:700}
+#printer .form-group input,#printer .form-group select,#printer .printer-note select,#printer .printer-note input{width:100%;min-width:0;min-height:42px;margin:0;padding:9px 11px;border:1px solid #d8e0e8;border-radius:9px;background:#fff;color:#202b35;font-size:13px}
+#printer .printer-note{margin:0;padding:14px 15px;border:1px solid #e1e9f2;border-radius:12px;background:linear-gradient(120deg,#f4f8fd,#f9fbfe);color:#4b5c6d}
+#printer .printer-note strong{color:#293948}
+#printer .printer-note p{line-height:1.55}
+#printer .printer-note small{color:#758393}
+#printer .printer-note button,#printer #bluetoothPrinterFields button{min-height:38px;padding:8px 12px;border:1px solid #d5dee8;border-radius:9px;background:#fff;color:#394958;font-size:12px;font-weight:650;cursor:pointer}
+#printer .settings-options{margin:0;padding:11px 13px;border:1px solid #edf0f3;border-radius:10px;background:#fafbfd}
+#printer .settings-options label{display:flex;align-items:center;gap:9px;color:#40505e;font-size:13px;font-weight:650}
+#printer .action-row{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap;margin-top:2px!important;padding-top:12px;border-top:1px solid #edf0f3}
+#printer .action-row button{min-height:40px;margin:0;padding:9px 15px;border-radius:9px;font-weight:700}
+#printer .action-row .big-btn{border:0;background:#17212f;color:#fff}
+#printer .action-row .cancel-btn{border:1px solid #d8e0e8;background:#fff;color:#4c5968}
+#printer .table-container{overflow:auto;border:1px solid #e5eaf0;border-radius:12px}
+#printer table{min-width:680px}
+#printer thead th{padding:12px;background:#f6f8fb;color:#657282;font-size:10px;letter-spacing:.05em;text-transform:uppercase}
+#printer tbody td{padding:11px 12px;color:#394653;font-size:12px}
+.printer-message{padding:0 2px;font-size:13px}
+.printer-message:not(:empty){padding:10px 12px;border-radius:9px;background:#eef8f1}
+.printer-message.error{background:#fff1f0}
+
+/* Reservation scheduling and table status display. */
+#reservations.reservations-page{color:#17212f}
+#reservations.reservations-page>h2{margin:0 0 15px;color:#17212f;font-size:clamp(22px,2vw,28px);font-weight:750;letter-spacing:-.035em}
+#reservations.reservations-page>.dashboard-box{padding:clamp(15px,2vw,22px);border:1px solid #e4e9ef;border-radius:16px;background:linear-gradient(145deg,#fff,#fbfcfe);box-shadow:0 8px 24px rgba(27,43,65,.05)}
+#reservations .customer-header{display:flex;align-items:center;gap:12px;margin:0 0 14px;padding-bottom:13px;border-bottom:1px solid #edf0f3}
+#reservations .customer-header h3{margin:0;color:#263442;font-size:17px;font-weight:750}
+#reservations .customer-header .big-btn{margin:0 0 0 auto;min-height:40px;padding:10px 15px;border:0;border-radius:10px;background:#17212f;color:#fff;font-weight:700}
+.reservation-create-form:not([hidden]){display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 18px;padding:16px;border:1px solid #dfe7ee;border-radius:13px;background:#f7f9fc}
+.reservation-form-notes{grid-column:1/-1}
+#reservations .table-container{overflow:auto;border:1px solid #e5eaf0;border-radius:12px;background:#fff}
+#reservations table{min-width:900px}
+#reservations thead th{padding:12px 11px;background:#f6f8fb;color:#657282;font-size:10px;font-weight:750;letter-spacing:.045em;text-transform:uppercase}
+#reservations tbody td{padding:11px;color:#354251;font-size:12px;vertical-align:middle}
+#reservations tbody tr:hover{background:#f9fbfd}
+#reservations tbody td:last-child{display:flex;flex-wrap:wrap;gap:5px}
+#reservations tbody td:last-child button{min-height:30px;padding:6px 9px;border:1px solid #dbe2e9;border-radius:7px;background:#fff;color:#435364;font-size:11px;font-weight:650;cursor:pointer}
+#reservations tbody td:last-child button:hover{border-color:#9cafc1;background:#f2f6fa}
+
+/* Keep the three POS destinations available from My Orders as well. */
+body:has(#orders.active-page){overflow:hidden;background:#f7f8fa}
+body:has(#orders.active-page) .sidebar{height:56px;padding:0 16px;gap:0;overflow:visible;white-space:normal}
+body:has(#orders.active-page) .billing-brand-row h2{margin:0;color:#111827;font-size:22px}
+body:has(#orders.active-page) .billing-brand-row .brand-default{display:none}
+body:has(#orders.active-page) .billing-brand-row .billing-brand-label{display:inline}
+body:has(#orders.active-page) .billing-menu-toggle{display:block}
+body:has(#orders.active-page) .billing-flow-nav{display:flex;flex:1}
+body:has(#orders.active-page) .billing-flow-link{height:56px;font-size:12px}
+body:has(#orders.active-page) .billing-flow-link.active{border-bottom-color:#111827!important;color:#111827!important}
+body:has(#orders.active-page) .app-module-nav{position:fixed;top:0;bottom:0;left:0;z-index:1300;display:flex;flex-direction:column;align-items:stretch;gap:5px;width:min(320px,86vw);min-width:0;padding:0 10px 14px;background:#eaf0ff;box-shadow:12px 0 30px rgba(15,23,42,.18);overflow:auto;transform:translateX(-110%);transition:transform .22s ease}
+body.billing-nav-open:has(#orders.active-page) .app-module-nav{transform:translateX(0)}
+body.billing-nav-open:has(#orders.active-page) .main:before{content:"";position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.38)}
+body:has(#orders.active-page) .module-drawer-header{display:flex;align-items:center;justify-content:space-between;min-height:70px;padding:0 8px;color:#111827}
+body:has(#orders.active-page) .module-drawer-header strong{font-size:27px;letter-spacing:-.04em;text-transform:none}
+body:has(#orders.active-page) .module-drawer-close{width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#353a40;font-size:24px;cursor:pointer}
+body:has(#orders.active-page) .module-drawer-caption{display:block;padding:8px 10px;color:#555e6b;font-size:10px;font-weight:800;letter-spacing:.1em}
+body:has(#orders.active-page) .app-module-nav .nav-btn{flex:0 0 auto;width:100%;min-height:40px;padding:10px 12px;border:0;border-radius:7px;color:#3d4652;background:transparent;text-align:left;font-size:13px}
+body:has(#orders.active-page) .app-module-nav .nav-btn:hover{background:#dce6fa;color:#111827}
+body:has(#orders.active-page) .app-module-nav .nav-btn.active{background:#111827;color:#fff}
+body:has(#orders.active-page) .main{height:100vh;min-height:0;padding:56px 22px 14px;overflow:hidden}
+body:has(#orders.active-page) .main>.header{display:none}
+body:has(#orders.active-page) #orders.active-page{display:flex;flex:1 1 auto;flex-direction:column;width:100%;height:calc(100vh - 56px);min-height:0;max-width:none;margin:0;padding:14px 0 0;overflow:auto}
+body:has(#orders.active-page) #orders .orders-tabs{flex:0 0 auto;margin:0 0 12px}
+body:has(#orders.active-page) #orders .orders-workspace{flex:1 1 auto;min-height:0}
+body:has(#orders.active-page) #orders .orders-list-panel,body:has(#orders.active-page) #orders .orders-detail-panel{max-height:none;min-height:0}
+body:has(#orders.active-page) .billing-flow-link{border-bottom-color:transparent!important;color:#50545a!important}
+body:has(#orders.active-page) .billing-flow-link[data-pos-flow-page="orders"]{border-bottom-color:#111827!important;color:#111827!important}
+
+/* Give the same active-tab affordance on the other POS destinations. */
+body:has(#new-order.active-page) .billing-flow-link,body:has(#table-view.active-page) .billing-flow-link{border-bottom-color:transparent!important;color:#50545a!important}
+body:has(#new-order.active-page) .billing-flow-link[data-pos-flow-page="new-order"],body:has(#table-view.active-page) .billing-flow-link[data-pos-flow-page="table-view"]{border-bottom-color:#111827!important;color:#111827!important}
+
+/* Keep the app modules in the menu drawer on Table View, matching Billing and Orders. */
+body:has(#table-view.active-page) .app-module-nav{position:fixed;top:0;bottom:0;left:0;z-index:1300;display:flex;flex-direction:column;align-items:stretch;gap:5px;width:min(320px,86vw);min-width:0;padding:0 10px 14px;background:#eaf0ff;box-shadow:12px 0 30px rgba(15,23,42,.18);overflow:auto;transform:translateX(-110%);transition:transform .22s ease}
+body.billing-nav-open:has(#table-view.active-page) .app-module-nav{transform:translateX(0)}
+body.billing-nav-open:has(#table-view.active-page) .main:before{content:"";position:fixed;inset:0;z-index:900;background:rgba(0,0,0,.38)}
+body:has(#table-view.active-page) .module-drawer-header{display:flex;align-items:center;justify-content:space-between;min-height:70px;padding:0 8px;color:#111827}
+body:has(#table-view.active-page) .module-drawer-header strong{font-size:27px;letter-spacing:-.04em;text-transform:none}
+body:has(#table-view.active-page) .module-drawer-close{width:36px;height:36px;border:0;border-radius:50%;background:transparent;color:#353a40;font-size:24px;cursor:pointer}
+body:has(#table-view.active-page) .module-drawer-caption{display:block;padding:8px 10px;color:#555e6b;font-size:10px;font-weight:800;letter-spacing:.1em}
+body:has(#table-view.active-page) .app-module-nav .nav-btn{flex:0 0 auto;width:100%;min-height:40px;padding:10px 12px;border:0;border-radius:7px;color:#3d4652;background:transparent;text-align:left;font-size:13px}
+body:has(#table-view.active-page) .app-module-nav .nav-btn:hover{background:#dce6fa;color:#111827}
+body:has(#table-view.active-page) .app-module-nav .nav-btn.active{background:#111827;color:#fff}
+
+@media(max-width:760px){
+  .customer-create-form:not([hidden]),.reservation-create-form:not([hidden]){grid-template-columns:1fr 1fr;padding:13px}
+  #printer>.page-header{align-items:flex-start;flex-direction:column}
+  #printer>.page-header .big-btn{width:100%}
+  #printer .action-row{justify-content:stretch}
+  #printer .action-row button{flex:1}
+  body:has(#orders.active-page) .sidebar{padding:0 8px;gap:4px}
+  body:has(#orders.active-page) .billing-brand-row{gap:4px}
+  body:has(#orders.active-page) .billing-brand-row h2{font-size:19px}
+  body:has(#orders.active-page) .billing-flow-nav{justify-content:flex-end;gap:clamp(6px,2vw,14px);overflow:hidden}
+  body:has(#orders.active-page) .billing-flow-link{height:54px;padding:0 2px;font-size:clamp(9px,2.25vw,11px)}
+  body:has(#orders.active-page) .main{padding:56px 12px 10px;overflow-y:auto}
+  body:has(#orders.active-page) #orders.active-page{height:auto;min-height:calc(100vh - 56px);overflow:visible;padding-top:12px}
+  body:has(#orders.active-page) #orders .orders-workspace{flex:0 0 auto}
+}
+@media(max-width:480px){
+  .customer-create-form:not([hidden]),.reservation-create-form:not([hidden]){grid-template-columns:1fr}
+  .reservation-form-notes{grid-column:auto}
+  .customer-form-actions,.reservation-form-actions{grid-column:auto;justify-content:stretch}
+  .customer-form-actions button,.reservation-form-actions button{flex:1}
+}
 @media(max-width:760px){.pos-preferences-row{grid-template-columns:1fr;gap:10px}.marketing-page-header,.marketing-deal-toolbar{align-items:stretch;flex-direction:column}.marketing-overview-grid{gap:8px}.marketing-overview-card{padding:13px}.marketing-deal-filters{display:grid;grid-template-columns:1fr}.pos-payment-dialog{grid-template-columns:1fr;max-height:95vh}.pos-payment-summary{border-top:1px solid #e9e9e9;border-left:0}.pos-payment-method-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.pos-payment-workspace,.pos-payment-summary{padding:17px}.business-about-dialog{padding:19px}}
 @media(max-width:480px){.marketing-overview-grid{grid-template-columns:1fr}.marketing-deal-form-grid{grid-template-columns:1fr}.marketing-deal-wide{grid-column:1}.marketing-deal-checks{grid-template-columns:1fr}.business-about-grid{grid-template-columns:1fr}.business-about-grid .business-about-wide{grid-column:1}.pos-payment-categories{gap:6px}.pos-payment-categories span{padding:9px 4px;font-size:11px}}
 .pos-preferences-table-head{display:grid;grid-template-columns:minmax(125px,170px) minmax(260px,1fr) minmax(150px,200px);gap:15px;padding:0 0 8px;color:#777;font-size:11px;font-weight:700;text-transform:uppercase}.pos-preferences-table-head span:last-child{text-align:left}@media(max-width:760px){.pos-preferences-table-head{display:none}}
@@ -2292,6 +2437,20 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .menu-image-preview{display:flex;align-items:center;justify-content:center;min-height:110px;margin-top:9px;padding:10px;border:1px dashed #cbd5dc;border-radius:12px;background:#f8fafb;color:#7b8790}
 .menu-image-preview img{display:block;width:min(100%,260px);max-height:180px;object-fit:contain;border-radius:8px}
 .menu-option-set-picker{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin-top:10px}
+#menuOptionSetDisclosure{overflow:hidden;border:1px solid #dfe5eb;border-radius:12px;background:#fff;transition:border-color .16s ease,box-shadow .16s ease}
+#menuOptionSetDisclosure:hover{border-color:#bdc9d7}
+#menuOptionSetDisclosure[open]{border-color:#cbd5e1;box-shadow:0 5px 16px rgba(15,23,42,.05)}
+#menuOptionSetDisclosure>summary{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:62px;padding:10px 13px;list-style:none;cursor:pointer;user-select:none}
+#menuOptionSetDisclosure>summary::-webkit-details-marker{display:none}
+.menu-option-set-disclosure-copy{display:flex;align-items:center;gap:11px;min-width:0}
+.menu-option-set-add-mark{display:grid;place-items:center;width:34px;height:34px;flex:0 0 34px;border:1px solid #d9e4f2;border-radius:10px;background:#f2f6fb;color:#315f9e;font-size:19px;font-weight:500}
+.menu-option-set-disclosure-copy>span:last-child{display:grid;gap:3px}
+.menu-option-set-disclosure-copy strong{color:#263442;font-size:13px;font-weight:750}
+.menu-option-set-disclosure-copy small{color:#7a8693;font-size:10px;line-height:1.35}
+.menu-option-set-disclosure-chevron{width:18px;height:18px;flex:0 0 18px;fill:none;stroke:#64748b;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .18s ease}
+#menuOptionSetDisclosure[open] .menu-option-set-disclosure-chevron{transform:rotate(180deg)}
+#menuOptionSetDisclosure:not([open]) #menuOptionSetPicker{display:none}
+#menuOptionSetDisclosure[open] #menuOptionSetPicker{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;margin:0;padding:11px;border-top:1px solid #edf0f4;background:#fbfcfe}
 .menu-option-set-choice{display:flex;align-items:flex-start;gap:9px;padding:11px;border:1px solid #e1e7eb;border-radius:10px;background:#fff}
 .menu-option-set-choice input{margin-top:3px}
 .menu-option-set-choice span{display:grid;gap:3px}
@@ -2323,6 +2482,43 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .item-option-list>label{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #e5e9ec;border-radius:8px;background:#fff}
 .item-option-list>label span{flex:1}
 .item-option-list>label strong{white-space:nowrap}
+#itemOptionsModal{z-index:2200;padding:12px}
+#itemOptionsModal .variant-picker-modal{display:flex;flex-direction:column;width:min(590px,calc(100vw - 24px));max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px);padding:0;overflow:hidden;border:1px solid #e2e8f0;border-radius:18px;background:#fff;text-align:left;box-shadow:0 24px 70px rgba(15,23,42,.28)}
+#itemOptionsModal .item-option-modal-header{flex:0 0 auto;align-items:center;gap:16px;margin:0;padding:17px 20px;border-bottom:1px solid #edf1f5;background:#fff}
+#itemOptionsModal .item-option-modal-header h2{margin:3px 0 0;color:#17212f;font-size:19px;line-height:1.25}
+#itemOptionsModal .item-option-modal-header .menu-eyebrow{font-size:9px;color:#788698}
+#itemOptionsModal .item-option-modal-header .close-btn{display:grid;place-items:center;width:34px;height:34px;flex:0 0 34px;padding:0;border:1px solid #e2e7ee;border-radius:9px;background:#f8fafc;color:#536172}
+#itemOptionsModal .item-option-modal-header .close-btn:hover{border-color:#cbd5e1;background:#f1f5f9;color:#1f2937}
+#itemOptionsBody{flex:1 1 auto;min-height:0;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;padding:17px 20px}
+#itemOptionsBody::-webkit-scrollbar{width:9px}
+#itemOptionsBody::-webkit-scrollbar-thumb{border:2px solid #fff;border-radius:999px;background:#cbd5e1}
+#itemOptionsBody::-webkit-scrollbar-thumb:hover{background:#94a3b8}
+#itemOptionsModal .variant-picker-parent{align-items:center;gap:14px;margin:0 0 15px;padding:12px 14px;border:1px solid #e8edf3;border-radius:12px;background:#f8fafc}
+#itemOptionsModal .variant-picker-parent strong{min-width:0;overflow-wrap:anywhere;color:#263445;font-size:14px;line-height:1.4}
+#itemOptionsModal .variant-picker-parent span{flex:0 0 auto;padding:6px 9px;border:1px solid #dfe7f0;border-radius:8px;background:#fff;color:#34445a;font-size:12px;font-weight:750}
+#itemOptionsModal .item-option-set{min-width:0;margin:0 0 13px;padding:12px;border:1px solid #e2e8f0;border-radius:13px;background:#fff}
+#itemOptionsModal .item-option-set:last-child{margin-bottom:0}
+#itemOptionsModal .item-option-set legend{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;padding:0 4px;color:#263445;font-size:13px;font-weight:750}
+#itemOptionsModal .item-option-set legend small{flex:0 0 auto;padding:5px 8px;border-radius:999px;font-size:9px;font-weight:700;letter-spacing:.01em}
+#itemOptionsModal .item-option-set legend small.required{background:#fff4e5;color:#935c12}
+#itemOptionsModal .item-option-set legend small.optional{background:#f1f5f9;color:#607084}
+#itemOptionsModal .item-option-list{display:grid;gap:7px;margin-top:9px}
+#itemOptionsModal .item-option-list>label{display:grid;grid-template-columns:18px minmax(0,1fr) auto;align-items:center;gap:11px;min-height:52px;padding:10px 12px;border:1px solid #e4e9ef;border-radius:10px;background:#fff;color:#334155;text-align:left;cursor:pointer;transition:border-color .14s ease,background .14s ease,box-shadow .14s ease}
+#itemOptionsModal .item-option-list>label:hover{border-color:#b8c8dc;background:#f8faff}
+#itemOptionsModal .item-option-list>label:has(input:checked){border-color:#6d91c5;background:#f2f7ff;box-shadow:inset 0 0 0 1px #6d91c5}
+#itemOptionsModal .item-option-list>label:focus-within{outline:3px solid rgba(59,130,246,.16);outline-offset:1px}
+#itemOptionsModal .item-option-list>label input[type="radio"],#itemOptionsModal .item-option-list>label input[type="checkbox"]{width:17px;height:17px;flex:0 0 17px;margin:0;padding:0;border:0;border-radius:50%;accent-color:#3267ae;cursor:pointer}
+#itemOptionsModal .item-option-list>label span{min-width:0;overflow-wrap:anywhere;color:#263445;font-size:13px;font-weight:600;line-height:1.4}
+#itemOptionsModal .item-option-list>label strong{margin:0;padding:5px 8px;border-radius:7px;font-size:10px;font-weight:750;white-space:nowrap}
+#itemOptionsModal .item-option-list>label strong.included{background:#f1f5f9;color:#607084}
+#itemOptionsModal .item-option-list>label strong.has-extra{background:#edf5ff;color:#285b9e}
+#itemOptionsModal .modal-actions{display:flex;flex:0 0 auto;justify-content:flex-end;gap:9px;margin:0;padding:13px 20px;border-top:1px solid #e9eef4;background:#fff}
+#itemOptionsModal .modal-actions button{min-height:42px;margin:0;padding:10px 16px;border-radius:9px;font-size:12px;font-weight:700}
+#itemOptionsModal .modal-actions .big-btn{border:1px solid #17212f;background:#17212f;color:#fff}
+#itemOptionsModal .modal-actions .big-btn:hover{background:#29384b}
+#itemOptionsModal .modal-actions .cancel-btn{border:1px solid #dce3ec;background:#fff;color:#425064}
+#itemOptionsModal .modal-actions .cancel-btn:hover{background:#f7f9fb}
+@media(max-width:520px){#itemOptionsModal{padding:10px}#itemOptionsModal .variant-picker-modal{width:calc(100vw - 20px);max-height:calc(100vh - 20px);max-height:calc(100dvh - 20px)}#itemOptionsModal .item-option-modal-header{padding:14px 15px}#itemOptionsModal .item-option-modal-header h2{font-size:17px}#itemOptionsBody{padding:13px 14px}#itemOptionsModal .item-option-set{padding:10px}#itemOptionsModal .item-option-list>label{grid-template-columns:18px minmax(0,1fr) auto;gap:8px;padding:9px 10px}#itemOptionsModal .item-option-list>label span{font-size:12px}#itemOptionsModal .item-option-list>label strong{padding:4px 6px;font-size:9px}#itemOptionsModal .modal-actions{padding:11px 14px}}
 @media(max-width:650px){.option-set-layout{grid-template-columns:1fr}.option-set-layout>div:first-child select{min-height:110px}}
 
 /* Card based module navigation */
@@ -2442,6 +2638,10 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .billing-adjustment-dialog-card>label{color:#66747c;font-size:11px;font-weight:700}
 .billing-adjustment-dialog-card select{width:100%;min-height:41px;padding:9px;border:1px solid #dce3e5;border-radius:9px;background:#fff;color:#2c3940}
 .billing-adjustment-rule-help{min-height:16px;color:#7b878d;font-size:10px}
+.billing-adjustment-rule-help.is-warning{color:#a33d35;font-weight:700;line-height:1.5}.billing-adjustment-rule-help.is-success{color:#24764c;font-weight:700}
+.customer-info-requirements-card .settings-master-header{margin-bottom:16px}.customer-info-requirements-list{display:grid;gap:10px}.customer-info-requirement-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(175px,230px);align-items:center;gap:16px;padding:13px 15px;border:1px solid #e1e7ef;border-radius:13px;background:linear-gradient(110deg,#fff,#f8faff)}.customer-info-requirement-channel{display:flex;align-items:center;gap:11px;min-width:0}.customer-info-channel-icon{display:grid;place-items:center;flex:none;width:38px;height:38px;border:1px solid #dce5f4;border-radius:12px;background:#edf4ff;color:#315fa8;font-size:20px;font-weight:800}.customer-info-requirement-channel strong,.customer-info-requirement-channel small{display:block}.customer-info-requirement-channel strong{color:#1e293b;font-size:14px}.customer-info-requirement-channel small{margin-top:3px;color:#728096;font-size:11px}.customer-info-requirement-control{display:grid;gap:5px;color:#607087;font-size:11px;font-weight:750}.customer-info-requirement-control select{width:100%;min-height:39px;padding:8px 11px;border:1px solid #d6deea;border-radius:9px;background:#fff;color:#253248;font:inherit;font-size:13px}.customer-info-requirement-control select:focus{outline:3px solid #3778ed2b;border-color:#3778ed}.billing-adjustment-dialog-footer .big-btn:disabled{opacity:.52;cursor:not-allowed;filter:saturate(.55)}
+.pos-sync-overlay{position:fixed;inset:0;z-index:10000;display:grid;place-items:center;padding:20px;background:#11182770;backdrop-filter:blur(3px);opacity:0;visibility:hidden;transition:opacity .2s ease,visibility .2s ease}.pos-sync-overlay.active{opacity:1;visibility:visible}.pos-sync-card{display:grid;justify-items:center;gap:11px;width:min(370px,100%);padding:28px 25px 24px;border:1px solid #e7edf5;border-radius:20px;background:#fff;box-shadow:0 22px 70px #0c172b35;text-align:center;animation:posSyncCardIn .24s ease-out both}.pos-sync-card>strong{color:#172337;font-size:18px}.pos-sync-card>span:not(.pos-sync-spinner){color:#738096;font-size:12px}.pos-sync-spinner{width:38px;height:38px;border:4px solid #e6edf8;border-top-color:#3478ed;border-right-color:#7656d9;border-radius:50%;animation:posSyncSpin .8s linear infinite}.pos-sync-progress{width:100%;height:6px;overflow:hidden;margin-top:4px;border-radius:999px;background:#edf1f7}.pos-sync-progress i{display:block;width:0;height:100%;border-radius:inherit;background:linear-gradient(90deg,#3478ed,#7656d9);transition:width .25s ease}.pos-syncing{cursor:progress}@keyframes posSyncSpin{to{transform:rotate(360deg)}}@keyframes posSyncCardIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}@media(max-width:600px){.customer-info-requirement-row{grid-template-columns:1fr;gap:11px;padding:12px}.customer-info-requirement-control{grid-template-columns:1fr auto;align-items:center}.customer-info-requirement-control select{min-width:145px}}
+@media(prefers-reduced-motion:reduce){.pos-sync-overlay,.pos-sync-card,.pos-sync-spinner,.pos-sync-progress i{animation:none!important;transition:none!important}}
 .billing-adjustments-dialog-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 0;border-top:1px solid #e8edef}
 .billing-adjustments-dialog-footer>span{color:#47575d;font-size:12px;font-weight:700}
 .billing-adjustments-dialog-footer>div{display:flex;gap:7px;flex-wrap:wrap;justify-content:flex-end}
@@ -2556,6 +2756,17 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 @media(max-width:900px){.orders-workspace{grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr)}.orders-list-panel,.orders-detail-panel{max-height:calc(100vh - 275px)}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.orders-workspace{grid-template-columns:1fr}.orders-list-panel,.orders-detail-panel{max-height:none;min-height:0}.orders-list-panel{max-height:42vh}.orders-detail-panel{min-height:400px}.orders-filter-bar{align-items:stretch}.orders-filter-bar label{flex:1 1 42%;min-width:130px}.orders-filter-reset{flex:1 1 100%}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.orders-search{width:100%}.kot-target-picker-card{grid-template-columns:1fr;align-items:start}.kot-target-picker-card .table-action-btn{justify-self:start}.kot-target-chips{grid-column:1}}
 @media(max-width:700px){.orders-page{width:calc(100% + 16px)}}
+
+/* Keep the order filters grouped behind a visible control beside search. */
+.orders-search-tools{display:flex;align-items:center;gap:8px;min-width:0}
+.orders-search-tools .orders-search{flex:1;min-width:0;width:auto}
+.orders-filter-toggle{position:relative;display:inline-flex;flex:0 0 auto;align-items:center;justify-content:center;gap:7px;min-height:42px;padding:0 13px;border:1px solid #d7e0e6;border-radius:10px;background:#fff;color:#354550;font:inherit;font-size:12px;font-weight:700;cursor:pointer;transition:background .15s,border-color .15s,color .15s,box-shadow .15s}
+.orders-filter-toggle:hover,.orders-filter-toggle.expanded{border-color:#0f766e;background:#f1f8f6;color:#0f6259}
+.orders-filter-toggle:focus-visible{outline:3px solid rgba(15,118,110,.2);outline-offset:2px}
+.orders-filter-toggle svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.orders-filter-badge{display:inline-grid;place-items:center;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#0f766e;color:#fff;font-size:10px;line-height:1}
+.orders-filter-badge[hidden],.orders-filter-bar[hidden]{display:none}
+@media(max-width:700px){.orders-search-tools{width:100%}.orders-search-tools .orders-search{width:auto;flex:1}.orders-filter-toggle{padding:0 10px}}
 
 /* Keep module pages focused. The Dashboard keeps its own Create New Order action. */
 .header .header-actions { margin-left: auto; }
@@ -3266,4 +3477,13 @@ body:has(#new-order.active-page) .billing-workspace{height:calc(100% - 60px)}
     font-weight: 700;
     letter-spacing: .015em;
     text-rendering: optimizeLegibility;
+}
+
+/* Split completed unpaid sales into their own Amount Due list. */
+.orders-tab-btn[data-tab="amount_due"].active{background:#a65a0a;border-color:#a65a0a}
+.order-status-pill.due{background:#fff1d6;color:#96540a}
+@media(max-width:700px){
+  #orders .orders-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px}
+  #orders .orders-tabs>.orders-tab-btn{min-width:0;padding:9px 4px;font-size:11px;white-space:nowrap}
+  #orders .orders-header-actions{grid-column:1/-1;margin-left:0}
 }

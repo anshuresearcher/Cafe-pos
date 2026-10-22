@@ -220,6 +220,168 @@
     .guest-details-status{min-height:18px;margin:0;color:#b72d4a;font-size:11px;text-align:center}
     @media(max-width:480px){.guest-details-gate{padding:12px}.guest-details-card{padding:24px 19px;border-radius:25px}.guest-details-fields{grid-template-columns:1fr}}
 </style>
+<style>
+    /* A more considered finish for the guest menu; all of the playful copy stays intact. */
+    :root{
+      --ink:#24212b;
+      --muted:#77727e;
+      --paper:#f7f5ef;
+      --card:#fffefa;
+      --line:#e8e3da;
+      --lime:#d8ed83;
+      --pink:#e99abd;
+      --purple:#8976bd;
+      --red:#b84c59;
+    }
+    body{
+      background:radial-gradient(ellipse at 4% 1%,#efe8f233,transparent 28rem),
+                 radial-gradient(ellipse at 100% 35%,#e9eddb55,transparent 30rem),var(--paper);
+      color:var(--ink);
+      -webkit-font-smoothing:antialiased;
+      text-rendering:optimizeLegibility;
+    }
+    .wrap{width:min(1120px,calc(100% - 40px))}
+    .top{padding:19px 0 16px;margin-bottom:19px;border-bottom:1px solid #e9e5dd}
+    .brand{gap:12px}
+    .brand-mark{width:44px;height:44px;border:1px solid #e5e0e8;border-radius:14px;background:#fff;box-shadow:0 3px 10px #211c2b0b}
+    .brand-name{font-size:17px;font-weight:850;letter-spacing:-.035em}
+    .brand-caption{color:#817b87;font-size:9px;letter-spacing:.15em}
+    .channel{padding:8px 11px;border-color:#dfe4d5;background:#fdfef9;color:#59634b;font-size:9px;letter-spacing:.09em}
+    .guest-action-button{min-height:37px;padding:8px 12px;border-color:#e2ded8;background:#fffefa;color:#46414c;font-size:10px;box-shadow:0 2px 6px #211c2b08}
+    .guest-action-button:hover{border-color:#c9d99b;background:#f8faef}
+    .guest-offers-button{border-color:#34303c;background:#34303c;color:#fff}
+    .guest-offers-button:hover{border-color:#4b4556;background:#4b4556;color:#fff}
+    .guest-current-order-button{border-color:#c8d77e;background:#edf4d2;color:#374020;box-shadow:none}
+    .hero{min-height:340px;padding:clamp(30px,5.5vw,62px);border:1px solid #ffffff16;border-radius:27px;background:linear-gradient(125deg,#24212b 0%,#302b3a 66%,#3a3040 100%);box-shadow:0 20px 48px #211c2b20}
+    .hero:before{background:radial-gradient(circle at 35% 60%,#bd789955,transparent 68%);filter:blur(8px)}
+    .hero:after{background:radial-gradient(circle,#d8ed834d,transparent 70%);filter:blur(8px)}
+    .hero-slide-shade{background:linear-gradient(90deg,#211e2be8 0%,#272330b8 49%,#29243170 100%),linear-gradient(0deg,#211e2b70,transparent 58%)}
+    .hero-kicker{padding:7px 10px;border-color:#ffffff35;background:#ffffff0c;color:#eeeaf0;font-size:9px;letter-spacing:.15em}
+    .hero-kicker span{background:var(--lime);box-shadow:0 0 10px #d8ed8355}
+    .hero h1{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-size:clamp(50px,7.7vw,82px);font-weight:700;line-height:.94;letter-spacing:-.065em;margin:22px 0 14px}
+    .hero h1 em{font-style:italic;color:var(--lime)}
+    .hero p{max-width:440px;color:#d5d1d9;font-size:14px;line-height:1.65}
+    .hero-pills{gap:7px;margin-top:21px}
+    .hero-pills span{padding:7px 10px;border-color:#ffffff25;background:#ffffff0d;color:#f2eff4;font-size:10px;font-weight:700}
+    .hero-plate{filter:drop-shadow(0 18px 20px #0004)}
+    .hero-sticker{padding:10px 14px;border:1px solid #ffffff70;border-radius:11px;background:var(--lime);box-shadow:0 4px 0 #a9ba66;font-size:11px;transform:rotate(4deg)}
+    .hero-spark{color:#e49bb8}
+    .hero-slide-dot.is-active{background:var(--lime)}
+    .qr-public-table-picker{border-color:var(--line);border-radius:13px;background:#fffefa;box-shadow:0 4px 14px #211c2b08}
+    .qr-public-table-picker label{color:#46414c}
+    .qr-public-table-picker select{border-color:#ded9d0;border-radius:9px}
+    .ticker{margin:15px 0 27px;border:1px solid #e2e7d2;border-radius:10px;background:#eef2df;color:#41443a}
+    .ticker-track{gap:19px;padding:9px 15px;font-size:9px;letter-spacing:.16em}
+    .ticker-track span:nth-child(even){color:#9081bd}
+    .offers-panel{gap:10px;margin:16px 0 25px;padding:16px 19px;border-color:#e6e0ec;border-radius:16px;background:linear-gradient(115deg,#fffefa,#faf8fc 75%,#f6f3fa);box-shadow:0 6px 20px #211c2b08}
+    .offers-spark{width:34px;height:34px;border-radius:11px;background:#34303c;color:var(--lime);font-size:16px}
+    .offers-heading h2{font-size:17px;font-weight:850;letter-spacing:-.035em}
+    .offers-heading p{color:#77727e;font-size:10px}
+    .offers-count{border-color:#e7e1ef;background:#fffefa;color:#67558f;font-size:9px}
+    .offer-row{border-color:#ece7ef}
+    .offer-source{color:#806ba9;font-size:8px;letter-spacing:.14em}
+    .offer-copy strong{color:#302c36;font-size:12px;font-weight:750}
+    .offer-copy p{color:#77727e}
+    .offer-value strong{color:#4f426b;font-size:12px}
+    .offers-footer{color:#77727e}
+    .section-head h2{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-size:clamp(27px,4vw,35px);font-weight:700;letter-spacing:-.045em}
+    .section-kicker{color:#81709f;font-size:9px;letter-spacing:.18em}
+    .update-note{color:#817b87;font-size:10px}
+    .search{border-color:#e1ddd5;border-radius:12px;background:#fffefa;box-shadow:0 3px 10px #211c2b08}
+    .search:focus{border-color:#9e8cc7;box-shadow:0 0 0 3px #8976bd20}
+    .search-icon{color:#77727e}
+    .categories{top:8px;gap:6px;padding:6px;border-color:#e8e3da;background:#fffefaf2;box-shadow:0 5px 18px #211c2b12}
+    .category-chip{border-color:#e6e1d9;background:#fffefa;color:#57515d;padding:8px 12px;font-size:10px;font-weight:750}
+    .category-chip:hover{transform:translateY(-1px);border-color:#cfc5df}
+    .category-chip.active{border-color:#34303c;background:#34303c;color:#fff;box-shadow:inset 0 -2px 0 var(--lime)}
+    .dietary-filter{border-color:#e2ded6;background:#fffefa;color:#55564f;font-size:10px;font-weight:750}
+    .dietary-filter.active{border-color:#cad9a3;background:#f0f4e4;color:#3f5b36;box-shadow:0 0 0 2px #e7edd8}
+    .dietary-filter[data-filter="Non-Veg"].active{border-color:#e3c4bd;background:#fbf0ed;color:#854d43;box-shadow:0 0 0 2px #f4e4e0}
+    .grid{gap:16px;padding-bottom:46px}
+    .item{border-color:#e8e3da;border-radius:19px;background:#fffefa;box-shadow:0 5px 18px #211c2b0a;transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease}
+    .item:hover{transform:translateY(-2px);border-color:#d9d1df;box-shadow:0 11px 26px #211c2b13}
+    .item-visual{background:#efede7}
+    .fallback-visual{background:linear-gradient(140deg,hsl(var(--tone) 38% 94%),hsl(calc(var(--tone) + 24) 34% 87%))}
+    .visual-emoji{filter:drop-shadow(0 8px 8px #41334a20)}
+    .visual-tag{border-color:#ffffffa6;background:#fffefaed;color:#4b4650;font-size:8px;font-weight:800;letter-spacing:.09em}
+    .item-copy{padding:15px 16px 16px}
+    .item-category{color:#82719e;font-size:8px;font-weight:850;letter-spacing:.15em}
+    .item-name{color:#292631;font-size:17px;font-weight:800;letter-spacing:-.035em;line-height:1.2}
+    .item-description{color:#77727e;font-size:10px;line-height:1.6}
+    .item-tag{border-radius:5px;font-size:8px;font-weight:700}
+    .item-price-label{color:#89838d;font-size:8px;letter-spacing:.12em}
+    .item-price{color:#292631;font-size:20px;font-weight:850;letter-spacing:-.04em}
+    .qr-add-button,.qr-variant-add{min-height:38px;border:1px solid #34303c;border-radius:10px;background:#34303c;color:#fff;padding:9px 13px;font-size:10px;font-weight:800;box-shadow:0 2px 0 #211c2b12}
+    .qr-add-button:hover,.qr-variant-add:hover{border-color:#4b4556;background:#4b4556;color:#fff}
+    .qr-add-button:disabled,.qr-variant-add:disabled{border-color:#e5e1dc;background:#eeece8;color:#8a8580}
+    .variant-list{gap:6px}
+    .variant-pill{border:1px solid #e5e0eb;border-radius:7px;background:#f8f6fa;color:#675b7c;font-size:9px;font-weight:750}
+    .state-card{border-color:#ddd8e2;border-radius:19px;background:#fffefa}
+    .state-icon{border-radius:15px;background:#f0edf5}
+    .state-card h3{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-weight:700;letter-spacing:-.035em}
+    .state-card button{border-radius:10px;background:#34303c;font-weight:800}
+    .footer{color:#85808a;font-size:9px}
+    .footer span{color:#5c5367}
+    .qr-cart-bar{bottom:max(16px,env(safe-area-inset-bottom));border-color:#ffffff32;border-radius:15px;background:#302c38f5;box-shadow:0 10px 32px #211c2b36}
+    .qr-cart-bar button,.qr-cart-submit,.guest-details-submit{border:0;border-radius:10px;background:#34303c;color:#fff;font-weight:800;box-shadow:inset 0 -2px 0 #d8ed83}
+    .qr-cart-bar button:hover,.qr-cart-submit:hover,.guest-details-submit:hover{background:#494351}
+    .qr-cart-dialog{border-color:#e8e3da;border-radius:20px;background:#fffefa;box-shadow:0 24px 70px #17132042}
+    .qr-cart-dialog h2,.qr-order-type-dialog>h2,.qr-game-dialog h2{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-weight:700;letter-spacing:-.045em}
+    .qr-cart-close{border:1px solid #e7e2da;border-radius:10px;background:#f7f5ef;color:#514b56}
+    .qr-cart-line{border-color:#ebe6de;border-radius:12px;background:#fff}
+    .qr-cart-quantity button{border-radius:8px;background:#f0edf5;color:#625579}
+    .qr-order-note,.guest-details-form input{border-color:#e1ddd5;border-radius:10px;background:#fff}
+    .qr-order-note:focus,.guest-details-form input:focus{border-color:#9e8cc7;box-shadow:0 0 0 3px #8976bd20}
+    .qr-order-type-options button{border-color:#e7e2da;border-radius:13px;background:#fffefa}
+    .qr-order-type-options button:hover{border-color:#cfc5df;box-shadow:0 0 0 3px #8976bd16}
+    .guest-details-gate{background:radial-gradient(circle at 12% 15%,#e99abd30,transparent 24rem),radial-gradient(circle at 88% 82%,#d8ed8333,transparent 26rem),#211d2bc9}
+    .guest-details-card{border-color:#ffffffad;border-radius:23px;background:linear-gradient(150deg,#fffefa,#f8f5f1);box-shadow:0 26px 80px #100d1d65}
+    .guest-details-card:before{background:#e99abd30}
+    .guest-details-kicker{border-radius:8px;background:#34303c;color:var(--lime);font-size:9px;letter-spacing:.15em}
+    .guest-details-card h1{font-family:"Iowan Old Style","Palatino Linotype",Georgia,serif;font-weight:700;letter-spacing:-.055em}
+    .guest-details-submit{min-height:48px;background:#34303c;color:#fff}
+    .guest-details-status{color:#a3434e}
+    .guest-action-button:focus-visible,.category-chip:focus-visible,.dietary-filter:focus-visible,.qr-add-button:focus-visible,.qr-variant-add:focus-visible,.qr-cart-submit:focus-visible,.search:focus-visible{outline:3px solid #8976bd55;outline-offset:3px}
+    @media(max-width:650px){
+      .wrap{width:calc(100% - 28px)}
+      .top{padding:14px 0 13px;margin-bottom:15px}
+      .hero{padding:25px 21px 18px;border-radius:22px}
+      .hero h1{font-size:clamp(49px,14vw,70px);line-height:.96}
+      .hero p{font-size:12px}
+      .hero-pills span{font-size:9px}
+      .ticker{margin:11px 0 21px}
+      .offers-panel{margin:13px 0 20px;padding:13px 14px;border-radius:14px}
+      .section-head h2{font-size:30px}
+      .grid{gap:11px}
+      .item{border-radius:15px}
+      .item-copy{padding:12px}
+      .item-name{font-size:15px}
+      .qr-cart-bar{width:calc(100% - 24px);padding:10px 11px 10px 14px}
+      .qr-cart-bar button{min-height:40px;padding:10px 13px}
+    }
+    @media(max-width:430px){
+      .grid{gap:9px}
+      .item{grid-template-columns:104px minmax(0,1fr)}
+      .item-visual{min-height:132px}
+      .item-copy{padding:10px}
+      .item-name{font-size:14px}
+      .item-price{font-size:17px}
+      .qr-add-button,.qr-variant-add{min-height:34px;padding:7px 9px;font-size:9px}
+    }
+    /* Present menu items as broad, easy-to-scan cards on every screen size. */
+    .grid{grid-template-columns:minmax(0,1fr);gap:13px}
+    .item{display:grid;grid-template-columns:minmax(160px,23%) minmax(0,1fr);align-items:stretch;min-height:176px}
+    .item-visual{height:100%;min-height:176px;aspect-ratio:auto}
+    .item-copy{display:flex;flex-direction:column;justify-content:center;min-width:0;padding:18px 20px}
+    .item-name{margin:8px 0 9px;overflow-wrap:anywhere}
+    .item-bottom{align-items:center;margin-top:auto}
+    .qr-add-button{width:min(220px,100%);margin:12px 0 0 auto}
+    .variant-list{padding-top:10px;border-top:1px solid #eee9e2}
+    @media(max-width:900px){.item{grid-template-columns:minmax(145px,27%) minmax(0,1fr)}}
+    @media(max-width:650px){.item{grid-template-columns:132px minmax(0,1fr);min-height:154px}.item-visual{min-height:154px}.item-copy{padding:13px 14px}.qr-add-button{width:min(190px,100%);min-height:36px;margin-top:9px}}
+    @media(max-width:430px){.item{grid-template-columns:96px minmax(0,1fr);min-height:142px}.item-visual{min-height:142px}.item-copy{padding:10px}.item-name{margin:6px 0 8px}.item-bottom{align-items:flex-start}.qr-add-button{width:100%;margin:9px 0 0}.variant-list{padding-top:8px}}
+    @media(prefers-reduced-motion:reduce){.item,.hero-slide-image,.category-chip,.guest-action-button,.qr-add-button,.qr-variant-add,.qr-cart-bar button,.qr-cart-submit,.guest-details-submit{transition:none!important}}
+</style>
 </head>
 <body class="guest-details-open">
   <div id="guestDetailsGate" class="guest-details-gate" role="presentation">
@@ -415,7 +577,7 @@
     function qrPromoScheduleMatches(item){const zone='Asia/Kolkata',parts=new Intl.DateTimeFormat('en-US',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',weekday:'short',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date()),values=Object.fromEntries(parts.map(part=>[part.type,part.value])),keys={Mon:'mon',Tue:'tue',Wed:'wed',Thu:'thu',Fri:'fri',Sat:'sat',Sun:'sun'},day=keys[values.weekday],week=['mon','tue','wed','thu','fri','sat','sun'],index=week.indexOf(day),previous=week[(index+6)%7],today=values.year+'-'+values.month+'-'+values.day;if(item.startDate&&String(item.startDate)>today)return false;if(item.endDate&&String(item.endDate)<today)return false;const days=Array.isArray(item.days)&&item.days.length?item.days.map(value=>String(value).toLowerCase()):week,startTime=String(item.startTime||''),endTime=String(item.endTime||'');if(Boolean(startTime)!==Boolean(endTime))return false;if(!startTime)return days.includes(day);const parse=value=>{const match=/^([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(value);return match?Number(match[1])*60+Number(match[2]):null},start=parse(startTime),end=parse(endTime),minute=Number(values.hour)*60+Number(values.minute);if(start===null||end===null||start===end)return false;return start<end?days.includes(day)&&minute>=start&&minute<end:(days.includes(day)&&minute>=start)||(days.includes(previous)&&minute<end);}
     function qrAvailablePromotions(){const seen=new Set();return(menuData?.onlinePromotions||[]).filter(item=>{const id=String(item?.id??'');if(!id||seen.has(id)||!qrPromoScheduleMatches(item))return false;seen.add(id);return true;});}
     function qrOfferValue(item){const type=String(item.type||'discount').trim().toLowerCase(),value=Number(item.value||0),valueType=String(item.valueType||'').toLowerCase(),buy=Math.max(1,Number(item.buyQuantity||1)),get=Math.max(1,Number(item.getQuantity||1));if(type==='discount')return value>0?(['percent','percentage'].includes(valueType)?value+'% off':valueType==='price'?'Special price · '+money(value,menuData.currency):money(value,menuData.currency)+' off'):'Discount offer';if(type==='buy x')return'Buy '+buy;if(type==='buy x get x')return'Buy '+buy+' · Get '+get;if(type==='buy x get y'||type==='meal deals')return'Buy '+buy+' · Get '+get+' free';if(type==='voucher')return'Voucher deal';if(type==='payment deals')return'Payment offer';if(type==='slab-based discount')return'Tiered discount';return value>0?String(item.type||'Special offer')+' · '+(['percent','percentage'].includes(valueType)?value+'% off':valueType==='price'?'Special price · '+money(value,menuData.currency):money(value,menuData.currency)+' off'):String(item.type||'Special offer');}
-    function renderOnlinePromotions(){const box=document.getElementById('onlinePromotions'),items=qrAvailablePromotions(),week=[['mon','Mon'],['tue','Tue'],['wed','Wed'],['thu','Thu'],['fri','Fri'],['sat','Sat'],['sun','Sun']];if(!box)return;box.hidden=!items.length;if(!items.length){box.innerHTML='';return;}const offers=items.map(item=>{const days=Array.isArray(item.days)&&item.days.length?week.filter(day=>item.days.map(key=>String(key).toLowerCase()).includes(day[0])).map(day=>day[1]):week.map(day=>day[1]),dayLabel=days.length===7?'Every day':days.join(', '),hours=item.startTime&&item.endTime?item.startTime+'–'+item.endTime:'All day',source=item.source==='marketing'?'Marketing deal':'POS discount',description=String(item.description||'').trim();return'<article class="offer-row"><div class="offer-copy"><span class="offer-source">'+esc(source)+'</span><strong>'+esc(item.name||'Offer')+'</strong>'+(description?'<p>'+esc(description)+'</p>':'')+'</div><div class="offer-value"><strong>'+esc(qrOfferValue(item))+'</strong><small>'+esc(dayLabel)+' · '+esc(hours)+'</small></div></article>';}).join('');box.innerHTML='<header class="offers-heading"><div class="offers-heading-copy"><span class="offers-spark" aria-hidden="true">✦</span><div><h2>Offers</h2><p>QR Menu deals made for your next fave.</p></div></div><span class="offers-count">'+items.length+' '+(items.length===1?'offer':'offers')+'</span></header><div class="offers-grid">'+offers+'</div><p class="offers-footer">For display only · QR orders are not automatically discounted.</p>';}
+    function renderOnlinePromotions(){const box=document.getElementById('onlinePromotions'),items=qrAvailablePromotions(),week=[['mon','Mon'],['tue','Tue'],['wed','Wed'],['thu','Thu'],['fri','Fri'],['sat','Sat'],['sun','Sun']];if(!box)return;box.hidden=!items.length;if(!items.length){box.innerHTML='';return;}const offers=items.map(item=>{const days=Array.isArray(item.days)&&item.days.length?week.filter(day=>item.days.map(key=>String(key).toLowerCase()).includes(day[0])).map(day=>day[1]):week.map(day=>day[1]),dayLabel=days.length===7?'Every day':days.join(', '),hours=item.startTime&&item.endTime?item.startTime+'–'+item.endTime:'All day',description=String(item.description||'').trim();return'<article class="offer-row"><div class="offer-copy"><span class="offer-source">Marketing deal</span><strong>'+esc(item.name||'Offer')+'</strong>'+(description?'<p>'+esc(description)+'</p>':'')+'</div><div class="offer-value"><strong>'+esc(qrOfferValue(item))+'</strong><small>'+esc(dayLabel)+' · '+esc(hours)+'</small></div></article>';}).join('');box.innerHTML='<header class="offers-heading"><div class="offers-heading-copy"><span class="offers-spark" aria-hidden="true">✦</span><div><h2>Offers</h2><p>QR Menu deals made for your next fave.</p></div></div><span class="offers-count">'+items.length+' '+(items.length===1?'offer':'offers')+'</span></header><div class="offers-grid">'+offers+'</div>';}
     const QR_GAME_WINS=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
     let qrGameBoard=Array(9).fill(''),qrGameOver=false,qrGameTurn='X',qrGameWinningCells=[],qrGameRoundToken=0,qrGameScore={player:0,bot:0,draws:0},qrGameReturnFocus=null;
     function qrGameWinner(board=qrGameBoard){for(const cells of QR_GAME_WINS){const mark=board[cells[0]];if(mark&&cells.every(index=>board[index]===mark))return{mark,cells};}return null;}

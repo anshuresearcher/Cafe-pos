@@ -156,15 +156,14 @@ app.use((req, res, next) => {
 const standardJsonParser = express.json({ limit: "100kb" });
 const menuImportJsonParser = express.json({ limit: "25mb" });
 const businessLogoJsonParser = express.json({ limit: "300kb" });
-const publicMenuSettingsJsonParser = express.json({ limit: "2mb" });
+const settingsJsonParser = express.json({ limit: "4mb" });
+const publicMenuSettingsJsonParser = express.json({ limit: "4mb" });
 app.use((req, res, next) => {
-    const parser = req.path === "/api/menu/import"
-        ? menuImportJsonParser
-        : req.path === "/api/business/profile/logo"
-            ? businessLogoJsonParser
-            : req.path === "/api/menu/public-settings"
-                ? publicMenuSettingsJsonParser
-            : standardJsonParser;
+    const parser = req.path === "/api/menu/import" ? menuImportJsonParser
+        : req.path === "/api/business/profile/logo" ? businessLogoJsonParser
+        : req.path === "/api/settings" ? settingsJsonParser
+        : req.path === "/api/menu/public-settings" ? publicMenuSettingsJsonParser
+        : standardJsonParser;
     parser(req, res, next);
 });
 app.use(express.static(path.join(__dirname, "public")));
@@ -1410,25 +1409,11 @@ async function awardLoyaltyForPayment(paymentId, orderId, amount) {
 // HOME
 // =====================================================
 
-app.get("/", async (req, res) => {
-    try {
-        const deviceId = getCookie(req, "cafe_device_id");
-        if (deviceId) {
-            const device = await getRegisteredDevice(deviceId);
-            if (device && device.status === "active") {
-                return res.sendFile(path.join(__dirname, "public", "index.html"));
-            }
-        }
-        return res.sendFile(path.join(__dirname, "public", "device-registration.html"));
-    } catch (e) {
-        console.error("Home route error:", e);
-        return res.sendFile(path.join(__dirname, "public", "device-registration.html"));
-    }
-});
-app.get("/device-registration", (_, res) => res.sendFile(path.join(__dirname, "public", "device-registration.html")));
+app.get("/", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html")));
+app.get("/device-registration", (_, res) => res.redirect("/"));
 app.get("/devices", (_, res) => res.sendFile(path.join(__dirname, "public", "devices.html")));
 app.get("/support", (_, res) => res.sendFile(path.join(__dirname, "public", "support.html")));
-app.get("/register-business", (_, res) => res.sendFile(path.join(__dirname, "public", "register-business.html")));
+app.get("/register-business", (_, res) => res.redirect("/?view=register-business"));
 
 
 
@@ -1788,9 +1773,7 @@ function resolveSaleChannel(settings, channelKey, orderType = null) {
 }
 
 function menuItemChannels(item, settings) {
-    return Array.isArray(item?.sales_channels)
-        ? item.sales_channels.map(value => String(value).trim().toLowerCase()).filter(Boolean)
-        : salesChannelsForSettings(settings).map(channel => channel.key);
+    return normalizeStoredMenuSalesChannels(item?.sales_channels, settings);
 }
 
 function assertMenuItemAvailableOnChannel(item, settings, channelKey) {
@@ -1832,7 +1815,7 @@ function defaultSaleChannelForOrderType(settings, orderType) {
     return channels.find(channel => channel.key === preferred)?.key || channels.find(channel => channel.key === (orderType === "Dine-in" ? "dine_in" : "takeaway"))?.key || channels[0]?.key;
 }
 
-function publicOnlinePromotions(settings, adjustmentRows = [], channelKey = "online") {
+function publicOnlinePromotions(settings, channelKey = "online") {
     const marketing = (Array.isArray(settings?.marketingDeals) ? settings.marketingDeals : []).filter(deal => {
         const channels = Array.isArray(deal.channels) ? deal.channels.map(value => String(value).toLowerCase().replace(/[\s-]+/g, "_")) : [];
         return String(deal?.id || "").trim() && deal?.active !== false && (!channels.length || channels.includes(String(channelKey).toLowerCase()));
@@ -1846,17 +1829,7 @@ function publicOnlinePromotions(settings, adjustmentRows = [], channelKey = "onl
         days: Array.isArray(deal.days) ? deal.days.map(day => String(day).toLowerCase()) : [],
         startTime: deal.startTime || null, endTime: deal.endTime || null
     }));
-    const adjustments = adjustmentRows.filter(rule => {
-        const kind = String(rule.kind || rule.type || "discount").toLowerCase();
-        const applies = String(rule.applies_to || "all").toLowerCase().replace(/-/g, "_");
-        return rule.active !== false && kind === "discount" && ["all", String(channelKey).toLowerCase()].includes(applies) && Number(rule.value) > 0;
-    }).map(rule => ({
-        id: `adjustment:${Number(rule.id)}`, source: "adjustment", sourceId: String(rule.id), name: String(rule.name || "QR Menu discount").slice(0, 120),
-        description: String(rule.description || "").slice(0, 240), type: "discount",
-        valueType: ["percent", "percentage"].includes(String(rule.calculation || rule.value_type || "").toLowerCase()) ? "percent" : "amount",
-        value: Number(rule.value), category: "", itemId: null, itemIds: []
-    }));
-    return [...marketing, ...adjustments];
+    return marketing;
 }
 
 app.get("/public-menu/:token", async (req, res) => {
@@ -1871,14 +1844,13 @@ app.get("/public-menu/:token", async (req, res) => {
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
         const businessId = Number(publication.business_id);
         const data = await tenantContext.run({ businessId }, async () => {
-            const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult, adjustmentResult] = await Promise.all([
+            const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult] = await Promise.all([
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
                 pool.query("SELECT id, name, description, tags, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
                 pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
-                pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId]),
-                pool.query("SELECT id,name,COALESCE(to_jsonb(ba)->>'type',to_jsonb(ba)->>'kind','discount') AS kind,COALESCE(to_jsonb(ba)->>'value_type',to_jsonb(ba)->>'calculation','amount') AS calculation,value,applies_to,description,active FROM billing_adjustments ba WHERE business_id=$1 AND active=TRUE", [businessId])
+                pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId])
             ]);
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
@@ -1937,7 +1909,7 @@ app.get("/public-menu/:token", async (req, res) => {
                 priceChannel,
             priceChannelLabel: qrChannels.find(channel => channel.key === priceChannel)?.label || "Slash",
                 gstCalculationEnabled: settings.gstCalculationEnabled !== false,
-                onlinePromotions: publicOnlinePromotions(settings, adjustmentResult.rows, priceChannel),
+                onlinePromotions: publicOnlinePromotions(settings, priceChannel),
                 categories: categoryResult.rows.map(row => row.name),
                 items,
                 tables: tableResult.rows.map(row => String(row.table_number))
@@ -2535,11 +2507,28 @@ function cleanChannelPrices(value) {
     return result;
 }
 
+function normalizeStoredMenuSalesChannels(value, settings) {
+    const fallback = salesChannelsForSettings(settings).map(channel => channel.key);
+    if (value === undefined || value === null) return fallback;
+    let source = value;
+    if (typeof source === "string") {
+        const raw = source.trim();
+        if (!raw) return [];
+        try {
+            const parsed = JSON.parse(raw);
+            source = Array.isArray(parsed) ? parsed : [parsed];
+        } catch (_) {
+            source = [raw];
+        }
+    }
+    if (!Array.isArray(source)) return [];
+    return [...new Set(source.map(key => String(key || "").trim().toLowerCase().replace(/[\s-]+/g, "_")).filter(Boolean))];
+}
+
 function cleanMenuSalesChannels(value, settings) {
     const allowed = new Set(salesChannelsForSettings(settings).map(channel => channel.key));
     if (value === undefined || value === null) return [...allowed];
-    if (!Array.isArray(value)) throw Object.assign(new Error("Choose at least one active sale channel for this item."), { status: 400 });
-    const selected = [...new Set(value.map(key => String(key || "").trim().toLowerCase()))];
+    const selected = normalizeStoredMenuSalesChannels(value, settings);
     if (!selected.length || selected.some(key => !allowed.has(key))) {
         throw Object.assign(new Error("Choose one or more currently active sale channels for this item."), { status: 400 });
     }
@@ -3113,6 +3102,7 @@ app.get(
     "/api/tables",
     async (req, res) => {
         try {
+            await syncDueReservationsForBusiness(pool, Number(req.user.business_id));
             const result = await pool.query(`
                 SELECT *
                 FROM restaurant_tables
@@ -3835,11 +3825,9 @@ app.get(
                            c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
                            c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
                            c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
-                           COALESCE((
-                               SELECT SUM(p.amount)
-                               FROM payments p
-                               WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
-                           ),0) AS amount_collected,
+                           COALESCE(paid.amount_collected,0) AS amount_collected,
+                           CASE WHEN COALESCE(o.payment_method,'') ~* 'non.?chargeable' THEN 0
+                                ELSE GREATEST(ROUND(o.total-COALESCE(paid.amount_collected,0),2),0) END AS amount_due,
                            COALESCE((
                                SELECT json_agg(json_build_object('item_name',oi.item_name,'quantity',oi.quantity) ORDER BY oi.id)
                                FROM order_items oi
@@ -3852,6 +3840,11 @@ app.get(
                            ), '[]'::json) AS payment_modes
                     FROM orders o
                     LEFT JOIN customers c ON c.id=o.customer_id AND c.business_id=o.business_id
+                    LEFT JOIN LATERAL (
+                        SELECT COALESCE(SUM(p.amount),0) AS amount_collected
+                        FROM payments p
+                        WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
+                    ) paid ON TRUE
                     WHERE o.business_id = $1
                     ORDER BY o.created_at DESC
                     `
@@ -5103,6 +5096,7 @@ app.get(
     async (req, res) => {
 
         try {
+            await syncDueReservationsForBusiness(pool, Number(req.user.business_id));
 
             const result =
                 await pool.query(
@@ -5130,6 +5124,27 @@ app.get(
 
     }
 );
+
+async function syncDueReservationsForBusiness(queryable, businessId) {
+    if (!Number.isInteger(Number(businessId)) || Number(businessId) <= 0) return;
+    await queryable.query(`
+        WITH due_reservations AS (
+            UPDATE reservations
+            SET status='Arrived'
+            WHERE business_id=$1
+              AND status='Confirmed'
+              AND table_number IS NOT NULL
+              AND (reservation_date + reservation_time) <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+            RETURNING business_id, table_number
+        )
+        UPDATE restaurant_tables AS tables
+        SET status='Occupied'
+        FROM due_reservations AS due
+        WHERE tables.business_id=due.business_id
+          AND tables.table_number=due.table_number
+          AND tables.status <> 'Occupied'
+    `, [Number(businessId)]);
+}
 
 
 app.post(
@@ -5391,9 +5406,7 @@ app.put(
 
             if (reservation.table_number) {
 
-                if (
-                    status === "Arrived"
-                ) {
+                if (status === "Arrived") {
 
                     await client.query(
                         `
@@ -5430,13 +5443,24 @@ app.put(
 
             }
 
+            if (status === "Confirmed") {
+                await syncDueReservationsForBusiness(client, Number(req.user.business_id));
+            }
+
+            const finalReservation = status === "Confirmed"
+                ? (await client.query(
+                    "SELECT * FROM reservations WHERE id=$1 AND business_id=$2",
+                    [req.params.id, Number(req.user.business_id)]
+                )).rows[0]
+                : updated;
+
 
             await client.query("COMMIT");
 
 
             res.json({
                 success: true,
-                reservation: updated
+                reservation: finalReservation
             });
 
         } catch (e) {
@@ -8334,13 +8358,15 @@ app.get(
         try {
             const businessId = Number(req.user.business_id);
             const [result, brandingResult] = await Promise.all([pool.query(
-                "SELECT settings FROM app_settings WHERE business_id = $1",
+                "SELECT settings - 'publicMenuHeroImages' AS settings FROM app_settings WHERE business_id = $1",
                 [businessId]
             ), runSystemContext(() => pool.query(
                 "SELECT show_powered_by_cafe_pilot FROM support_business_branding WHERE business_id=$1",
                 [businessId]
             ))]);
-            const settings = result.rows[0]?.settings || {};
+            const settings = { ...(result.rows[0]?.settings || {}) };
+            // Hero photos are fetched by the Table QR module, not with routine POS settings.
+            delete settings.publicMenuHeroImages;
             settings.posSalesChannels = salesChannelsForSettings(settings);
             settings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
             res.json(settings);
@@ -8361,6 +8387,9 @@ app.put(
             delete settings.showPoweredByCafePilot;
             delete settings.marketingDeals;
             delete settings.menuOptionSets;
+            // Hero photos are written through /api/menu/public-settings. Ignore
+            // stale browser copies so regular settings saves stay small.
+            delete settings.publicMenuHeroImages;
             const businessId = Number(req.user.business_id);
 
             const result = await pool.query(
@@ -8370,7 +8399,7 @@ app.put(
                 ON CONFLICT (business_id) DO UPDATE
                 SET settings = COALESCE(app_settings.settings, '{}'::jsonb) || (EXCLUDED.settings - 'marketingDeals' - 'menuOptionSets'),
                     updated_at = CURRENT_TIMESTAMP
-                RETURNING settings, updated_at
+                RETURNING settings - 'publicMenuHeroImages' AS settings, updated_at
                 `,
                 [businessId, JSON.stringify(settings)]
             );
@@ -8379,7 +8408,8 @@ app.put(
                 "SELECT show_powered_by_cafe_pilot FROM support_business_branding WHERE business_id=$1",
                 [businessId]
             ));
-            const savedSettings = result.rows[0].settings || {};
+            const savedSettings = { ...(result.rows[0].settings || {}) };
+            delete savedSettings.publicMenuHeroImages;
             savedSettings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
             res.json({
                 success: true,
@@ -8467,7 +8497,9 @@ app.put("/api/settings/sales-channels", async (req, res) => {
         const qrFallback = channels.find(channel => channel.qrMenu)?.key;
         await client.query("UPDATE public_menu_settings SET price_channel=$1,updated_at=CURRENT_TIMESTAMP WHERE business_id=$2 AND NOT (price_channel=ANY($3::text[]))", [qrFallback, businessId, channels.filter(channel => channel.qrMenu).map(channel => channel.key)]);
         await client.query("COMMIT");
-        res.json({ success: true, channels, settings: nextSettings, marketingDeals: Array.isArray(nextSettings.marketingDeals) ? nextSettings.marketingDeals : [] });
+        const responseSettings = { ...nextSettings };
+        delete responseSettings.publicMenuHeroImages;
+        res.json({ success: true, channels, settings: responseSettings, marketingDeals: Array.isArray(nextSettings.marketingDeals) ? nextSettings.marketingDeals : [] });
     } catch (error) {
         await client.query("ROLLBACK");
         console.error("Save sales channels error:", error);
@@ -9721,6 +9753,35 @@ app.post('/api/support/devices/:id/revoke', supportAuth, async(req,res)=>{
         if(!r.rows.length)return res.status(404).json({error:'Device not found'});
         res.json({success:true,device:r.rows[0]});
     }catch(e){res.status(500).json({error:'Failed to revoke device'});}
+});
+
+app.delete('/api/support/devices/:id', supportAuth, async(req,res)=>{
+    const id=Number(req.params.id);
+    if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Invalid device ID'});
+    try {
+        const result=await runSystemContext(()=>pool.query(`
+            WITH removed AS (
+                DELETE FROM registered_devices
+                WHERE id=$1 AND status='revoked'
+                RETURNING id,business_id,device_name
+            ), detached_keys AS (
+                UPDATE device_registration_keys
+                SET used_device_id=NULL
+                WHERE used_device_id=$1 AND EXISTS (SELECT 1 FROM removed)
+                RETURNING id
+            )
+            SELECT id,business_id,device_name FROM removed
+        `,[id]));
+        if(!result.rows.length){
+            const existing=await runSystemContext(()=>pool.query(`SELECT status FROM registered_devices WHERE id=$1 LIMIT 1`,[id]));
+            if(!existing.rows.length)return res.status(404).json({error:'Device not found'});
+            return res.status(409).json({error:'Only revoked devices can be deleted. Revoke the device first.'});
+        }
+        res.json({success:true,device:result.rows[0]});
+    }catch(e){
+        console.error('Support device deletion error:',e);
+        res.status(500).json({error:'Failed to delete revoked device'});
+    }
 });
 
 app.post('/api/support/registration-keys/:id/revoke', supportAuth, async(req,res)=>{

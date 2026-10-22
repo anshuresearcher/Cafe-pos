@@ -3,4 +3,10 @@ node_modules/
 *.log
 backups/
 desktop-dist/
+android/.gradle/
+android/.gradle-user/
+android/.android-user/
+android/local.properties
+android/app/build/
+android/build/
 cafe_pos_neon_backup.sql

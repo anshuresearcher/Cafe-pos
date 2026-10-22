@@ -140,6 +140,9 @@
 #loginCard .device-registration-panel { margin-top: 16px; padding-top: 16px; border-color: #edf0eb; }
 #loginCard .device-registration-trigger { min-height: 44px; border-color: #e4e9e4; border-radius: 10px; background: #f8faf8; color: #53655a; font-size: 12px; }
 #loginCard .device-registration-trigger:hover { border-color: #cbd8ce; background: #f0f5f1; }
+#loginCard .login-flow-loading { display: grid; min-height: 170px; place-items: center; color: var(--login-muted); font-size: 13px; }
+#loginCard .login-common-actions { position: sticky; bottom: 0; z-index: 3; margin-top: 17px; padding-top: 10px; background: linear-gradient(180deg, rgba(255,255,255,0), #fff 14px); }
+#loginCard .login-common-actions .register-business-link { margin-top: 0; }
 #loginCard #registerView h1,
 #loginCard #deviceRegistrationView h1 { margin: 0 0 8px; color: var(--login-ink); font-size: 26px; letter-spacing: -.035em; text-align: left; }
 #loginCard #registerView > p,
@@ -198,4 +201,13 @@ body.desktop-mode #loginCard.login-card {
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
+}
+
+/* Match the sign-in wordmark to the main Slash brand treatment. */
+.login-brand-name strong {
+    font-family: "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    font-size: 21px;
+    font-weight: 700;
+    letter-spacing: .015em;
+    text-rendering: optimizeLegibility;
 }

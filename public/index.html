@@ -194,12 +194,13 @@
         <div class="login-brand-footer"><span></span>Made for the rhythm of café service</div>
     </aside>
     <div id="loginCard" class="login-card">
-        <div id="loginView">
+        <div id="loginFlowLoading" class="login-flow-loading" role="status" aria-live="polite">Checking device registration…</div>
+        <div id="loginView" style="display:none;">
         <div class="login-logo">☕</div>
         <h1>Welcome back</h1>
         <p>Sign in to your Slash workspace.</p>
         <div id="loginBusinessWelcome" class="login-business-welcome" hidden>
-            <span id="loginBusinessWelcomeCopy">Welcome back to</span>
+            <span id="loginBusinessWelcomeCopy">Current registered business</span>
             <strong id="loginBusinessName"></strong>
         </div>
         <form onsubmit="loginUser(event)">
@@ -210,12 +211,6 @@
             <button class="big-btn login-btn" type="submit">Sign in</button>
             <div id="loginError" class="login-error"></div>
         </form>
-        <button type="button" class="register-business-link" onclick="showRegisterBusiness()">🏪 Create a new cafe business</button>
-        <div class="device-registration-panel">
-            <button type="button" class="device-registration-trigger" onclick="showDeviceRegistrationView()">
-                🔑 Register this device with a Registration Key
-            </button>
-        </div>
         </div>
 
         <div id="registerView" style="display:none;">
@@ -250,7 +245,7 @@
                 <button class="big-btn login-btn" type="submit">Create Business</button>
                 <div id="registerError" class="login-error"></div>
             </form>
-            <button type="button" class="register-business-link" onclick="showLoginView()">← Back to login</button>
+            <button id="registerBusinessBackButton" type="button" class="register-business-link" onclick="showLoginView()">← Back to device registration</button>
         </div>
 
         <div id="deviceRegistrationView" class="device-registration-view">
@@ -302,9 +297,9 @@
                 use the normal Slash POS username and password to log in.
             </div>
 
-            <button type="button" class="device-registration-secondary" onclick="showLoginViewFromDeviceRegistration()">
-                ← Back to user login
-            </button>
+        </div>
+        <div class="login-common-actions">
+            <button type="button" class="register-business-link" onclick="showRegisterBusiness()">＋ Register New Business</button>
         </div>
     </div>
 </div>
@@ -314,6 +309,25 @@
          SIDEBAR
          ===================================================== -->
 
+    <svg class="module-icon-library" aria-hidden="true" focusable="false">
+        <symbol id="module-icon-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+        <symbol id="module-icon-orders" viewBox="0 0 24 24"><path d="M7 3h8l4 4v14H7z"/><path d="M15 3v5h5M10 12h6M10 16h6"/></symbol>
+        <symbol id="module-icon-reservations" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18M8 14h3M8 17h6"/></symbol>
+        <symbol id="module-icon-tables" viewBox="0 0 24 24"><path d="M3 7h18M5 7v13M19 7v13M3 12h18M8 12v5h8v-5"/></symbol>
+        <symbol id="module-icon-kitchen" viewBox="0 0 24 24"><path d="M6 13a6 6 0 0 1 12 0v2H6zM4 15h16v3H4zM8 21h8M12 4V2M6 6 4.5 4.5M18 6l1.5-1.5"/></symbol>
+        <symbol id="module-icon-kot" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5zM3 12l9 5 9-5M3 16l9 5 9-5"/></symbol>
+        <symbol id="module-icon-menu" viewBox="0 0 24 24"><path d="M7 3v7M4 3v4a3 3 0 0 0 6 0V3M7 10v11M17 3c-2 3-3 6-3 9h4v9M18 3v9"/></symbol>
+        <symbol id="module-icon-qr" viewBox="0 0 24 24"><path d="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5"/><path d="M7 7h3v3H7zM14 7h3v3h-3zM7 14h3v3H7zM14 14h2M17 17h3M14 18v2"/></symbol>
+        <symbol id="module-icon-customers" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0M16 5.5a3.5 3.5 0 0 1 0 6.8M18 14a5 5 0 0 1 3.5 5"/></symbol>
+        <symbol id="module-icon-reports" viewBox="0 0 24 24"><path d="M4 20V11h4v9M10 20V4h4v16M16 20v-7h4v7M3 20h18"/></symbol>
+        <symbol id="module-icon-settings" viewBox="0 0 24 24"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="5"/></symbol>
+        <symbol id="module-icon-printer" viewBox="0 0 24 24"><path d="M7 8V3h10v5M6 17H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M7 14h10v7H7zM18 11h.01"/></symbol>
+        <symbol id="module-icon-access" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"/></symbol>
+        <symbol id="module-icon-expenses" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 9h18M16 14h2M7 5V3h10v2"/></symbol>
+        <symbol id="module-icon-marketing" viewBox="0 0 24 24"><path d="M3 10v4h4l11 5V5L7 10zM7 14l2 6h4l-2-4M21 9v6"/></symbol>
+        <symbol id="module-icon-advanced" viewBox="0 0 24 24"><path d="m3 17 6-6 4 3 8-9M15 5h6v6M3 21h18"/></symbol>
+    </svg>
+
     <aside class="sidebar">
 
         <div class="billing-brand-row">
@@ -321,9 +335,9 @@
             <h2><span class="brand-default">Slash</span><span class="billing-brand-label">Slash</span></h2>
         </div>
         <nav class="billing-flow-nav" aria-label="Point of sale">
-            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">MY ORDERS</button>
-            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('new-order')">TAKE NEW ORDER</button>
-            <button type="button" class="billing-flow-link" onclick="document.body.classList.remove('billing-nav-open');showPage('table-view')">TABLE VIEW</button>
+            <button type="button" class="billing-flow-link" data-pos-flow-page="orders" onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">MY ORDERS</button>
+            <button type="button" class="billing-flow-link" data-pos-flow-page="new-order" onclick="document.body.classList.remove('billing-nav-open');showPage('new-order')">TAKE NEW ORDER</button>
+            <button type="button" class="billing-flow-link" data-pos-flow-page="table-view" onclick="document.body.classList.remove('billing-nav-open');showPage('table-view')">TABLE VIEW</button>
         </nav>
         <nav class="app-module-nav" aria-label="App modules">
             <div class="module-drawer-header">
@@ -331,103 +345,22 @@
                 <button type="button" class="module-drawer-close" aria-label="Close app menu" onclick="document.body.classList.remove('billing-nav-open')">&times;</button>
             </div>
             <div class="module-drawer-caption">SLASH SUPPORT</div>
-
-
-        <button
-            class="nav-btn active"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('dashboard')">
-
-            📊 Dashboard
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('orders')">
-
-            🧾 Orders
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('reservations')">
-
-            📅 Reservations
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('tables')">
-
-            🪑 Tables
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('kitchen')">
-
-            👨‍🍳 Kitchen
-
-        </button>
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('kot-groups')">
-
-            🧩 KOT Groups
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('menu')">
-
-            🍔 Menu
-
-        </button>
-
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('table-qr-menu')">
-            ▦ Table QR Menu
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('customers')">
-
-            👥 Customers
-
-        </button>
-
-
-        <button
-            class="nav-btn"
-            onclick="document.body.classList.remove('billing-nav-open');showPage('reports')">
-
-            📊 Reports
-
-        </button>
-
-
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('settings')">
-            ⚙️ Settings
-        </button>
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('printer')">🖨️ Printer</button>
-
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('access')">🔐 Access</button>
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')">💸 Expenses</button>
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')">📣 Marketing</button>
-
-        <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('advanced-reports')">📈 Advanced Reports</button>
-
+            <button class="nav-btn active" onclick="document.body.classList.remove('billing-nav-open');showPage('dashboard')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-dashboard"></use></svg>Dashboard</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('new-order')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-orders"></use></svg>Billing &amp; orders</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('reservations')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-reservations"></use></svg>Reservations</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('tables')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-tables"></use></svg>Tables</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('kitchen')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-kitchen"></use></svg>Kitchen</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('kot-groups')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-kot"></use></svg>KOT Groups</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('menu')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-menu"></use></svg>Menu</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('table-qr-menu')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-qr"></use></svg>Table QR Menu</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('customers')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-customers"></use></svg>Customers</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('reports')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-reports"></use></svg>Reports</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('settings')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-settings"></use></svg>Settings</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('printer')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-printer"></use></svg>Printer</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('access')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-access"></use></svg>Access</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-expenses"></use></svg>Expenses</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-marketing"></use></svg>Marketing</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('advanced-reports')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-advanced"></use></svg>Advanced Reports</button>
         </nav>
 
     </aside>
@@ -590,15 +523,6 @@
                 </button>
 
 
-                <button
-                    class="big-btn"
-                    onclick="showPage('menu')">
-
-                    🍔 View Menu
-
-                </button>
-
-
             </div>
 
 
@@ -668,7 +592,7 @@
                         <div id="cartItems" class="billing-cart-items"><p class="empty">Select a table and add items.</p></div>
 
                         <div id="billingCustomerPanel" class="billing-customer-panel" role="region" aria-label="Customer information">
-                            <div class="billing-panel-title"><span>👤 Customer</span><span class="billing-muted">Optional</span></div>
+                            <div class="billing-panel-title"><span>👤 Customer</span><span id="billingCustomerRequirementLabel" class="billing-muted">Optional</span></div>
                             <div class="billing-customer-modes" role="group" aria-label="Customer lookup type">
                                 <button type="button" class="billing-customer-mode active" data-lookup-mode="phone" onclick="setBillingCustomerLookupMode('phone', this)">Mobile Number</button>
                                 <button type="button" class="billing-customer-mode" data-lookup-mode="id" onclick="setBillingCustomerLookupMode('id', this)">Customer ID</button>
@@ -691,7 +615,7 @@
                                     <label class="billing-customer-detail-field">State <span class="billing-muted">Optional</span><input id="billingCustomerStateQuick" type="text" maxlength="100" placeholder="State" autocomplete="address-level1"></label>
                                 </div>
                             </div>
-                            <button type="button" class="billing-customer-next" onclick="closeBillingCustomerPanel()">Next: Add Items <span aria-hidden="true">&rarr;</span></button>
+                            <button type="button" class="billing-customer-next" onclick="continueFromBillingCustomerPanel()">Next: Add Items <span aria-hidden="true">&rarr;</span></button>
                         </div>
 
                         <div class="form-group billing-notes">
@@ -750,12 +674,19 @@
                 <button type="button" class="orders-tab-btn active" data-tab="open" onclick="switchOrdersTab('open')">Open <span id="openOrdersCount">0</span></button>
                 <button type="button" class="orders-tab-btn" data-tab="closed" onclick="switchOrdersTab('closed')">Closed <span id="closedOrdersCount">0</span></button>
                 <button type="button" class="orders-tab-btn" data-tab="cancelled" onclick="switchOrdersTab('cancelled')">Cancelled <span id="cancelledOrdersCount">0</span></button>
+                <button type="button" class="orders-tab-btn" data-tab="amount_due" onclick="switchOrdersTab('amount_due')">Amount Due <span id="amountDueOrdersCount">0</span></button>
                 <div class="orders-header-actions">
-                    <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
+                    <div class="orders-search-tools">
+                        <button id="ordersFilterToggle" type="button" class="orders-filter-toggle" onclick="toggleOrdersFilters()" aria-expanded="false" aria-controls="ordersFilterBar" title="Show order filters">
+                            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M7 12h10m-7 6h4"/><circle cx="8" cy="6" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="12" cy="18" r="1.5"/></svg>
+                            <span>Filters</span><span id="ordersFilterBadge" class="orders-filter-badge" hidden>0</span>
+                        </button>
+                        <label class="orders-search" for="ordersSearch"><span aria-hidden="true">⌕</span><input id="ordersSearch" type="search" placeholder="Search order, table, customer…" autocomplete="off" oninput="filterOrders()"><button type="button" onclick="clearOrdersSearch()" aria-label="Clear order search">×</button></label>
+                    </div>
                     <button type="button" class="big-btn orders-new-order-btn" onclick="showPage('new-order')">＋ New Order</button>
                 </div>
             </div>
-            <div class="orders-filter-bar" aria-label="Advanced order search">
+            <div id="ordersFilterBar" class="orders-filter-bar" aria-label="Advanced order search" hidden>
                 <label><span>Status</span><select id="ordersStatusFilter" onchange="filterOrders()"><option value="">Use selected tab</option><option value="open">Open</option><option value="closed">Closed</option><option value="cancelled">Cancelled</option></select></label>
                 <label><span>From date</span><input id="ordersDateFrom" type="date" onchange="filterOrders()"></label>
                 <label><span>To date</span><input id="ordersDateTo" type="date" onchange="filterOrders()"></label>
@@ -794,7 +725,7 @@
 
         <section
             id="reservations"
-            class="page">
+            class="page reservations-page">
 
 
             <h2>
@@ -830,39 +761,14 @@
 
                 <div
                     id="reservationForm"
-                    style="display:none;">
-
-
-                    <input
-                        type="text"
-                        id="reservationCustomerName"
-                        placeholder="Customer Name">
-
-
-                    <input
-                        type="text"
-                        id="reservationPhone"
-                        placeholder="Phone Number">
-
-
-                    <input
-                        type="date"
-                        id="reservationDate">
-
-
-                    <input
-                        type="time"
-                        id="reservationTime">
-
-
-                    <input
-                        type="number"
-                        id="reservationGuests"
-                        placeholder="Number of Guests"
-                        min="1">
-
-
-                    <select id="reservationTable">
+                    class="reservation-create-form"
+                    hidden>
+                    <label class="reservation-form-field">Customer name<input type="text" id="reservationCustomerName" placeholder="Guest name" autocomplete="name" required></label>
+                    <label class="reservation-form-field">Phone number<input type="tel" id="reservationPhone" placeholder="Phone number" autocomplete="tel" required></label>
+                    <label class="reservation-form-field">Reservation date<input type="date" id="reservationDate" required></label>
+                    <label class="reservation-form-field">Reservation time<input type="time" id="reservationTime" required></label>
+                    <label class="reservation-form-field">Guests<input type="number" id="reservationGuests" placeholder="Number of guests" min="1" required></label>
+                    <label class="reservation-form-field">Table<select id="reservationTable">
 
 
                         <option value="">
@@ -900,24 +806,9 @@
                         </option>
 
 
-                    </select>
-
-
-                    <input
-                        type="text"
-                        id="reservationNotes"
-                        placeholder="Notes (optional)">
-
-
-                    <button
-                        class="big-btn"
-                        onclick="addReservation()">
-
-                        Save Reservation
-
-                    </button>
-
-
+                    </select></label>
+                    <label class="reservation-form-field reservation-form-notes">Notes <span>Optional</span><input type="text" id="reservationNotes" placeholder="Seating or occasion notes"></label>
+                    <div class="reservation-form-actions"><button type="button" class="cancel-btn" onclick="openReservationForm()">Cancel</button><button type="button" class="big-btn" onclick="addReservation()">Save Reservation</button></div>
                 </div>
 
 
@@ -965,6 +856,7 @@
                                 <th>
                                     Status
                                 </th>
+                                <th>Actions</th>
 
                             </tr>
 
@@ -1141,7 +1033,7 @@
 
         <section
             id="customers"
-            class="page">
+            class="page customers-page">
 
 
             <h2>
@@ -1179,36 +1071,12 @@
 
                 <div
                     id="customerForm"
-                    style="display:none;">
-
-
-                    <input
-                        type="text"
-                        id="customerName"
-                        placeholder="Customer Name">
-
-
-                    <input
-                        type="text"
-                        id="customerPhone"
-                        placeholder="Phone Number">
-
-
-                    <input
-                        type="email"
-                        id="customerEmail"
-                        placeholder="Email">
-
-
-                    <button
-                        class="big-btn"
-                        onclick="addCustomer()">
-
-                        Save Customer
-
-                    </button>
-
-
+                    class="customer-create-form"
+                    hidden>
+                    <label class="customer-form-field">Customer name<input type="text" id="customerName" placeholder="Full name" autocomplete="name" required></label>
+                    <label class="customer-form-field">Phone number<input type="tel" id="customerPhone" placeholder="Phone number" autocomplete="tel" required></label>
+                    <label class="customer-form-field">Email <span>Optional</span><input type="email" id="customerEmail" placeholder="name@example.com" autocomplete="email"></label>
+                    <div class="customer-form-actions"><button type="button" class="cancel-btn" onclick="openCustomerForm()">Cancel</button><button type="button" class="big-btn" onclick="addCustomer()">Save Customer</button></div>
                 </div>
 
 
@@ -1754,6 +1622,12 @@
                 <h3>💱 General / Currency</h3>
                 <div class="form-group"><label>Currency</label><input id="settingCurrency" type="text" maxlength="5" value="₹"></div>
                 <div class="form-group"><label>GST Rate (%)</label><input id="settingGstRate" type="number" min="0" max="100" step="0.01" value="5"></div>
+            </div>
+            <div class="settings-card customer-info-requirements-card" data-settings-feature="customer-details" hidden>
+                <div class="settings-master-header">
+                    <div><span class="eyebrow">BILLING EXPERIENCE</span><h3>👤 Customer Details by Sale Channel</h3><p class="access-muted">Choose whether customer details are optional or required when billing on each channel. Required means customer name and mobile number; the other fields remain optional.</p></div>
+                </div>
+                <div id="customerInfoRequirementsRows" class="customer-info-requirements-list"></div>
             </div>
         </div>
 
@@ -2497,7 +2371,7 @@
       </div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Availability & Prices</h3><p>Choose where guests can order this item and set a different price for each channel.</p></div></div><div id="menuChannelAvailability" class="menu-channel-availability"></div><div id="menuChannelPriceGrid" class="menu-channel-price-grid"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
-      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach saved option sets such as milk choice, add-ons or spice level.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></div>
+      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach saved choices such as milk options, add-ons or spice levels.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><details id="menuOptionSetDisclosure" class="menu-option-set-disclosure"><summary><span class="menu-option-set-disclosure-copy"><span class="menu-option-set-add-mark" aria-hidden="true">＋</span><span><strong>Add item options</strong><small id="menuOptionSetSelectionSummary">No options selected</small></span></span><svg class="menu-option-set-disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7 5 5 5-5"/></svg></summary><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></details></div>
       <div class="modal-actions"><button class="big-btn" onclick="saveMenuItemV2()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
     <div id="menuPriceModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="menuPriceModalTitle">
       <div class="modal-content menu-price-modal-content">
@@ -2512,7 +2386,7 @@
       </div>
     </div>
     <div id="variantPickerModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Select Variant</h2><button class="close-btn" onclick="closeVariantPicker()">✕</button></div><div id="variantPickerBody"></div></div></div>
-    <div id="itemOptionsModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Choose Item Options</h2><button class="close-btn" onclick="closeItemOptions()">✕</button></div><div id="itemOptionsBody"></div><div class="modal-actions"><button type="button" class="big-btn" onclick="confirmItemOptions()">Add to Order</button><button type="button" class="cancel-btn" onclick="closeItemOptions()">Cancel</button></div></div></div>
+    <div id="itemOptionsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="itemOptionsTitle"><div class="modal-content variant-picker-modal"><div class="modal-header item-option-modal-header"><div><span class="menu-eyebrow">CUSTOMIZE ORDER</span><h2 id="itemOptionsTitle">Choose item options</h2></div><button type="button" class="close-btn" onclick="closeItemOptions()" aria-label="Close item options">✕</button></div><div id="itemOptionsBody"></div><div class="modal-actions"><button type="button" class="big-btn" onclick="confirmItemOptions()">Add to Order</button><button type="button" class="cancel-btn" onclick="closeItemOptions()">Cancel</button></div></div></div>
     <div id="menuOptionSetsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="optionSetModalTitle">
       <div class="modal-content option-sets-modal option-set-builder-modal">
         <div class="modal-header option-set-modal-header">
@@ -2881,6 +2755,7 @@
             if (login) login.style.display = "none";
             if (register) register.style.display = "none";
             if (device) device.style.display = "block";
+            document.getElementById("loginCard")?.classList.remove("registration-mode");
 
             const name = document.getElementById("deviceRegistrationName");
             if (name && !name.value) name.value = defaultDeviceName;
@@ -2899,6 +2774,10 @@
         };
 
         window.showLoginViewFromDeviceRegistration = function () {
+            if (window.loginDeviceRegistered !== true) {
+                window.showDeviceRegistrationView();
+                return;
+            }
             const device = document.getElementById("deviceRegistrationView");
             const register = document.getElementById("registerView");
             const login = document.getElementById("loginView");
@@ -2906,6 +2785,7 @@
             if (device) device.style.display = "none";
             if (register) register.style.display = "none";
             if (login) login.style.display = "block";
+            document.getElementById("loginCard")?.classList.remove("registration-mode");
 
             const user = document.getElementById("loginUsername");
             if (user) user.focus();
@@ -2966,6 +2846,9 @@
                 }
 
                 const businessName = data?.business?.business_name || "your cafe";
+                if (typeof cacheLoginBusinessName === "function") {
+                    cacheLoginBusinessName(data?.business?.business_name || "");
+                }
 
                 setDeviceRegistrationMessage(
                     "Device registered successfully for " + businessName +
@@ -2976,11 +2859,7 @@
                 if (keyInput) keyInput.value = "";
 
                 setTimeout(() => {
-                    const device = document.getElementById("deviceRegistrationView");
-                    const login = document.getElementById("loginView");
-
-                    if (device) device.style.display = "none";
-                    if (login) login.style.display = "block";
+                    window.setLoginDeviceRegistrationState?.(true);
 
                     const username = document.getElementById("loginUsername");
                     if (username) username.focus();
@@ -3239,10 +3118,10 @@ Visit Again 😊</p>
             <button class="close-btn" type="button" onclick="closeBillingAdjustmentsDialog()" aria-label="Close">✕</button>
         </div>
         <div class="billing-adjustment-dialog-grid">
-            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading"><span>−</span><div><strong>Discount</strong><small>Reduce the bill total</small></div></div><label for="billingDiscountSelect">Choose a discount</label><select id="billingDiscountSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No discount</option></select><small id="billingDiscountRuleHelp" class="billing-adjustment-rule-help">No discount selected.</small></div>
+            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading"><span>−</span><div><strong>Discount</strong><small>Reduce the bill total</small></div></div><label for="billingDiscountSelect">Choose a discount</label><select id="billingDiscountSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No discount</option></select><small id="billingDiscountRuleHelp" class="billing-adjustment-rule-help" role="status" aria-live="polite">No discount selected.</small></div>
             <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading charge"><span>＋</span><div><strong>Charge</strong><small>Add a service charge</small></div></div><label for="billingChargeSelect">Choose a charge</label><select id="billingChargeSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No charge</option></select><small id="billingChargeRuleHelp" class="billing-adjustment-rule-help">No charge selected.</small></div>
         </div>
-        <div class="billing-adjustments-dialog-footer"><span id="billingAdjustmentDialogTotal">Order total: ₹0</span><div><button type="button" class="table-action-btn" onclick="clearBillingAdjustmentsDialog()">Clear selections</button><button type="button" class="cancel-btn" onclick="closeBillingAdjustmentsDialog()">Cancel</button><button type="button" class="big-btn" onclick="closeBillingAdjustmentsDialog()">Apply</button></div></div>
+        <div class="billing-adjustments-dialog-footer"><span id="billingAdjustmentDialogTotal">Order total: ₹0</span><div><button type="button" class="table-action-btn" onclick="clearBillingAdjustmentsDialog()">Clear selections</button><button type="button" class="cancel-btn" onclick="closeBillingAdjustmentsDialog()">Cancel</button><button type="button" id="billingAdjustmentApplyButton" class="big-btn" onclick="closeBillingAdjustmentsDialog()">Apply</button></div></div>
         <button type="button" class="billing-adjustment-create-link" onclick="closeBillingAdjustmentsDialog();openBillingAdjustmentModal()">＋ Create a discount or charge rule</button>
     </div>
 </div>
@@ -3250,20 +3129,12 @@ Visit Again 😊</p>
 <div id="businessAboutModal" class="modal">
     <div class="business-about-dialog">
         <div class="business-about-brand"><span class="business-about-mark">☕</span><div><strong>Slash</strong><span>Business information</span></div><button type="button" onclick="closeBusinessAbout()" aria-label="Close About">✕</button></div>
-        <h2 id="aboutBusinessName">Current Business</h2>
-        <p id="aboutBusinessMeta" class="business-about-meta"></p>
         <div class="business-about-grid">
             <div><span>Branch</span><strong id="aboutBranch">—</strong></div>
             <div><span>Business type</span><strong id="aboutBusinessType">—</strong></div>
-            <div><span>Owner</span><strong id="aboutOwner">—</strong></div>
             <div><span>Device</span><strong id="aboutDevice">—</strong></div>
-            <div><span>Phone</span><strong id="aboutPhone">—</strong></div>
-            <div><span>Email</span><strong id="aboutEmail">—</strong></div>
-            <div class="business-about-wide"><span>Address</span><strong id="aboutAddress">—</strong></div>
-            <div><span>GSTIN</span><strong id="aboutGstin">—</strong></div>
-            <div><span>Currency</span><strong id="aboutCurrency">—</strong></div>
         </div>
-        <div class="business-about-footer"><span>POS version</span><strong>Slash · Phase 2</strong></div>
+        <div class="business-about-footer"><span>POS version</span><strong>Slash · 1.0.0.0</strong></div>
         <button type="button" class="big-btn" onclick="closeBusinessAbout()">Close</button>
     </div>
 </div>

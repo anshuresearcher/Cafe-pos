@@ -11,7 +11,8 @@
   "scripts": {
     "start": "node server.js",
     "desktop:dev": "electron .",
-    "desktop:build:win": "electron-builder --win nsis --x64 --publish never"
+    "desktop:build:win": "electron-builder --win nsis --x64 --publish never",
+    "android:build": "powershell -NoProfile -File android/build.ps1"
   },
   "dependencies": {
     "cors": "^2.8.6",
