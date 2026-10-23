@@ -3,7 +3,15 @@ require("dotenv").config();
 const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
+const pg = require("pg");
+const { Pool } = pg;
+// PostgreSQL TIMESTAMP columns in this app store UTC wall-clock values. The
+// default pg parser interprets timezone-less values in the Node host timezone,
+// which shifts them when the browser later formats them for Asia/Kolkata.
+pg.types.setTypeParser(1114, value => {
+    const timestamp = String(value).replace(" ", "T").replace(/\.(\d{3})\d+$/, ".$1");
+    return new Date(`${timestamp}Z`);
+});
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const os = require("os");
@@ -119,6 +127,7 @@ const publicRateLimiters = {
     registration: createPublicRateLimiter('registration', 60 * 60 * 1000, 5),
     qrOrder: createPublicRateLimiter('qr-order', 10 * 60 * 1000, 20),
     qrCustomer: createPublicRateLimiter('qr-customer', 10 * 60 * 1000, 10),
+    qrAnalytics: createPublicRateLimiter('qr-analytics', 10 * 60 * 1000, 240),
     qrTracking: createPublicRateLimiter('qr-tracking', 60 * 1000, 60),
     deviceRegistration: createPublicRateLimiter('device-registration', 60 * 60 * 1000, 10)
 };
@@ -140,6 +149,7 @@ app.use((req, res, next) => {
     else if (method === 'POST' && route === '/api/public/device/register') limiter = publicRateLimiters.deviceRegistration;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/orders$/i.test(route)) limiter = publicRateLimiters.qrOrder;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/customers$/i.test(route)) limiter = publicRateLimiters.qrCustomer;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/analytics$/i.test(route)) limiter = publicRateLimiters.qrAnalytics;
     else if (method === 'GET' && /^\/public-menu\/[a-f0-9]{48}\/orders\/\d+$/i.test(route)) limiter = publicRateLimiters.qrTracking;
     return limiter ? limiter(req, res, next) : next();
 });
@@ -899,6 +909,7 @@ function permissionForRequest(req) {
     if (path === '/billing-adjustments' || path.startsWith('/billing-adjustments/')) return method === 'GET' ? 'settings.view' : 'settings.edit';
     if (path.startsWith('/system/')) return 'deployment.view';
     if (path === '/license/status') return 'settings.view';
+    if (path === '/qr-service-requests' || path.startsWith('/qr-service-requests/')) return method === 'GET' ? 'qr_service_requests.view' : 'qr_service_requests.manage';
     if (path === '/printers' || path.startsWith('/printers/')) {
         if (path.endsWith('/test') || path.endsWith('/print')) return req.query?.source === 'kot' ? 'kitchen.print' : req.query?.source === 'order' ? 'orders.print_open' : 'printer.print';
         if (method === 'GET') return req.query?.source === 'order' ? 'orders.print_open' : 'printer.view';
@@ -1040,7 +1051,9 @@ async function requireAuth(req, res, next) {
             const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
             const hasRequestedPermission = required === "orders.cancel"
                 ? ["orders.edit_open", "orders.edit", "orders.cancel_closed"].some(key => permissions[key] === true)
-                : permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
+                : required === "qr_service_requests.view"
+                    ? ["orders.view", "tables.view", "kitchen.view", "new_order.view", "dashboard.view"].some(key => permissions[key] === true)
+                    : permissions[required] === true || (required === "orders.edit_open" && ["orders.edit", "orders.edit_after_print", "orders.edit_closed"].some(key => permissions[key] === true));
             const ownerDefaults = user.is_owner === true && user.permissions_override === null;
             if (!ownerDefaults && !hasRequestedPermission) {
                 return res.status(403).json({ error: "Permission denied: " + required });
@@ -1174,10 +1187,32 @@ async function ensureBusinessTables() {
         enabled BOOLEAN NOT NULL DEFAULT FALSE,
         price_channel VARCHAR(64) NOT NULL DEFAULT 'online',
         public_base_url TEXT,
+        category_order JSONB NOT NULL DEFAULT '[]'::jsonb,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`);
     await pool.query(`ALTER TABLE public_menu_settings ALTER COLUMN price_channel TYPE VARCHAR(64)`);
     await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS public_base_url TEXT");
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS category_order JSONB NOT NULL DEFAULT '[]'::jsonb");
+    await pool.query(`CREATE TABLE IF NOT EXISTS qr_menu_events (
+        id BIGSERIAL PRIMARY KEY,
+        business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
+        session_key VARCHAR(64) NOT NULL,
+        event_type VARCHAR(32) NOT NULL,
+        item_count INTEGER NOT NULL DEFAULT 0,
+        order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qr_menu_events_business_time ON qr_menu_events(business_id,created_at DESC)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qr_menu_events_business_session ON qr_menu_events(business_id,session_key,created_at DESC)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS qr_service_requests (
+        id BIGSERIAL PRIMARY KEY,
+        business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+        table_number VARCHAR(80) NOT NULL,
+        request_type VARCHAR(32) NOT NULL CHECK (request_type IN ('clean_table','call_waiter')),
+        status VARCHAR(24) NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_qr_service_requests_business_time ON qr_service_requests(business_id,id DESC)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS public_menu_push_subscriptions (
         id SERIAL PRIMARY KEY,
         business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
@@ -1204,6 +1239,8 @@ async function ensureBusinessTables() {
     )`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_marketing_push_campaigns_business ON marketing_push_campaigns(business_id, created_at DESC)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS public_tracking_token VARCHAR(64)`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS public_session_key VARCHAR(64)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_orders_public_session_active ON orders(business_id,public_session_key,id DESC) WHERE public_session_key IS NOT NULL AND status NOT IN ('Completed','Cancelled')`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS variant_id INTEGER REFERENCES menu_variants(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit VARCHAR(20)`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(6,2) NOT NULL DEFAULT 5`);
@@ -1217,7 +1254,28 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS kot_group_id INTEGER REFERENCES kot_groups(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
-    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS order_item_id INTEGER REFERENCES order_items(id) ON DELETE CASCADE`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS order_item_id INTEGER`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS cancelled_quantity INTEGER NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS ticket_number INTEGER NOT NULL DEFAULT 1`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS prep_started_at TIMESTAMP`);
+    await pool.query(`ALTER TABLE kot ADD COLUMN IF NOT EXISTS prep_completed_at TIMESTAMP`);
+    await pool.query(`DO $$ DECLARE constraint_name TEXT; BEGIN
+        IF EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='kot'::regclass AND confrelid='order_items'::regclass AND contype='f' AND confdeltype<>'n'
+        ) THEN
+            FOR constraint_name IN
+                SELECT conname FROM pg_constraint
+                WHERE conrelid='kot'::regclass AND confrelid='order_items'::regclass AND contype='f'
+            LOOP EXECUTE format('ALTER TABLE kot DROP CONSTRAINT %I',constraint_name); END LOOP;
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint
+            WHERE conrelid='kot'::regclass AND confrelid='order_items'::regclass AND contype='f' AND confdeltype='n'
+        ) THEN
+            ALTER TABLE kot ADD CONSTRAINT kot_order_item_id_fkey FOREIGN KEY(order_item_id) REFERENCES order_items(id) ON DELETE SET NULL;
+        END IF;
+    END $$`);
     await pool.query(`
         WITH ranked_kot AS (
             SELECT id,order_id,item_name,quantity,
@@ -1250,6 +1308,7 @@ async function ensureBusinessTables() {
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE
     )`);
+    await pool.query(`ALTER TABLE order_activity ADD COLUMN IF NOT EXISTS actor_user_id INTEGER REFERENCES app_users(id) ON DELETE SET NULL`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_order_activity_order_time ON order_activity(order_id, created_at DESC)`);
     await pool.query(`
         UPDATE orders o
@@ -1837,7 +1896,7 @@ app.get("/public-menu/:token", async (req, res) => {
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
     try {
         const access = await runSystemContext(() => pool.query(
-            "SELECT business_id, enabled, price_channel FROM public_menu_settings WHERE token=$1 LIMIT 1",
+            "SELECT business_id, enabled, price_channel, category_order FROM public_menu_settings WHERE token=$1 LIMIT 1",
             [token]
         ));
         const publication = access.rows[0];
@@ -1854,6 +1913,13 @@ app.get("/public-menu/:token", async (req, res) => {
             ]);
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
+            const activeCategoryNames = categoryResult.rows.map(row => String(row.name || "")).filter(Boolean);
+            const activeCategoryByKey = new Map(activeCategoryNames.map(name => [name.toLocaleLowerCase(), name]));
+            const preferredCategoryNames = Array.isArray(publication.category_order) ? publication.category_order : [];
+            const orderedCategoryNames = preferredCategoryNames.map(name => activeCategoryByKey.get(String(name || "").trim().toLocaleLowerCase())).filter(Boolean);
+            activeCategoryNames.forEach(name => {
+                if (!orderedCategoryNames.some(existing => existing.toLocaleLowerCase() === name.toLocaleLowerCase())) orderedCategoryNames.push(name);
+            });
             let heroImages = [];
             try {
                 heroImages = cleanQrMenuHeroImages(Array.isArray(settings.publicMenuHeroImages) ? settings.publicMenuHeroImages : []);
@@ -1910,7 +1976,7 @@ app.get("/public-menu/:token", async (req, res) => {
             priceChannelLabel: qrChannels.find(channel => channel.key === priceChannel)?.label || "Slash",
                 gstCalculationEnabled: settings.gstCalculationEnabled !== false,
                 onlinePromotions: publicOnlinePromotions(settings, priceChannel),
-                categories: categoryResult.rows.map(row => row.name),
+                categories: orderedCategoryNames,
                 items,
                 tables: tableResult.rows.map(row => String(row.table_number))
             };
@@ -1952,6 +2018,78 @@ async function upsertQrGuestCustomer(queryable,businessId,customer){
     return created.rows[0];
 }
 
+function qrAnalyticsSessionKey(businessId, menuToken, sessionId) {
+    return crypto.createHash("sha256").update(`${Number(businessId)}:${String(menuToken)}:${String(sessionId)}`).digest("hex");
+}
+
+app.post("/public-menu/:token/analytics", async (req, res) => {
+    const token = String(req.params.token || "");
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const eventType = String(req.body?.eventType || "").trim();
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    if (!/^[a-f0-9]{32,64}$/i.test(sessionId) || !["menu_view", "cart_updated", "checkout_started"].includes(eventType)) {
+        return res.status(400).json({ error: "Invalid menu analytics event" });
+    }
+    const itemCount = eventType === "cart_updated" ? Math.max(0, Math.min(100, Math.floor(Number(req.body?.itemCount) || 0))) : 0;
+    try {
+        const access = await runSystemContext(() => pool.query(
+            "SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]
+        ));
+        const publication = access.rows[0];
+        if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) {
+            return res.status(404).json({ error: "This QR menu is not currently available" });
+        }
+        const businessId = Number(publication.business_id);
+        const sessionKey = qrAnalyticsSessionKey(businessId, token, sessionId);
+        await tenantContext.run({ businessId }, () => pool.query(
+            `INSERT INTO qr_menu_events(business_id,session_key,event_type,item_count)
+             VALUES($1,$2,$3,$4)`, [businessId, sessionKey, eventType, itemCount]
+        ));
+        res.status(204).end();
+    } catch (error) {
+        console.error("QR menu analytics event error:", error);
+        res.status(500).json({ error: "Could not record menu activity" });
+    }
+});
+
+app.post("/public-menu/:token/service-requests", async (req, res) => {
+    const token = String(req.params.token || "");
+    const tableNumber = String(req.body?.tableNumber || "").trim();
+    const requestType = String(req.body?.requestType || "").trim();
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    if (!tableNumber || tableNumber.length > 60 || !["clean_table", "call_waiter"].includes(requestType)) {
+        return res.status(400).json({ error: "Choose a valid table and service request." });
+    }
+    try {
+        const access = await runSystemContext(() => pool.query(
+            "SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]
+        ));
+        const publication = access.rows[0];
+        if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) {
+            return res.status(404).json({ error: "This QR menu is not currently available" });
+        }
+        const businessId = Number(publication.business_id);
+        const request = await tenantContext.run({ businessId }, async () => {
+            const table = await pool.query(
+                "SELECT table_number FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1",
+                [businessId, tableNumber]
+            );
+            if (!table.rows.length) throw Object.assign(new Error("This table QR is no longer active. Please ask the team for help."), { status: 409 });
+            const result = await pool.query(
+                `INSERT INTO qr_service_requests(business_id,table_number,request_type)
+                 VALUES($1,$2,$3) RETURNING id,table_number,request_type,status,created_at`,
+                [businessId, String(table.rows[0].table_number), requestType]
+            );
+            return result.rows[0];
+        });
+        res.status(201).json({ success: true, request });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR table service request error:", error);
+        res.status(500).json({ error: "Could not notify the cafe team" });
+    }
+});
+
 app.post("/public-menu/:token/customers", async (req,res)=>{
     const token=String(req.params.token||"");
     if(!/^[a-f0-9]{48}$/i.test(token))return res.status(404).json({error:"Menu not found"});
@@ -1981,6 +2119,8 @@ app.post("/public-menu/:token/orders", async (req, res) => {
     const orderType = requestedOrderType === "takeaway" ? "Takeaway" : "Dine-in";
     const assignedTableNumber = orderType === "Dine-in" ? tableNumber : null;
     const trackingToken = crypto.randomBytes(24).toString("hex");
+    const analyticsSessionId = String(req.body?.analyticsSessionId || "").trim();
+    const analyticsSessionIdIsValid = /^[a-f0-9]{32,64}$/i.test(analyticsSessionId);
     const requestedItems = Array.isArray(req.body?.items) ? req.body.items : [];
     let guestCustomerDetails;
     try{guestCustomerDetails=normalizeQrGuestCustomer(req.body?.customer);}
@@ -1999,11 +2139,13 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
+        const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
         const result = await tenantContext.run({ businessId }, async () => {
             const client = await rawPoolConnect();
             try {
                 await client.query("BEGIN");
                 await applyTenantDbContext(client);
+                if (sessionKey) await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionKey]);
                 const businessSettingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
                 const businessSettings = businessSettingsResult.rows[0]?.settings || {};
                 const qrChannels = salesChannelsForSettings(businessSettings).filter(channel => channel.qrMenu);
@@ -2082,14 +2224,84 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 const discounts = orderLines.map(() => 0);
                 const gst = orderLines.reduce((sum, line, index) => sum + lineNets[index] * line.taxRate / 100, 0);
                 const total = orderLines.reduce((sum, line, index) => sum + lineNets[index] + lineNets[index] * line.taxRate / 100, 0);
-                const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
                 const note = String(req.body?.notes || "").trim().slice(0, 300);
                 const qrChannel = qrChannels.find(channel => channel.key === priceChannel);
-                const orderResult = await client.query(
-                    "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id,order_number,table_number,total,status",
-                    [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash"]
-                );
-                const order = orderResult.rows[0];
+                const requestedCurrentOrder = req.body?.currentOrder && typeof req.body.currentOrder === "object" ? req.body.currentOrder : {};
+                const currentOrderId = Number(requestedCurrentOrder.orderId);
+                const currentTrackingToken = String(requestedCurrentOrder.trackingToken || "");
+                let existingOrder = null;
+                if (Number.isInteger(currentOrderId) && currentOrderId > 0 && /^[a-f0-9]{48}$/i.test(currentTrackingToken)) {
+                    const currentResult = await client.query(`
+                        SELECT id,order_number,order_type,table_number,total,status,customer_id,public_tracking_token
+                        FROM orders
+                        WHERE id=$1 AND business_id=$2 AND public_tracking_token=$3
+                        FOR UPDATE
+                    `, [currentOrderId, businessId, currentTrackingToken]);
+                    const candidate = currentResult.rows[0];
+                    if (candidate && !["completed", "cancelled"].includes(String(candidate.status || "").toLowerCase()) &&
+                        String(candidate.order_type || "").toLowerCase() === orderType.toLowerCase() &&
+                        String(candidate.table_number || "") === String(assignedTableNumber || "")) {
+                        const paidResult = await client.query(`
+                            SELECT COALESCE(SUM(amount),0) AS amount_collected
+                            FROM payments
+                            WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
+                        `, [candidate.id, businessId]);
+                        if (Number(paidResult.rows[0]?.amount_collected || 0) < Number(candidate.total || 0) - 0.009) existingOrder = candidate;
+                    }
+                }
+                if (!existingOrder && sessionKey) {
+                    const sessionOrderResult = await client.query(`
+                        SELECT id,order_number,order_type,table_number,total,status,customer_id,public_tracking_token
+                        FROM orders
+                        WHERE business_id=$1
+                          AND (public_session_key=$2 OR (public_session_key IS NULL AND customer_id=$3 AND public_tracking_token IS NOT NULL))
+                          AND status NOT IN ('Completed','Cancelled')
+                          AND LOWER(order_type)=LOWER($4)
+                          AND table_number IS NOT DISTINCT FROM $5
+                        ORDER BY CASE WHEN public_session_key=$2 THEN 0 ELSE 1 END,id ASC
+                        LIMIT 1
+                        FOR UPDATE
+                    `, [businessId, sessionKey, guestCustomer.id, orderType, assignedTableNumber]);
+                    const candidate = sessionOrderResult.rows[0];
+                    if (candidate && Number(candidate.customer_id || 0) === Number(guestCustomer.id)) {
+                        const paidResult = await client.query(`
+                            SELECT COALESCE(SUM(amount),0) AS amount_collected
+                            FROM payments
+                            WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'
+                        `, [candidate.id, businessId]);
+                        if (Number(paidResult.rows[0]?.amount_collected || 0) < Number(candidate.total || 0) - 0.009) existingOrder = candidate;
+                    }
+                }
+
+                let order;
+                let isAppendedOrder = false;
+                let appendedTicketNumber = null;
+                let shouldCreateFollowUpKOT = false;
+                if (existingOrder) {
+                    const addedSubtotal = Math.round(subtotal * 100) / 100;
+                    const addedGst = Math.round(gst * 100) / 100;
+                    const addedTotal = Math.round(total * 100) / 100;
+                    shouldCreateFollowUpKOT = ["preparing", "ready"].includes(String(existingOrder.status || "").toLowerCase()) && businessSettings.kotEnabled !== false;
+                    const updatedResult = await client.query(`
+                        UPDATE orders
+                        SET subtotal=ROUND(subtotal+$1,2),gst=ROUND(gst+$2,2),total=ROUND(total+$3,2),
+                            status=CASE WHEN LOWER(status)='ready' AND $7::boolean THEN 'Preparing' ELSE status END,
+                            public_session_key=COALESCE(public_session_key,$8),
+                            notes=CASE WHEN $4='' THEN notes ELSE CONCAT_WS(E'\\n',NULLIF(notes,''),$4) END,
+                            updated_at=CURRENT_TIMESTAMP
+                        WHERE id=$5 AND business_id=$6
+                        RETURNING id,order_number,table_number,total,status
+                    `, [addedSubtotal, addedGst, addedTotal, note, existingOrder.id, businessId, shouldCreateFollowUpKOT, sessionKey]);
+                    order = updatedResult.rows[0];
+                    isAppendedOrder = true;
+                } else {
+                    const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
+                    const orderResult = await client.query(
+                        "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,public_session_key,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id,order_number,table_number,total,status",
+                        [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, sessionKey, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash"]
+                    );
+                    order = orderResult.rows[0];
+                }
                 const itemValues = [];
                 const itemRows = orderLines.map((line, index) => {
                     const offset = index * 11;
@@ -2100,12 +2312,37 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                     "INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options) VALUES " + itemRows.join(","),
                     itemValues
                 );
-                if (businessSettings.kotEnabled !== false) await createKOTForOrder(client, businessId, order.id);
+                if (!isAppendedOrder) {
+                    await client.query(`
+                        INSERT INTO order_activity(order_id,event_type,description,actor,business_id)
+                        VALUES($1,'QR order received','QR guest submitted an order.','QR guest',$2)
+                    `, [order.id, businessId]);
+                }
+                if (isAppendedOrder) {
+                    const invoiceAmounts = await client.query("SELECT subtotal,gst,total FROM orders WHERE id=$1 AND business_id=$2", [order.id, businessId]);
+                    const amounts = invoiceAmounts.rows[0];
+                    await client.query("UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4", [amounts.subtotal, amounts.gst, amounts.total, order.id]);
+                    if (shouldCreateFollowUpKOT) {
+                        const ticket = await createKOTForOrder(client, businessId, order.id);
+                        appendedTicketNumber = ticket.ticketNumber || null;
+                    }
+                    await client.query(`
+                        INSERT INTO order_activity(order_id,event_type,description,actor,business_id)
+                        SELECT id,'QR items added',$2,'QR guest',$3
+                        FROM orders WHERE id=$1 AND business_id=$3
+                    `, [order.id, `${orderLines.reduce((sum, line) => sum + line.quantity, 0)} more item(s) added from the active QR session.`, businessId]);
+                }
+                if (sessionKey) {
+                    await client.query(`
+                        INSERT INTO qr_menu_events(business_id,session_key,event_type,item_count,order_id)
+                        VALUES($1,$2,'order_placed',$3,$4)
+                    `, [businessId, sessionKey, orderLines.reduce((sum, line) => sum + line.quantity, 0), order.id]);
+                }
                 if (orderType === "Dine-in") {
                     await client.query("UPDATE restaurant_tables SET status='Occupied' WHERE business_id=$1 AND table_number::text=$2", [businessId, tableNumber]);
                 }
                 await client.query("COMMIT");
-                return { success: true, orderId: order.id, orderNumber: order.order_number, tableNumber: order.table_number, sourceTableNumber: tableNumber, orderType, total: Number(order.total), status: order.status, trackingToken };
+                return { success: true, appended: isAppendedOrder, ticketNumber: appendedTicketNumber, orderId: order.id, orderNumber: order.order_number, tableNumber: order.table_number, sourceTableNumber: tableNumber, orderType, total: Number(order.total), status: order.status, trackingToken: isAppendedOrder ? (existingOrder?.public_tracking_token || currentTrackingToken || trackingToken) : trackingToken };
             } catch (error) {
                 await client.query("ROLLBACK");
                 throw error;
@@ -2175,7 +2412,7 @@ app.get("/api/menu/public-settings", async (req, res) => {
             [businessId, crypto.randomBytes(24).toString("hex")]
         );
         const result = await pool.query(
-            "SELECT enabled, price_channel, token, public_base_url FROM public_menu_settings WHERE business_id=$1",
+            "SELECT enabled, price_channel, token, public_base_url, category_order FROM public_menu_settings WHERE business_id=$1",
             [businessId]
         );
         const settings = result.rows[0];
@@ -2198,12 +2435,45 @@ app.get("/api/menu/public-settings", async (req, res) => {
             qrMenuChannels,
             token: settings.token,
             publicBaseUrl: settings.public_base_url || "",
+            categoryOrder: Array.isArray(settings.category_order) ? settings.category_order : [],
             heroImages,
             localNetworkUrl
         });
     } catch (error) {
         console.error("Load public menu settings error:", error);
         res.status(500).json({ error: "Could not load restaurant menu settings" });
+    }
+});
+
+app.put("/api/menu/public-settings/category-order", async (req, res) => {
+    const businessId = Number(req.user?.business_id || 0);
+    const requested = req.body?.categoryOrder;
+    if (!Array.isArray(requested) || requested.length > 300) return res.status(400).json({ error: "Choose a valid QR menu category order." });
+    try {
+        const categories = await pool.query(
+            "SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,name,id",
+            [businessId]
+        );
+        const available = new Map(categories.rows.map(row => [String(row.name || "").trim().toLocaleLowerCase(), String(row.name || "").trim()]));
+        const seen = new Set();
+        const categoryOrder = [];
+        for (const value of requested) {
+            const key = String(value || "").trim().toLocaleLowerCase();
+            const canonical = available.get(key);
+            if (!canonical) return res.status(400).json({ error: `“${String(value || "").slice(0, 100)}” is not an active menu category.` });
+            if (seen.has(key)) return res.status(400).json({ error: `“${canonical}” appears more than once in the category order.` });
+            seen.add(key);
+            categoryOrder.push(canonical);
+        }
+        for (const [key, name] of available) if (!seen.has(key)) categoryOrder.push(name);
+        await pool.query(
+            "INSERT INTO public_menu_settings(business_id,token,category_order) VALUES($1,$2,$3::jsonb) ON CONFLICT (business_id) DO UPDATE SET category_order=EXCLUDED.category_order,updated_at=CURRENT_TIMESTAMP",
+            [businessId, crypto.randomBytes(24).toString("hex"), JSON.stringify(categoryOrder)]
+        );
+        res.json({ success: true, categoryOrder });
+    } catch (error) {
+        console.error("Save QR menu category order error:", error);
+        res.status(500).json({ error: "Could not save the QR menu category order." });
     }
 });
 
@@ -3247,11 +3517,11 @@ async function recordOrderActivity(db, orderId, eventType, description, req) {
     if (!businessId || !Number(orderId)) return;
     const actor = orderActivityActorLabel(req);
     await db.query(`
-        INSERT INTO order_activity(order_id,event_type,description,actor,business_id)
-        SELECT o.id,$2,$3,$4,$5
+        INSERT INTO order_activity(order_id,event_type,description,actor,business_id,actor_user_id)
+        SELECT o.id,$2,$3,$4,$5,$6
         FROM orders o
         WHERE o.id=$1 AND o.business_id=$5
-    `, [Number(orderId), String(eventType).slice(0, 100), String(description || ""), actor, businessId]);
+    `, [Number(orderId), String(eventType).slice(0, 100), String(description || ""), actor, businessId, Number(req?.user?.id) || null]);
 }
 
 async function createKOTForOrder(db, businessId, orderId) {
@@ -3266,18 +3536,146 @@ async function createKOTForOrder(db, businessId, orderId) {
     if (!items.rows.length) return 0;
     const groups = await db.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [Number(businessId)]);
     const activeGroupIds = new Set(groups.rows.map(group => Number(group.id)));
+    const ticketSequenceResult = await db.query(`SELECT COALESCE(MAX(ticket_number),0)+1 AS ticket_number FROM kot WHERE business_id=$1 AND order_id=$2`, [Number(businessId), Number(orderId)]);
+    const ticketNumber = Number(ticketSequenceResult.rows[0]?.ticket_number || 1);
     const values=[];
     const rows=items.rows.map((item,index)=>{
         const itemRoute=groups.rows.find(group=>Number(item.menu_id)>0&&Array.isArray(group.item_ids)&&group.item_ids.map(Number).includes(Number(item.menu_id)));
         const categoryRoute=groups.rows.find(group=>item.category&&Array.isArray(group.category_names)&&group.category_names.some(category=>String(category).toLowerCase()===String(item.category).toLowerCase()));
         const legacyGroup=activeGroupIds.has(Number(item.kot_group_id))?Number(item.kot_group_id):null;
         const groupId=Number(itemRoute?.id||categoryRoute?.id||legacyGroup)||null;
-        const offset=index*7;
-        values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]),Number(item.order_item_id));
-        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7})`;
+        const offset=index*8;
+        values.push(Number(orderId),String(item.item_name||"Item"),Number(item.quantity||0),"Pending",groupId,JSON.stringify(item.options||[]),Number(item.order_item_id),ticketNumber);
+        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7},$${offset+8})`;
     });
-    await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options,order_item_id) VALUES ${rows.join(",")}`,values);
-    return items.rows.length;
+    await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options,order_item_id,ticket_number) VALUES ${rows.join(",")}`,values);
+    return { count: items.rows.length, ticketNumber };
+}
+
+function canonicalKotLineValue(value) {
+    if (Array.isArray(value)) return value.map(canonicalKotLineValue);
+    if (value && typeof value === "object") {
+        return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalKotLineValue(value[key])]));
+    }
+    return value ?? null;
+}
+
+function kotLineIdentity(item) {
+    const menuId = Number(item.menu_id ?? item.menuId) || null;
+    const variantId = Number(item.variant_id ?? item.variantId) || null;
+    return JSON.stringify([menuId, variantId, canonicalKotLineValue(item.options || [])]);
+}
+
+async function replaceOrderItemsPreservingKOT(db, businessId, orderId, items, { createMissingTickets = false, itemCancellationReasons = [], allowedCancellationReasons = [] } = {}) {
+    const oldItems = await db.query(
+        "SELECT id,menu_id,variant_id,item_name,quantity,options FROM order_items WHERE order_id=$1 AND business_id=$2 ORDER BY id FOR UPDATE",
+        [Number(orderId), Number(businessId)]
+    );
+    const oldItemsById = new Map(oldItems.rows.map(item => [Number(item.id), item]));
+    const oldQuantitiesByIdentity = new Map();
+    const newQuantitiesByIdentity = new Map();
+    for (const oldItem of oldItems.rows) {
+        const identity = kotLineIdentity(oldItem);
+        oldQuantitiesByIdentity.set(identity, (oldQuantitiesByIdentity.get(identity) || 0) + Math.max(0, Number(oldItem.quantity) || 0));
+    }
+    for (const item of items) {
+        const identity = kotLineIdentity(item);
+        newQuantitiesByIdentity.set(identity, (newQuantitiesByIdentity.get(identity) || 0) + Math.max(0, Number(item.quantity) || 0));
+    }
+    const cancellationReasonRows = [];
+    for (const entry of (Array.isArray(itemCancellationReasons) ? itemCancellationReasons : [])) {
+        const oldItem = oldItemsById.get(Number(entry?.orderItemId));
+        const reason = String(entry?.reason || "").trim().slice(0, 120);
+        const quantity = Number(entry?.quantity ?? 1);
+        if (!oldItem || !reason || !allowedCancellationReasons.includes(reason) || !Number.isInteger(quantity) || quantity < 1 || quantity > 999) {
+            throw Object.assign(new Error("Choose a valid cancellation reason for each removed item."), { status: 400 });
+        }
+        cancellationReasonRows.push({ identity: kotLineIdentity(oldItem), itemName: String(oldItem.item_name || "Item"), reason, quantity });
+    }
+    const cancellationEvents = [];
+    for (const [identity, oldQuantity] of oldQuantitiesByIdentity) {
+        const removedQuantity = Math.max(0, oldQuantity - (newQuantitiesByIdentity.get(identity) || 0));
+        if (!removedQuantity) continue;
+        const providedReasons = cancellationReasonRows.filter(row => row.identity === identity);
+        const reasonQuantity = providedReasons.reduce((sum, row) => sum + row.quantity, 0);
+        if (reasonQuantity < removedQuantity) {
+            throw Object.assign(new Error("Choose a cancellation reason before removing or reducing a saved order item."), { status: 400 });
+        }
+        let reasonsNeeded = removedQuantity;
+        const reasons = [];
+        for (const row of providedReasons) {
+            if (reasonsNeeded <= 0) break;
+            const quantity = Math.min(row.quantity, reasonsNeeded);
+            reasons.push({ ...row, quantity });
+            reasonsNeeded -= quantity;
+        }
+        cancellationEvents.push({ itemName: reasons[0]?.itemName || oldItems.rows.find(row => kotLineIdentity(row) === identity)?.item_name || "Item", quantity: removedQuantity, reasons });
+    }
+    const oldTickets = await db.query(
+        "SELECT id,order_item_id,quantity,cancelled_quantity FROM kot WHERE order_id=$1 AND business_id=$2 AND order_item_id IS NOT NULL ORDER BY id FOR UPDATE",
+        [Number(orderId), Number(businessId)]
+    );
+    const ticketsByIdentity = new Map();
+    for (const ticket of oldTickets.rows) {
+        const oldItem = oldItemsById.get(Number(ticket.order_item_id));
+        if (!oldItem) continue;
+        const key = kotLineIdentity(oldItem);
+        if (!ticketsByIdentity.has(key)) ticketsByIdentity.set(key, []);
+        ticketsByIdentity.get(key).push(ticket);
+    }
+    if (oldTickets.rows.length) {
+        await db.query("UPDATE kot SET order_item_id=NULL WHERE order_id=$1 AND business_id=$2 AND order_item_id IS NOT NULL", [Number(orderId), Number(businessId)]);
+    }
+    await db.query("DELETE FROM order_items WHERE order_id=$1 AND business_id=$2", [Number(orderId), Number(businessId)]);
+
+    const values = [];
+    const valueRows = items.map((item, index) => {
+        const offset = index * 11;
+        values.push(orderId,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options || []));
+        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb)`;
+    });
+    const inserted = await db.query(`
+        INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
+        VALUES ${valueRows.join(",")}
+        RETURNING id,menu_id,variant_id,item_name,quantity,options
+    `, values);
+
+    const matchedTicketIds = new Set();
+    for (const newItem of inserted.rows) {
+        const candidates = ticketsByIdentity.get(kotLineIdentity(newItem));
+        const ticket = candidates?.shift();
+        if (!ticket) continue;
+        const previousQuantity = Math.max(0, Number(ticket.quantity) || 0);
+        if (previousQuantity === 0 && Number(ticket.cancelled_quantity || 0) > 0) {
+            candidates.unshift(ticket);
+            continue;
+        }
+        const nextQuantity = Math.max(0, Number(newItem.quantity) || 0);
+        const cancelledQuantity = Math.max(0, Number(ticket.cancelled_quantity) || 0) + Math.max(0, previousQuantity - nextQuantity);
+        await db.query(`
+            UPDATE kot
+            SET order_item_id=CASE WHEN $1::integer>0 THEN $2::integer ELSE NULL::integer END,
+                quantity=$1::integer,cancelled_quantity=$3::integer,item_name=$4,options=$5::jsonb,
+                status=CASE WHEN $1::integer=0 THEN 'Completed' ELSE status END
+            WHERE id=$6 AND business_id=$7
+        `, [nextQuantity,Number(newItem.id),cancelledQuantity,String(newItem.item_name || "Item"),JSON.stringify(newItem.options || []),Number(ticket.id),Number(businessId)]);
+        matchedTicketIds.add(Number(ticket.id));
+    }
+
+    for (const tickets of ticketsByIdentity.values()) {
+        for (const ticket of tickets) {
+            if (matchedTicketIds.has(Number(ticket.id))) continue;
+            const previousQuantity = Math.max(0, Number(ticket.quantity) || 0);
+            await db.query(`
+                UPDATE kot
+                SET order_item_id=NULL,quantity=0,cancelled_quantity=cancelled_quantity+$1,status='Completed'
+                WHERE id=$2 AND business_id=$3
+            `, [previousQuantity,Number(ticket.id),Number(businessId)]);
+        }
+    }
+
+    if (createMissingTickets) await createKOTForOrder(db, businessId, orderId);
+    return { items: inserted.rows, cancellationEvents };
 }
 
 async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, settings, discountValue, serviceChargeValue, channelKey = null) {
@@ -3658,8 +4056,9 @@ app.post(
             }
 
             await recordOrderActivity(client, order.id, "Order created", `Order created with status ${orderStatus}.`, req);
-            if (b.marketingDealId && b.marketingDealName && Number(b.discount || 0) > 0) {
-                await recordOrderActivity(client, order.id, "Marketing deal applied", `${String(b.marketingDealName).slice(0, 120)} · Discount ${Number(b.discount || 0).toFixed(2)}.`, req);
+            if (Number(b.discount || 0) > 0) {
+                const discountName = String(b.marketingDealName || b.discountAdjustmentName || "Manual discount").slice(0, 120);
+                await recordOrderActivity(client, order.id, "Discount applied", `${discountName} · Discount ${Number(b.discount || 0).toFixed(2)}.`, req);
             }
 
             if (b.checkout && typeof b.checkout === "object") {
@@ -3718,8 +4117,14 @@ app.post("/api/orders/:id/kot", async (req,res)=>{
     try{
         await client.query("BEGIN");
         await applyTenantDbContext(client);
-        const order=await client.query("SELECT id FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE",[orderId,businessId]);
+        const order=await client.query("SELECT id,order_number,public_tracking_token,status FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE",[orderId,businessId]);
         if(!order.rows.length){await client.query("ROLLBACK");return res.status(404).json({error:"Order not found"});}
+        const foundOrder=order.rows[0];
+        const isQrOrder=Boolean(foundOrder.public_tracking_token)||/^QR-/i.test(String(foundOrder.order_number||""));
+        if(isQrOrder&&String(foundOrder.status||"").toLowerCase()==="pending"){
+            await client.query("ROLLBACK");
+            return res.status(409).json({error:"Accept this QR order before creating or printing its kitchen ticket."});
+        }
         const settings=await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1",[businessId]);
         if(settings.rows[0]?.settings?.kotEnabled===false){await client.query("ROLLBACK");return res.status(409).json({error:"Kitchen ticket generation is disabled in Settings."});}
         const created=createKOTForOrder(client,businessId,orderId);
@@ -3729,7 +4134,7 @@ app.post("/api/orders/:id/kot", async (req,res)=>{
     }catch(error){
         await client.query("ROLLBACK").catch(()=>{});
         console.error("Ensure order KOT error:",error);
-        res.status(500).json({error:"Could not prepare the KOT for printing"});
+        res.status(error.status||500).json({error:error.message||"Could not prepare the KOT for printing"});
     }finally{client.release();}
 });
 
@@ -3737,10 +4142,16 @@ app.post("/api/orders/:id/kot", async (req,res)=>{
 app.get("/api/orders/qr-notifications", async (req, res) => {
     const businessId = Number(req.user.business_id);
     const rawAfterId = req.query.afterId;
+    const rawAfterActivityId = req.query.afterActivityId;
     let afterId = null;
+    let afterActivityId = null;
     if (rawAfterId !== undefined) {
         afterId = Number(rawAfterId);
         if (!Number.isSafeInteger(afterId) || afterId < 0) return res.status(400).json({ error: "Invalid order cursor" });
+    }
+    if (rawAfterActivityId !== undefined) {
+        afterActivityId = Number(rawAfterActivityId);
+        if (!Number.isSafeInteger(afterActivityId) || afterActivityId < 0) return res.status(400).json({ error: "Invalid order update cursor" });
     }
     try {
         const result = await pool.query(`
@@ -3756,23 +4167,64 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
                     OR ($2::bigint IS NULL AND LOWER(COALESCE(status,'')) IN ('pending','preparing'))
                   )
                 ORDER BY id
+            ), latest_activity AS (
+                SELECT COALESCE(MAX(id),0)::bigint AS latest_activity_id
+                FROM order_activity WHERE business_id=$1
+            ), appended_order_updates AS (
+                SELECT DISTINCT ON (o.id) oa.id AS activity_id,o.id,o.order_number,o.table_number,o.total,o.status,o.updated_at
+                FROM order_activity oa
+                JOIN orders o ON o.id=oa.order_id AND o.business_id=oa.business_id
+                WHERE oa.business_id=$1 AND oa.event_type='QR items added'
+                  AND $3::bigint IS NOT NULL AND oa.id>$3
+                ORDER BY o.id,oa.id DESC
             )
-            SELECT latest.latest_order_id,
-                   COALESCE(json_agg(json_build_object(
+            SELECT latest.latest_order_id,latest_activity.latest_activity_id,
+                   COALESCE((SELECT json_agg(json_build_object(
                        'id',new_qr_orders.id,
                        'order_number',new_qr_orders.order_number,
                        'table_number',new_qr_orders.table_number,
                        'total',new_qr_orders.total,
                        'created_at',new_qr_orders.created_at
-                   ) ORDER BY new_qr_orders.id) FILTER (WHERE new_qr_orders.id IS NOT NULL),'[]'::json) AS orders
-            FROM latest LEFT JOIN new_qr_orders ON TRUE
-            GROUP BY latest.latest_order_id
-        `, [businessId, afterId]);
+                   ) ORDER BY new_qr_orders.id) FROM new_qr_orders),'[]'::json) AS orders,
+                   COALESCE((SELECT json_agg(json_build_object(
+                       'id',appended_order_updates.id,
+                       'activity_id',appended_order_updates.activity_id,
+                       'order_number',appended_order_updates.order_number,
+                       'table_number',appended_order_updates.table_number,
+                       'total',appended_order_updates.total,
+                       'status',appended_order_updates.status,
+                       'updated_at',appended_order_updates.updated_at
+                   ) ORDER BY appended_order_updates.activity_id) FROM appended_order_updates),'[]'::json) AS updates
+            FROM latest CROSS JOIN latest_activity
+        `, [businessId, afterId, afterActivityId]);
         const row = result.rows[0] || {};
-        res.json({ latestOrderId: Number(row.latest_order_id || 0), orders: row.orders || [] });
+        res.json({ latestOrderId: Number(row.latest_order_id || 0), latestActivityId: Number(row.latest_activity_id || 0), orders: row.orders || [], updates: row.updates || [] });
     } catch (error) {
         console.error("QR order notification poll failed:", error);
         res.status(500).json({ error: "Failed to check for new QR orders" });
+    }
+});
+
+app.get("/api/qr-service-requests", async (req, res) => {
+    const businessId = Number(req.user.business_id);
+    const cursorProvided = req.query.afterId !== undefined;
+    const afterId = cursorProvided ? Number(req.query.afterId) : null;
+    if (cursorProvided && (!Number.isSafeInteger(afterId) || afterId < 0)) return res.status(400).json({ error: "Invalid service request cursor" });
+    try {
+        const latestResult = await pool.query(
+            "SELECT COALESCE(MAX(id),0)::bigint AS latest_id FROM qr_service_requests WHERE business_id=$1", [businessId]
+        );
+        const latestId = Number(latestResult.rows[0]?.latest_id || 0);
+        if (!cursorProvided) return res.set("Cache-Control", "no-store").json({ latestId, cursorId: latestId, requests: [] });
+        const result = await pool.query(
+            `SELECT id,table_number,request_type,created_at FROM qr_service_requests
+             WHERE business_id=$1 AND id>$2 ORDER BY id LIMIT 100`, [businessId, afterId]
+        );
+        const cursorId = result.rows.length ? Number(result.rows[result.rows.length - 1].id) : latestId;
+        res.set("Cache-Control", "no-store").json({ latestId, cursorId, requests: result.rows });
+    } catch (error) {
+        console.error("QR service request poll failed:", error);
+        res.status(500).json({ error: "Could not check table service requests" });
     }
 });
 
@@ -3798,9 +4250,19 @@ app.put("/api/orders/:id/qr-status", async (req, res) => {
                 await client.query("ROLLBACK");
                 return res.status(409).json({ error: currentStatus === "ready" ? "This QR order is already ready for checkout." : "QR orders must be accepted before they can be marked ready." });
             }
+            if (currentStatus === "pending" && nextStatus === "Preparing") {
+                const settings = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+                if (settings.rows[0]?.settings?.kotEnabled !== false) await createKOTForOrder(client, businessId, orderId);
+            }
             await client.query("UPDATE orders SET status=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3", [nextStatus, orderId, businessId]);
             const kotStatus = nextStatus === "Preparing" ? "Preparing" : "Ready";
-            await client.query("UPDATE kot SET status=$1 WHERE order_id=$2 AND business_id=$3 AND status IN ('Pending','Preparing')", [kotStatus, orderId, businessId]);
+            await client.query(`
+                UPDATE kot
+                SET status=$1::varchar,
+                    prep_started_at=CASE WHEN $1::varchar='Preparing'::varchar THEN COALESCE(prep_started_at,CURRENT_TIMESTAMP) ELSE prep_started_at END,
+                    prep_completed_at=CASE WHEN $1::varchar IN ('Ready'::varchar,'Completed'::varchar) THEN COALESCE(prep_completed_at,CURRENT_TIMESTAMP) ELSE prep_completed_at END
+                WHERE order_id=$2 AND business_id=$3 AND status IN ('Pending','Preparing')
+            `, [kotStatus, orderId, businessId]);
             await recordOrderActivity(client, orderId, nextStatus === "Preparing" ? "QR order accepted" : "QR order marked ready", nextStatus === "Preparing" ? "QR order accepted and sent to preparation." : "QR order marked ready for checkout.", req);
         }
         await client.query("COMMIT");
@@ -4103,7 +4565,7 @@ app.get("/api/orders/:id", async (req, res) => {
         const orderId = Number(req.params.id);
         const businessId = Number(req.user.business_id);
         const orderQuery = pool.query(
-            "SELECT o.*,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,COALESCE(summary.amount_collected,0) AS amount_collected,COALESCE(summary.allocations,'[]'::json) AS payment_allocations FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN LATERAL (SELECT COALESCE(SUM(t.amount),0) AS amount_collected,COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations FROM (SELECT payment_method,SUM(amount) AS amount FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success' GROUP BY payment_method) t) summary ON TRUE WHERE o.id=$1 AND o.business_id=$2",
+            "SELECT o.*,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,(SELECT i.invoice_number FROM invoices i WHERE i.order_id=o.id AND i.business_id=o.business_id ORDER BY i.id DESC LIMIT 1) AS invoice_number,(SELECT a.actor FROM order_activity a WHERE a.order_id=o.id AND a.business_id=o.business_id AND a.event_type='Order created' ORDER BY a.created_at ASC LIMIT 1) AS cashier_name,COALESCE(summary.amount_collected,0) AS amount_collected,COALESCE(summary.allocations,'[]'::json) AS payment_allocations FROM orders o LEFT JOIN customers c ON c.id=o.customer_id LEFT JOIN LATERAL (SELECT COALESCE(SUM(t.amount),0) AS amount_collected,COALESCE(json_agg(json_build_object('method',t.payment_method,'amount',t.amount) ORDER BY t.payment_method),'[]'::json) AS allocations FROM (SELECT payment_method,SUM(amount) AS amount FROM payments WHERE order_id=o.id AND business_id=o.business_id AND payment_status='Success' GROUP BY payment_method) t) summary ON TRUE WHERE o.id=$1 AND o.business_id=$2",
             [orderId, businessId]
         );
         const itemsQuery = pool.query(
@@ -4162,7 +4624,8 @@ app.put(
                 saleChannelKey,
                 notes,
                 createKot,
-                items
+                items,
+                itemCancellationReasons
             } = req.body;
 
             if (!orderType) {
@@ -4323,25 +4786,17 @@ app.put(
             /*
              * Replace order items.
              */
-            await client.query(
-                `
-                DELETE FROM order_items
-                WHERE order_id = $1 AND business_id = $2
-                `,
-                [orderId, Number(req.user.business_id)]
-            );
-
-            const itemValues = [];
-            const itemRows = normalizedItems.map((item, index) => {
-                const offset = index * 11;
-                itemValues.push(orderId,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options));
-                return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb)`;
+            const allowedItemCancellationReasons = [...new Set((Array.isArray(orderSettings.cancellationReasons) ? orderSettings.cancellationReasons : ["Customer request", "Duplicate order", "Item unavailable", "Other"])
+                .map(value => String(value || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30);
+            const itemReplacement = await replaceOrderItemsPreservingKOT(client, Number(req.user.business_id), orderId, normalizedItems, {
+                createMissingTickets: shouldCreateKot && existingOrder.status !== "Completed",
+                itemCancellationReasons,
+                allowedCancellationReasons: allowedItemCancellationReasons
             });
-            await client.query(`
-                INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
-                VALUES ${itemRows.join(",")}
-            `, itemValues);
-            if (shouldCreateKot && existingOrder.status !== "Completed") await createKOTForOrder(client, Number(req.user.business_id), orderId);
+            for (const event of itemReplacement.cancellationEvents) {
+                const reasons = [...new Set(event.reasons.map(entry => entry.reason))].join(", ");
+                await recordOrderActivity(client, updatedOrder.id, "Item cancelled", `${event.quantity} × ${event.itemName} removed. Reason: ${reasons}.`, req);
+            }
 
             if (existingOrder.status === "Completed") {
                 await client.query(`UPDATE invoices SET subtotal=$1,gst=$2,total=$3 WHERE order_id=$4`, [appliedSubtotal, appliedGst, appliedTotal, orderId]);
@@ -4362,8 +4817,13 @@ app.put(
             }
 
             await recordOrderActivity(client, updatedOrder.id, existingOrder.status === "Completed" ? "Closed bill edited" : "Order updated", `Order details saved. New total: ${appliedTotal.toFixed(2)}.`, req);
-            if (marketingDealId && marketingDealName && appliedDiscount > 0) {
-                await recordOrderActivity(client, updatedOrder.id, "Marketing deal applied", `${String(marketingDealName).slice(0, 120)} · Discount ${appliedDiscount.toFixed(2)}.`, req);
+            const previousDiscount = Number(existingOrder.discount || 0);
+            const discountChanged = Math.abs(previousDiscount - Number(appliedDiscount || 0)) > 0.009 ||
+                String(existingOrder.marketing_deal_name || existingOrder.discount_adjustment_name || "") !== String(marketingDealName || discountAdjustmentName || "");
+            if (discountChanged) {
+                const discountName = String(marketingDealName || discountAdjustmentName || "Manual discount").slice(0, 120);
+                const eventType = Number(appliedDiscount || 0) > 0 ? "Discount changed" : "Discount removed";
+                await recordOrderActivity(client, updatedOrder.id, eventType, `${previousDiscount.toFixed(2)} → ${Number(appliedDiscount || 0).toFixed(2)}${Number(appliedDiscount || 0) > 0 ? ` · ${discountName}` : ""}.`, req);
             }
 
             let checkoutResult = null;
@@ -4479,10 +4939,11 @@ app.put(
             await client.query(
                 `
                 UPDATE kot
-                SET status = 'Completed'
+                SET status = 'Cancelled'
+                    ,cancelled_quantity=cancelled_quantity+quantity,quantity=0
                 WHERE order_id = $1
                 AND business_id = $2
-                AND status <> 'Completed'
+                AND quantity > 0
                 `,
                 [req.params.id, Number(req.user.business_id)]
             );
@@ -5553,7 +6014,7 @@ app.get(
                        p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
                        p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
                        p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
-                       o.order_number,o.order_type,o.table_number,o.pax
+                       o.order_number,o.order_type,o.table_number,o.pax,o.status AS order_status
                 FROM kot k JOIN orders o ON k.order_id=o.id
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=o.business_id
                 LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=o.business_id
@@ -5581,7 +6042,11 @@ app.put(
             if(!allowed.includes(status)) return res.status(400).json({error:"Invalid KOT status"});
 
             const result=await pool.query(
-                `UPDATE kot SET status=$1 WHERE id=$2 AND business_id=$3 RETURNING *`,
+                `UPDATE kot
+                 SET status=$1::varchar,
+                     prep_started_at=CASE WHEN $1::varchar='Preparing'::varchar THEN COALESCE(prep_started_at,CURRENT_TIMESTAMP) ELSE prep_started_at END,
+                     prep_completed_at=CASE WHEN $1::varchar IN ('Ready'::varchar,'Completed'::varchar) THEN COALESCE(prep_completed_at,CURRENT_TIMESTAMP) ELSE prep_completed_at END
+                 WHERE id=$2 AND business_id=$3 RETURNING *`,
                 [status,id,Number(req.user.business_id)]
             );
             if(!result.rows.length) return res.status(404).json({error:"KOT not found"});
@@ -5662,10 +6127,10 @@ app.get(
             const result =
                 await pool.query(
                     `
-                    SELECT *
-                    FROM customers
-                    WHERE business_id=$1
-                    ORDER BY id DESC
+                    SELECT c.*
+                    FROM customers c
+                    WHERE c.business_id=$1
+                    ORDER BY c.id DESC
                     `,
                     [Number(req.user.business_id)]
                 );
@@ -5856,6 +6321,40 @@ app.post(
         }
     }
 );
+
+
+app.get("/api/customers/:id/order-activity", async (req, res) => {
+    const customerId = Number(req.params.id);
+    const businessId = Number(req.user.business_id);
+    if (!Number.isInteger(customerId) || customerId <= 0) return res.status(400).json({ error: "Invalid customer" });
+    try {
+        const customer = await pool.query(
+            `SELECT c.id,c.name,c.phone,c.email
+             FROM customers c
+             WHERE c.id=$1 AND c.business_id=$2
+             LIMIT 1`,
+            [customerId, businessId]
+        );
+        if (!customer.rows.length) return res.status(404).json({ error: "Customer not found" });
+        const activity = await pool.query(`
+            SELECT o.id AS order_id,o.order_number,o.order_type,o.table_number,o.status AS order_status,
+                   o.total AS order_total,o.created_at AS order_created_at,
+                   COALESCE(a.event_type,'Order placed') AS event_type,
+                   COALESCE(NULLIF(a.description,''),'Order created.') AS description,
+                   COALESCE(a.actor,'Staff') AS actor,
+                   COALESCE(a.created_at,o.created_at) AS created_at
+            FROM orders o
+            LEFT JOIN order_activity a ON a.order_id=o.id AND a.business_id=o.business_id
+            WHERE o.customer_id=$1 AND o.business_id=$2
+            ORDER BY COALESCE(a.created_at,o.created_at) DESC,o.id DESC,a.id DESC
+            LIMIT 1000
+        `, [customerId, businessId]);
+        res.json({ customer: customer.rows[0], activity: activity.rows });
+    } catch (error) {
+        console.error("Customer order activity lookup failed:", error);
+        res.status(500).json({ error: "Could not load customer order activity" });
+    }
+});
 
 
 app.put(
@@ -6205,6 +6704,175 @@ function getReportDateRange(range, from, to) {
 // REPORT SUMMARY
 // -----------------------------------------------------
 
+app.get("/api/reports/sale-items-by-transaction", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const dateRange = getReportDateRange(req.query.range || "today", req.query.from, req.query.to);
+        const result = await pool.query(`
+            WITH sale_transactions AS (
+                SELECT o.id AS order_id,o.order_number,o.order_type,o.table_number,o.total AS transaction_total,
+                       o.customer_id,o.sales_channel_name,o.sales_channel_key,o.public_tracking_token,o.created_at,o.updated_at,
+                       i.invoice_number,
+                       c.name AS customer_name,
+                       COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS channel_label,
+                       COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) AS transaction_date,
+                       COALESCE(pay.payment_modes,'') AS payment_modes
+                FROM orders o
+                LEFT JOIN invoices i ON i.order_id=o.id AND i.business_id=o.business_id
+                LEFT JOIN customers c ON c.id=o.customer_id AND c.business_id=o.business_id
+                LEFT JOIN LATERAL (
+                    SELECT STRING_AGG(DISTINCT p.payment_method,', ' ORDER BY p.payment_method) AS payment_modes,
+                           MAX(p.created_at) AS last_payment_time
+                    FROM payments p
+                    WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
+                ) pay ON TRUE
+                LEFT JOIN LATERAL (
+                    SELECT MAX(a.created_at) FILTER (WHERE a.event_type='Order completed') AS closed_at
+                    FROM order_activity a WHERE a.order_id=o.id AND a.business_id=o.business_id
+                ) activity ON TRUE
+                WHERE o.business_id=$1 AND o.status='Completed'
+            )
+            SELECT s.transaction_date,s.invoice_number,s.order_id,s.order_number,s.order_type,s.table_number,
+                   s.channel_label,s.customer_name,s.payment_modes,oi.item_name,COALESCE(m.category,'') AS category,
+                   oi.quantity,oi.price AS unit_price,oi.line_total,s.transaction_total
+            FROM sale_transactions s
+            INNER JOIN order_items oi ON oi.order_id=s.order_id AND oi.business_id=$1
+            LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$1
+            WHERE s.transaction_date >= ${dateRange.start} AND s.transaction_date < ${dateRange.end}
+            ORDER BY s.transaction_date DESC,s.order_id DESC,oi.id ASC
+        `, [businessId]);
+        res.json({ items: result.rows });
+    } catch (error) {
+        console.error("Sale items by transaction report error:", error);
+        res.status(400).json({ error: error.message || "Failed to load sale items by transaction" });
+    }
+});
+
+app.get("/api/reports/qr-menu-analytics", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const summaryResult = await pool.query(`
+            WITH period_events AS (
+                SELECT session_key,event_type,item_count,order_id,created_at
+                FROM qr_menu_events
+                WHERE business_id=$1 AND created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+            ), latest_cart AS (
+                SELECT DISTINCT ON(session_key) session_key,item_count,created_at
+                FROM period_events WHERE event_type='cart_updated'
+                ORDER BY session_key,created_at DESC
+            )
+            SELECT
+                COUNT(*) FILTER (WHERE event_type='menu_view') AS menu_views,
+                COUNT(DISTINCT session_key) FILTER (WHERE event_type='menu_view') AS unique_visitors,
+                COUNT(DISTINCT session_key) FILTER (WHERE event_type='cart_updated' AND item_count>0) AS carts_started,
+                COUNT(DISTINCT session_key) FILTER (WHERE event_type='checkout_started') AS checkout_starts,
+                COUNT(DISTINCT order_id) FILTER (WHERE event_type='order_placed' AND order_id IS NOT NULL) AS orders_from_sessions,
+                (SELECT COUNT(*) FROM latest_cart lc
+                 WHERE lc.item_count>0 AND lc.created_at <= CURRENT_TIMESTAMP - INTERVAL '30 minutes'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM qr_menu_events placed
+                       WHERE placed.business_id=$1 AND placed.session_key=lc.session_key
+                         AND placed.event_type='order_placed' AND placed.created_at >= lc.created_at
+                   )) AS abandoned_carts
+            FROM period_events
+        `, [businessId]);
+        const popularResult = await pool.query(`
+            SELECT oi.menu_id,oi.item_name,COALESCE(m.category,'') AS category,
+                   SUM(oi.quantity) AS quantity_sold,ROUND(SUM(oi.line_total),2) AS sales
+            FROM orders o
+            JOIN order_items oi ON oi.order_id=o.id AND oi.business_id=o.business_id
+            LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=o.business_id
+            WHERE o.business_id=$1 AND o.created_at >= CURRENT_TIMESTAMP - INTERVAL '30 days'
+              AND o.status<>'Cancelled' AND (o.public_tracking_token IS NOT NULL OR o.order_number ILIKE 'QR-%')
+            GROUP BY oi.menu_id,oi.item_name,m.category
+            ORDER BY SUM(oi.quantity) DESC,SUM(oi.line_total) DESC,oi.item_name
+            LIMIT 10
+        `, [businessId]);
+        const summary = summaryResult.rows[0] || {};
+        const uniqueVisitors = Number(summary.unique_visitors || 0);
+        const qrOrders = Number(summary.orders_from_sessions || 0);
+        res.json({
+            periodDays: 30,
+            summary: {
+                menuViews: Number(summary.menu_views || 0),
+                uniqueVisitors,
+                cartsStarted: Number(summary.carts_started || 0),
+                checkoutStarts: Number(summary.checkout_starts || 0),
+                qrOrders,
+                abandonedCarts: Number(summary.abandoned_carts || 0),
+                conversionRate: uniqueVisitors ? Math.round(qrOrders / uniqueVisitors * 1000) / 10 : 0
+            },
+            popularItems: popularResult.rows.map(row => ({
+                ...row,
+                quantity_sold: Number(row.quantity_sold || 0),
+                sales: Number(row.sales || 0)
+            }))
+        });
+    } catch (error) {
+        console.error("QR menu analytics report error:", error);
+        res.status(500).json({ error: "Could not load QR menu analytics" });
+    }
+});
+
+app.get("/api/reports/order-activity", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const dateRange = getReportDateRange(req.query.range || "today", req.query.from, req.query.to);
+        const result = await pool.query(`
+            SELECT a.id,a.created_at,a.event_type,a.description,a.actor,a.actor_user_id,
+                   o.id AS order_id,o.order_number,o.order_type,o.table_number,o.status AS order_status,
+                   c.name AS customer_name
+            FROM order_activity a
+            INNER JOIN orders o ON o.id=a.order_id AND o.business_id=a.business_id
+            LEFT JOIN customers c ON c.id=o.customer_id AND c.business_id=o.business_id
+            WHERE a.business_id=$1 AND a.created_at >= ${dateRange.start} AND a.created_at < ${dateRange.end}
+            ORDER BY a.created_at DESC,a.id DESC
+            LIMIT 2000
+        `, [businessId]);
+        res.json({ activities: result.rows });
+    } catch (error) {
+        console.error("Order activity audit report error:", error);
+        res.status(400).json({ error: error.message || "Could not load order activity" });
+    }
+});
+
+app.get("/api/reports/kitchen-prep-times", async (req, res) => {
+    try {
+        const businessId = Number(req.user.business_id);
+        const dateRange = getReportDateRange(req.query.range || "today", req.query.from, req.query.to);
+        const result = await pool.query(`
+            SELECT o.id AS order_id,o.order_number,o.order_type,o.table_number,
+                   k.id AS ticket_id,k.ticket_number,k.item_name,k.quantity,
+                   COALESCE(k.cancelled_quantity,0) AS cancelled_quantity,
+                   CASE WHEN k.quantity<=0 AND COALESCE(k.cancelled_quantity,0)>0 THEN 'Cancelled' ELSE k.status END AS ticket_status,
+                   COALESCE(NULLIF(kg.station,''),NULLIF(kg.name,''),'Kitchen') AS station,
+                   COALESCE(NULLIF(kg.station,''),NULLIF(kg.name,''),'Kitchen') AS station_name,
+                   k.created_at AS ticket_received_at,k.prep_started_at,k.prep_completed_at,
+                   CASE WHEN k.prep_started_at IS NOT NULL THEN
+                       ROUND((EXTRACT(EPOCH FROM (COALESCE(k.prep_completed_at,CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-k.prep_started_at))/60.0)::numeric,2)
+                   ELSE NULL END AS prep_minutes,
+                   CASE
+                       WHEN k.prep_completed_at IS NOT NULL THEN ROUND((EXTRACT(EPOCH FROM (k.prep_completed_at-k.created_at))/60.0)::numeric,2)
+                       WHEN k.prep_started_at IS NOT NULL AND k.status NOT IN ('Ready','Completed') THEN ROUND((EXTRACT(EPOCH FROM ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-k.created_at))/60.0)::numeric,2)
+                       WHEN k.status NOT IN ('Ready','Completed') AND NOT (k.quantity<=0 AND COALESCE(k.cancelled_quantity,0)>0) THEN ROUND((EXTRACT(EPOCH FROM ((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')-k.created_at))/60.0)::numeric,2)
+                       ELSE NULL
+                   END AS elapsed_minutes
+            FROM kot k
+            INNER JOIN orders o ON o.id=k.order_id AND o.business_id=k.business_id
+            LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=k.business_id
+            WHERE k.business_id=$1
+              AND k.created_at >= ${dateRange.start}
+              AND k.created_at < ${dateRange.end}
+            ORDER BY elapsed_minutes DESC NULLS LAST,k.created_at DESC,k.ticket_number DESC,k.id DESC
+            LIMIT 5000
+        `, [businessId]);
+        res.json({ tickets: result.rows });
+    } catch (error) {
+        console.error("Kitchen prep-time report error:", error);
+        res.status(400).json({ error: error.message || "Failed to load kitchen prep times" });
+    }
+});
+
 app.get("/api/reports/sales-audit", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
@@ -6232,6 +6900,7 @@ app.get("/api/reports/sales-audit", async (req, res) => {
                    COALESCE(items.item_count,0) AS item_count,COALESCE(items.total_quantity,0) AS total_quantity,
                    COALESCE(kot_summary.resource_group_names,'') AS resource_group_names,
                    COALESCE(kot_summary.number_of_tickets,0) AS number_of_tickets,
+                   prep.average_prep_minutes,prep.longest_prep_minutes,COALESCE(prep.kitchen_stations,'') AS kitchen_stations,
                    CASE WHEN o.subtotal>0 THEN ROUND((o.discount/o.subtotal)*100,2) ELSE 0 END AS discount_percent,
                    GREATEST(o.subtotal-o.discount,0) AS net_amount,
                    o.total-((o.subtotal-o.discount)+o.service_charge+o.gst) AS rounding_amount,
@@ -6278,6 +6947,15 @@ app.get("/api/reports/sales-audit", async (req, res) => {
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=k.business_id
                 WHERE k.order_id=o.id AND k.business_id=o.business_id
             ) kot_summary ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT ROUND(AVG(EXTRACT(EPOCH FROM (k.prep_completed_at-k.prep_started_at))/60.0)::numeric,2) AS average_prep_minutes,
+                       ROUND(MAX(EXTRACT(EPOCH FROM (k.prep_completed_at-k.prep_started_at))/60.0)::numeric,2) AS longest_prep_minutes,
+                       STRING_AGG(DISTINCT COALESCE(NULLIF(kg.station,''),NULLIF(kg.name,''),'Kitchen'),', ' ORDER BY COALESCE(NULLIF(kg.station,''),NULLIF(kg.name,''),'Kitchen')) AS kitchen_stations
+                FROM kot k
+                LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=k.business_id
+                WHERE k.order_id=o.id AND k.business_id=o.business_id
+                  AND k.prep_started_at IS NOT NULL AND k.prep_completed_at IS NOT NULL
+            ) prep ON TRUE
             WHERE o.business_id=$1 AND o.status='Completed'
               AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) >= ${dateRange.start}
               AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) < ${dateRange.end}
@@ -8544,39 +9222,63 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
     const currency=clean(settings.currency||'₹');
     const line='-'.repeat(width);
     const moneyValue=value=>currency+Number(value||0).toFixed(2);
-    const rows=[
-        clean(settings.restaurantName||'SLASH POS'),
-        clean(settings.address||''),
-        settings.phone?'Phone: '+clean(settings.phone):'',
-        settings.gstin?'GSTIN: '+clean(settings.gstin):'',
-        line,
-        receipt.isOpenOrder?'OPEN ORDER / PROFORMA':'Invoice: '+clean(receipt.invoiceNumber||'-'),
-        'Order: '+clean(receipt.orderNumber||'-'),
-        'Type: '+clean(receipt.orderType||'-'),
-        receipt.tableNumber?'Table: '+clean(receipt.tableNumber):'',
-        'Date: '+clean(receipt.date||new Date().toLocaleString()),
-        receipt.customerName?'Customer: '+clean(receipt.customerName):'',
-        line,
-        'ITEM                         QTY      AMOUNT',
-        ...(Array.isArray(receipt.items)?receipt.items.flatMap(item=>{
-            const name=clean(settings.uppercaseItems?String(item.name||'-').toUpperCase():(item.name||'-')).slice(0,width-17);
-            const qty=Number(item.quantity||0),amount=qty*Number(item.price||0);
-            const row=[name.padEnd(width-16)+String(qty).padStart(4)+' '+moneyValue(amount).padStart(12)];
-            const options=Array.isArray(item.options)?item.options.flatMap(set=>Array.isArray(set.options)?set.options.map(option=>clean(option.name)):[]).filter(Boolean):[];
-            if(options.length)row.push('  + '+options.join(', ').slice(0,width-4));
-            return row;
-        }):[]),
-        line,
-        'Subtotal: '+moneyValue(receipt.subtotal||0),
-        'GST:      '+moneyValue(receipt.gst||0),
-        'TOTAL:    '+moneyValue(receipt.total||0),
-        'Payment:  '+clean(receipt.paymentMethod||'-'),
-        line,
-        ...clean(settings.footer||'Thank you!').split(/\r?\n/).map(clean),
-        '',
-        ''
-    ];
-    return Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),Buffer.from(rows.filter(Boolean).join('\n')+'\n','utf8'),Buffer.from([0x1b,0x64,0x04,0x1d,0x56,0x00])]);
+    const wrap=(value,limit=width)=>{const words=clean(value).split(/\s+/);const result=[];let current='';for(let word of words){while(word.length>limit){if(current)result.push(current);result.push(word.slice(0,limit));word=word.slice(limit);current='';}if(!word)continue;const next=current?current+' '+word:word;if(next.length>limit){if(current)result.push(current);current=word;}else current=next;}if(current)result.push(current);return result;};
+    const pair=(label,value)=>{const right=String(value??'');const left=String(label||'');if(left.length+right.length+1<=width)return[left.padEnd(width-right.length)+right];return[...wrap(left),...wrap(right).map((part,index)=>index===0?part.padStart(width):part)];};
+    const center=value=>wrap(value).map(part=>part.padStart(Math.floor((width+part.length)/2)));
+    const items=Array.isArray(receipt.items)?receipt.items:[];
+    const header=[clean(settings.restaurantName||'SLASH POS')];
+    if(settings.businessLegalName)header.push(clean(settings.businessLegalName));
+    header.push(...wrap(settings.address||''));
+    if(settings.phone)header.push('Phone: '+clean(settings.phone));
+    if(settings.gstin)header.push('GST#: '+clean(settings.gstin));
+    if(settings.fssai)header.push('FSSAI#: '+clean(settings.fssai));
+    const customHeader=clean(settings.header||'');
+    if(customHeader&&customHeader!=='Cafe Management System')header.push(...wrap(customHeader));
+    header.push(receipt.isOpenOrder?'Order':'Invoice');
+    const body=[];
+    if(receipt.tokenNumber)body.push(...wrap('Token No: '+clean(receipt.tokenNumber)));
+    body.push(...wrap(receipt.customerName||'Guest'));
+    const customerCode=receipt.customerCode||(receipt.customerId?'#'+receipt.customerId:'');
+    if(customerCode)body.push(...wrap(customerCode));
+    body.push(line);
+    const totalQty=items.reduce((sum,item)=>sum+Math.max(0,Number(item.quantity||0)),0);
+    const invoiceLabel=receipt.isOpenOrder?(receipt.orderNumber||'-'):(receipt.invoiceNumber||receipt.orderNumber||'-');
+    body.push(...pair((receipt.isOpenOrder?'Order ':'Invoice ')+clean(invoiceLabel),`${items.length} ${items.length===1?'item':'items'} (${totalQty} Qty)`));
+    body.push(...pair(clean(receipt.date||new Date().toLocaleString('en-IN',{timeZone:'Asia/Kolkata'})),clean(receipt.cashierName||'')));
+    const orderContext=[receipt.orderType,receipt.tableNumber?'Table '+receipt.tableNumber:'',Number(receipt.pax)>0?Number(receipt.pax)+' PAX':''].filter(Boolean).join(' · ');
+    if(orderContext)body.push(...wrap(orderContext));
+    body.push(line);
+    for(const [index,item] of items.entries()){
+        const name=clean(settings.uppercaseItems?String(item.name||'-').toUpperCase():(item.name||'-'));
+        body.push(...wrap((index+1)+'. '+name));
+        const qty=Number(item.quantity||0),price=Number(item.price||0),unit=clean(item.unit||'ea');
+        const lineTotal=Number(item.lineTotal)>0||price===0?Number(item.lineTotal||0):qty*price;
+        body.push(...pair('  '+qty+' @ '+moneyValue(price)+'/'+unit,moneyValue(lineTotal)));
+        const options=Array.isArray(item.options)?item.options.flatMap(set=>Array.isArray(set.options)?set.options.map(option=>clean(option.name)):[]).filter(Boolean).join(', '):'';
+        if(options)body.push(...wrap('  '+options));
+    }
+    body.push(line,...pair('Sub Total',moneyValue(receipt.subtotal||0)));
+    if(Number(receipt.discount||0)>0)body.push(...pair(receipt.discountName?'Discount · '+clean(receipt.discountName):'Discount','-'+moneyValue(receipt.discount)));
+    if(Number(receipt.serviceCharge||0)>0)body.push(...pair(receipt.chargeName?'Charges · '+clean(receipt.chargeName):'Charges',moneyValue(receipt.serviceCharge)));
+    const taxBreakdown=Array.isArray(receipt.taxBreakdown)?receipt.taxBreakdown:[];
+    if(taxBreakdown.length)taxBreakdown.forEach(tax=>body.push(...pair(`${clean(tax.component||'Tax')} ${Number(tax.rate||0)}% on ${moneyValue(tax.taxableBase||0)}`,moneyValue(tax.taxAmount||0))));
+    else if(Number(receipt.gst||0)>0)body.push(...pair('GST',moneyValue(receipt.gst)));
+    const roundedTotal=Number(receipt.total||0),rounding=Number(receipt.roundingAdjustment||0);
+    body.push(...pair('Bill Total',moneyValue(roundedTotal-rounding)),...pair('Bill Total (rounded)',moneyValue(roundedTotal)));
+    const allocations=Array.isArray(receipt.paymentAllocations)?receipt.paymentAllocations:[];
+    const collected=receipt.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(receipt.amountCollected||0);
+    const due=receipt.amountDue===undefined?Math.max(0,Number(receipt.total||0)-collected):Number(receipt.amountDue||0);
+    if(!receipt.isOpenOrder){body.push('Payment Summary');if(allocations.length)allocations.forEach(payment=>body.push(...pair(clean(payment.method||'Payment'),moneyValue(payment.amount))));else body.push(...pair(clean(receipt.paymentMethod||'Payment'),moneyValue(collected)));body.push(...pair('Balance',moneyValue(due)));}
+    body.push(line,...center('RCM applicable: NO'));
+    body.push(line);
+    const footer=[...String(settings.footer||'Visit Again!\nThank you.').replace('Thank You!\nVisit Again 😊','Visit Again!\nThank you.').split(/\r?\n/).map(clean).filter(Boolean)];
+    const encode=rows=>Buffer.from(rows.filter(Boolean).join('\n')+'\n','utf8');
+    return Buffer.concat([
+        Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),encode(header),
+        Buffer.from([0x1b,0x61,0x00]),encode(body),
+        Buffer.from([0x1b,0x61,0x01]),encode(footer),
+        Buffer.from([0x0a,0x0a,0x0a,0x1d,0x56,0x00])
+    ]);
 }
 
 function sendRawPrinterBytes(host,port,bytes) {
@@ -8689,7 +9391,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
-    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters'
+    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','qr_menu_events','qr_service_requests'
 ];
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices

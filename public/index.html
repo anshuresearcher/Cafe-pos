@@ -350,13 +350,12 @@
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('reservations')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-reservations"></use></svg>Reservations</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('tables')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-tables"></use></svg>Tables</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('kitchen')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-kitchen"></use></svg>Kitchen</button>
-            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('kot-groups')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-kot"></use></svg>KOT Groups</button>
+            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('kot-groups')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-printer"></use></svg>Printer &amp; KOT Groups</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('menu')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-menu"></use></svg>Menu</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('table-qr-menu')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-qr"></use></svg>Table QR Menu</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('customers')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-customers"></use></svg>Customers</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('reports')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-reports"></use></svg>Reports</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('settings')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-settings"></use></svg>Settings</button>
-            <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('printer')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-printer"></use></svg>Printer</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('access')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-access"></use></svg>Access</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('expenses')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-expenses"></use></svg>Expenses</button>
             <button class="nav-btn" onclick="document.body.classList.remove('billing-nav-open');showPage('marketing')"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-marketing"></use></svg>Marketing</button>
@@ -902,6 +901,7 @@
                         <button id="kotTabPending" class="kot-tab active" onclick="setKOTTab('pending')">⏳ Pending KOT <span id="kotCountPending">0</span></button>
                         <button id="kotTabReady" class="kot-tab" onclick="setKOTTab('ready')">✅ Ready KOT <span id="kotCountReady">0</span></button>
                         <button id="kotTabCompleted" class="kot-tab" onclick="setKOTTab('completed')">✔️ Completed <span id="kotCountCompleted">0</span></button>
+                        <button id="kotTabCancelled" class="kot-tab" onclick="setKOTTab('cancelled')">✕ Cancelled <span id="kotCountCancelled">0</span></button>
                     </div>
                     <div class="kot-filters">
                         <select id="kotDateFilter" onchange="toggleKOTCustomDates()">
@@ -925,15 +925,20 @@
 
         <section id="kot-groups" class="page">
             <div id="kotGroupsOverview" class="module-card-grid">
-                <button type="button" class="module-navigation-card" onclick="showKOTGroupsView('groups')">
-                    <span class="module-card-icon">🧩</span>
+                <button id="printerModuleCard" type="button" class="module-navigation-card" onclick="showKOTGroupsView('printer')">
+                    <span class="module-card-icon"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-printer"></use></svg></span>
+                    <span class="module-card-copy"><strong>Printer</strong><span>Manage local, Bluetooth and network printers, receipt printing and defaults.</span><small><b id="printerCount">0</b> saved printers</small></span>
+                    <span class="module-card-arrow" aria-hidden="true">›</span>
+                </button>
+                <button id="kotGroupsModuleCard" type="button" class="module-navigation-card" onclick="showKOTGroupsView('groups')">
+                    <span class="module-card-icon"><svg class="module-nav-icon" aria-hidden="true"><use href="#module-icon-kot"></use></svg></span>
                     <span class="module-card-copy"><strong>KOT Groups</strong><span>Route menu categories and items to production stations.</span><small><b id="kotGroupCount">0</b> groups</small></span>
                     <span class="module-card-arrow" aria-hidden="true">›</span>
                 </button>
             </div>
             <div id="kotGroupsDetail" hidden>
                 <div class="module-subpage-header">
-                    <button type="button" class="module-back-button" onclick="showKOTGroupsView('overview')">← KOT Groups</button>
+                    <button type="button" class="module-back-button" onclick="showKOTGroupsView('overview')">← Printer &amp; KOT Groups</button>
                     <div><span class="module-eyebrow">KITCHEN SETUP</span><h2>All KOT Groups</h2><p>Manage production stations and item routing.</p></div>
                     <button class="big-btn" type="button" onclick="openKOTGroupModal()">＋ Add KOT Group</button>
                 </div>
@@ -964,7 +969,56 @@
                     <div class="kot-group-editor-footer"><label class="kot-group-active-toggle"><input id="kotGroupActive" type="checkbox" checked> Active</label><div class="modal-actions"><button class="cancel-btn" type="button" onclick="closeKOTGroupModal()">Cancel</button><button class="big-btn" type="button" onclick="saveKOTGroup()">💾 Save Group</button></div></div>
                 </div>
             </div>
-            <div id="kotGroupTargetPickerModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="kotGroupTargetPickerTitle">
+            <div id="printerDetail" hidden>
+    <div class="module-subpage-header">
+        <button type="button" class="module-back-button" onclick="showKOTGroupsView('overview')">← Printer &amp; KOT Groups</button>
+        <div><span class="module-eyebrow">PRINTING SETUP</span><h2>Printer</h2><p>Manage local, Bluetooth and network printers, receipt printing and defaults.</p></div>
+        <button class="big-btn" type="button" onclick="loadPrinters()">Refresh Printers</button>
+    </div>
+<div class="dashboard-box">
+        <h3 id="printerFormTitle">Add Printer</h3>
+        <form id="printerForm" onsubmit="event.preventDefault();savePrinter()">
+            <input id="printerId" type="hidden">
+            <div class="printer-form-grid">
+                <div class="form-group"><label for="printerName">Printer Name</label><input id="printerName" required placeholder="e.g. Counter Receipt Printer"></div>
+                <div class="form-group"><label for="printerType">Connection Type</label><select id="printerType" onchange="togglePrinterFields()"><option value="local">Local computer printer</option><option value="bluetooth">Bluetooth printer</option><option value="network">Network / IP printer</option></select></div>
+                <div class="form-group"><label for="printerPaperWidth">Paper Width</label><select id="printerPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
+            </div>
+            <div id="localPrinterFields" class="printer-note">
+                <strong>Windows printer</strong>
+                <p style="margin:6px 0 10px">Select any printer installed in Windows, including PDF, Fax and other virtual printers. The selected Windows printer receives the bill or test print.</p>
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                    <select id="windowsPrinterSelect" style="min-width:280px;flex:1"><option value="">Detecting Windows printers…</option></select>
+                    <button class="cancel-btn" type="button" onclick="discoverWindowsPrinters()">🔄 Refresh</button>
+                    <button class="cancel-btn" type="button" onclick="useSelectedWindowsPrinter()">Use Selected</button>
+                </div>
+                <small id="windowsPrinterStatus" style="display:block;margin-top:8px;opacity:.75">Connecting to local printer service…</small>
+            </div>
+            <div id="networkPrinterFields" class="printer-form-grid" style="display:none">
+                <div class="form-group"><label for="printerHost">Printer IPv4 Address</label><input id="printerHost" inputmode="decimal" placeholder="192.168.1.50"></div>
+                <div class="form-group"><label for="printerPort">Port</label><input id="printerPort" type="number" min="1" max="65535" value="9100"></div>
+            </div>
+            <div id="bluetoothPrinterFields" style="display:none">
+                <div class="printer-form-grid">
+                    <div class="form-group"><label for="printerBluetoothName">Bluetooth Device Name</label><input id="printerBluetoothName" placeholder="Name shown in Bluetooth"></div>
+                    <div class="form-group"><label for="printerServiceUuid">Bluetooth Service UUID</label><input id="printerServiceUuid" value="000018f0-0000-1000-8000-00805f9b34fb"></div>
+                    <div class="form-group"><label for="printerCharacteristicUuid">Write Characteristic UUID</label><input id="printerCharacteristicUuid" value="00002af1-0000-1000-8000-00805f9b34fb"></div>
+                </div>
+                <p class="printer-note">Bluetooth printing needs Chrome or Edge on HTTPS or localhost. Some Bluetooth printers use Classic Bluetooth and cannot be accessed directly by a browser.</p>
+                <button class="cancel-btn" type="button" onclick="pairBluetoothFromForm()">Find Bluetooth Printer</button>
+            </div>
+            <div class="settings-options"><label><input id="printerIsDefault" type="checkbox"> Use as the default bill printer</label></div>
+            <div class="action-row" style="margin-top:16px"><button class="big-btn" type="submit">Save Printer</button><button class="cancel-btn" type="button" onclick="resetPrinterForm()">Cancel</button></div>
+        </form>
+        <div id="printerMessage" class="printer-message" role="status"></div>
+    </div>
+    <div class="dashboard-box">
+        <h3>Saved Printers</h3>
+        <div class="table-container"><table><thead><tr><th>Name</th><th>Connection</th><th>Address / Device</th><th>Paper</th><th>Default</th><th>Actions</th></tr></thead><tbody id="printersBody"><tr><td colspan="6">Loading printers…</td></tr></tbody></table></div>
+    </div>
+
+</div>
+<div id="kotGroupTargetPickerModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="kotGroupTargetPickerTitle">
                 <div class="modal-content kot-target-picker-modal">
                     <div class="modal-header"><div><span class="module-eyebrow">KOT ROUTING</span><h2 id="kotGroupTargetPickerTitle">Select categories</h2></div><button class="close-btn" type="button" onclick="closeKOTGroupTargetPicker()" aria-label="Close">✕</button></div>
                     <label class="kot-target-search"><span aria-hidden="true">⌕</span><input id="kotGroupTargetSearch" type="search" placeholder="Search categories…" oninput="renderKOTGroupTargetOptions()"></label>
@@ -1020,6 +1074,15 @@
             <div class="table-qr-selector-card"><label for="tableQrTableSelect">Choose table</label><select id="tableQrTableSelect" onchange="renderTableQrCards()"><option value="">Choose a table…</option></select><span>Only the selected table QR will be generated.</span></div>
             <div id="tableQrGrid" class="table-qr-grid"><div class="table-qr-empty">Loading your POS tables…</div></div>
           </section>
+
+          <details class="table-qr-section qr-category-order-section">
+            <summary class="qr-category-order-summary"><span class="qr-category-order-summary-copy"><span class="menu-eyebrow">GUEST MENU DISPLAY</span><strong>Category display order</strong><span>Choose the order guests see categories in your QR menu.</span></span><span class="qr-category-order-summary-action"><span>Manage order</span><span class="qr-category-order-chevron" aria-hidden="true">⌄</span></span></summary>
+            <div class="qr-category-order-content">
+              <div class="table-qr-section-head"><div><h3>Arrange guest categories</h3><p>Use the arrows or import a sheet to set a custom order. This does not change the POS menu.</p></div><button type="button" class="big-btn" onclick="saveQrCategoryOrder()">Save display order</button></div>
+              <div class="qr-category-order-tools"><div class="qr-category-order-upload"><input id="qrCategoryOrderFile" type="file" accept=".xlsx,.csv,.tsv,text/csv" hidden onchange="readQrCategoryOrderFile(this.files?.[0])"><button type="button" class="table-action-btn" onclick="document.getElementById('qrCategoryOrderFile').click()">⇧ Import CSV / Excel</button><button type="button" class="table-action-btn" onclick="downloadQrCategoryOrderTemplate()">↓ Download order sheet</button></div><p id="qrCategoryOrderStatus" role="status">Use the arrows to arrange categories, or import a sheet with Category and Order columns.</p></div>
+              <ol id="qrCategoryOrderList" class="qr-category-order-list"><li class="qr-category-order-empty">Loading menu categories…</li></ol>
+            </div>
+          </details>
 
           <section class="table-qr-section">
             <div class="table-qr-section-head"><div><h3>QR menu item availability</h3><p>Sold-out status only affects the guest QR menu. POS availability stays in Menu Items.</p></div><input id="qrStockSearch" class="table-qr-search" type="search" placeholder="Search menu items…" oninput="renderQrStockItems()"></div>
@@ -1112,6 +1175,8 @@
                                 <th>
                                     Created
                                 </th>
+
+                                <th>Actions</th>
 
                             </tr>
 
@@ -1579,15 +1644,17 @@
                     <div id="settingRestaurantLogoPreviewWrap" class="restaurant-logo-preview-wrap" hidden><img id="settingRestaurantLogoPreview" alt="Restaurant logo preview"><button type="button" class="table-action-btn" onclick="removeRestaurantLogo()">Remove logo</button></div>
                 </div>
                 <div class="form-group"><label>Restaurant Name</label><input id="settingRestaurantName" type="text" placeholder="Restaurant Name"></div>
+                <div class="form-group"><label>Registered business name (optional)</label><input id="settingBusinessLegalName" type="text" placeholder="Company / legal name"></div>
                 <div class="form-group"><label>Address</label><input id="settingAddress" type="text" placeholder="Address"></div>
                 <div class="form-group"><label>Phone</label><input id="settingPhone" type="text" placeholder="Phone"></div>
                 <div class="form-group"><label>GSTIN</label><input id="settingGstin" type="text" placeholder="GSTIN"></div>
+                <div class="form-group"><label>FSSAI number (optional)</label><input id="settingFssai" type="text" maxlength="40" placeholder="FSSAI license number"></div>
             </div>
 
             <div class="settings-card" data-settings-feature="bill-template" hidden>
                 <h3>🧾 Bill Template</h3>
                 <div class="form-group"><label>Header</label><textarea id="settingHeader" rows="3" placeholder="Cafe Management System"></textarea></div>
-                <div class="form-group"><label>Footer</label><textarea id="settingFooter" rows="3" placeholder="Thank You!&#10;Visit Again 😊"></textarea></div>
+                <div class="form-group"><label>Footer</label><textarea id="settingFooter" rows="3" placeholder="Visit Again!&#10;Thank you."></textarea></div>
                 <div class="settings-options">
                     <label><input type="checkbox" id="settingShowInvoice"> Show Invoice Number</label>
                     <label><input type="checkbox" id="settingShowCustomer"> Show Customer Details</label>
@@ -1692,6 +1759,13 @@
                 <div class="form-group"><label>Customer Display Message</label><input id="settingCustomerMessage" placeholder="Thank you for visiting!"></div>
                 <div class="settings-options"><label><input type="checkbox" id="settingEnableNotifications"> Enable operational notifications</label><label><input type="checkbox" id="settingEnableKOTSound"> KOT alert sound (Kitchen users)</label></div>
                 <div class="form-group"><label>KOT Alert Check Interval (seconds)</label><input id="settingKOTAlertInterval" type="number" min="3" max="60" value="5"></div>
+                <section class="qr-service-alert-settings" aria-labelledby="qrServiceAlertSettingsTitle">
+                    <div class="qr-service-alert-heading"><span class="eyebrow">GUEST QR MENU</span><h4 id="qrServiceAlertSettingsTitle">Table service alerts</h4><p>Choose POS notifications, Hindi voice with buzzer, or buzzer sound only for each guest request.</p></div>
+                    <div class="qr-service-alert-grid">
+                        <article class="qr-service-alert-card"><div class="qr-service-alert-card-head"><span class="qr-service-alert-icon clean" aria-hidden="true">✧</span><div><strong>Clean the table</strong><small>Guest requests table cleaning</small></div></div><label class="qr-service-alert-toggle"><span>POS notification</span><input type="checkbox" id="settingQrCleanTableNotification"></label><label class="qr-service-alert-toggle"><span>Hindi voice + buzzer</span><input type="checkbox" id="settingQrCleanTableSound"></label><label class="qr-service-alert-toggle"><span>Buzzer sound only</span><input type="checkbox" id="settingQrCleanTableBuzzer"></label></article>
+                        <article class="qr-service-alert-card"><div class="qr-service-alert-card-head"><span class="qr-service-alert-icon waiter" aria-hidden="true">♧</span><div><strong>Call the waiter</strong><small>Guest requests a team member</small></div></div><label class="qr-service-alert-toggle"><span>POS notification</span><input type="checkbox" id="settingQrCallWaiterNotification"></label><label class="qr-service-alert-toggle"><span>Hindi voice + buzzer</span><input type="checkbox" id="settingQrCallWaiterSound"></label><label class="qr-service-alert-toggle"><span>Buzzer sound only</span><input type="checkbox" id="settingQrCallWaiterBuzzer"></label></article>
+                    </div>
+                </section>
             </div>
             <div class="settings-card kot-setting-card" data-settings-feature="kitchen-kot" hidden>
                 <h3>👨‍🍳 Kitchen / KOT</h3>
@@ -1747,53 +1821,7 @@
     </div>
 </section>
 
-<section id="printer" class="page">
-    <div class="page-header">
-        <div><h2>🖨️ Printer</h2><p>Manage Windows, USB, Bluetooth and LAN printers. Select a default bill printer for direct printing without the browser print popup.</p></div>
-        <button class="big-btn" type="button" onclick="loadPrinters()">Refresh Printers</button>
-    </div>
-    <div class="dashboard-box">
-        <h3 id="printerFormTitle">Add Printer</h3>
-        <form id="printerForm" onsubmit="event.preventDefault();savePrinter()">
-            <input id="printerId" type="hidden">
-            <div class="printer-form-grid">
-                <div class="form-group"><label for="printerName">Printer Name</label><input id="printerName" required placeholder="e.g. Counter Receipt Printer"></div>
-                <div class="form-group"><label for="printerType">Connection Type</label><select id="printerType" onchange="togglePrinterFields()"><option value="local">Local computer printer</option><option value="bluetooth">Bluetooth printer</option><option value="network">Network / IP printer</option></select></div>
-                <div class="form-group"><label for="printerPaperWidth">Paper Width</label><select id="printerPaperWidth"><option value="80">80mm</option><option value="58">58mm</option></select></div>
-            </div>
-            <div id="localPrinterFields" class="printer-note">
-                <strong>Windows printer</strong>
-                <p style="margin:6px 0 10px">Select any printer installed in Windows, including PDF, Fax and other virtual printers. The selected Windows printer receives the bill or test print.</p>
-                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-                    <select id="windowsPrinterSelect" style="min-width:280px;flex:1"><option value="">Detecting Windows printers…</option></select>
-                    <button class="cancel-btn" type="button" onclick="discoverWindowsPrinters()">🔄 Refresh</button>
-                    <button class="cancel-btn" type="button" onclick="useSelectedWindowsPrinter()">Use Selected</button>
-                </div>
-                <small id="windowsPrinterStatus" style="display:block;margin-top:8px;opacity:.75">Connecting to local printer service…</small>
-            </div>
-            <div id="networkPrinterFields" class="printer-form-grid" style="display:none">
-                <div class="form-group"><label for="printerHost">Printer IPv4 Address</label><input id="printerHost" inputmode="decimal" placeholder="192.168.1.50"></div>
-                <div class="form-group"><label for="printerPort">Port</label><input id="printerPort" type="number" min="1" max="65535" value="9100"></div>
-            </div>
-            <div id="bluetoothPrinterFields" style="display:none">
-                <div class="printer-form-grid">
-                    <div class="form-group"><label for="printerBluetoothName">Bluetooth Device Name</label><input id="printerBluetoothName" placeholder="Name shown in Bluetooth"></div>
-                    <div class="form-group"><label for="printerServiceUuid">Bluetooth Service UUID</label><input id="printerServiceUuid" value="000018f0-0000-1000-8000-00805f9b34fb"></div>
-                    <div class="form-group"><label for="printerCharacteristicUuid">Write Characteristic UUID</label><input id="printerCharacteristicUuid" value="00002af1-0000-1000-8000-00805f9b34fb"></div>
-                </div>
-                <p class="printer-note">Bluetooth printing needs Chrome or Edge on HTTPS or localhost. Some Bluetooth printers use Classic Bluetooth and cannot be accessed directly by a browser.</p>
-                <button class="cancel-btn" type="button" onclick="pairBluetoothFromForm()">Find Bluetooth Printer</button>
-            </div>
-            <div class="settings-options"><label><input id="printerIsDefault" type="checkbox"> Use as the default bill printer</label></div>
-            <div class="action-row" style="margin-top:16px"><button class="big-btn" type="submit">Save Printer</button><button class="cancel-btn" type="button" onclick="resetPrinterForm()">Cancel</button></div>
-        </form>
-        <div id="printerMessage" class="printer-message" role="status"></div>
-    </div>
-    <div class="dashboard-box">
-        <h3>Saved Printers</h3>
-        <div class="table-container"><table><thead><tr><th>Name</th><th>Connection</th><th>Address / Device</th><th>Paper</th><th>Default</th><th>Actions</th></tr></thead><tbody id="printersBody"><tr><td colspan="6">Loading printers…</td></tr></tbody></table></div>
-    </div>
-</section>
+
 
 <section
     id="reports"
@@ -1864,7 +1892,7 @@
 
             <button
                 class="big-btn"
-                onclick="loadReports();loadSalesAuditReport();loadOrderCategoryReports()">
+                onclick="loadReports();loadSalesAuditReport();loadSaleItemsByTransactionReport();loadOrderCategoryReports()">
 
                 🔄 Apply
 
@@ -1958,7 +1986,10 @@
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('order-type')"><span class="module-card-icon">🍽️</span><span class="module-card-copy"><strong>Sales by Order Type</strong><span>Compare dine-in, takeaway and other order channels.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('daily')"><span class="module-card-icon">📅</span><span class="module-card-copy"><strong>Daily Sales</strong><span>Track sales and order counts across the selected dates.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('gst')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>GST / Tax Report</strong><span>Taxable sales and GST collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
-                <button type="button" class="module-navigation-card" onclick="showSalesReportView('audit')"><span class="module-card-icon">🔎</span><span class="module-card-copy"><strong>Sale Transaction Audit</strong><span>Completed sales by order, invoice, payment and balance.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('sale-items-transaction')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Sale Items by Transaction</strong><span>See every sold item under its order and download the item-level report.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('audit')"><span class="module-card-icon">🔎</span><span class="module-card-copy"><strong>Sale Transaction Audit</strong><span>Completed sales by order, invoice, payment and balance.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('qr-analytics')"><span class="module-card-icon">⌁</span><span class="module-card-copy"><strong>QR Menu Analytics</strong><span>Views, popular items, checkout activity and abandoned carts over 30 days.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+        <button type="button" class="module-navigation-card" onclick="showSalesReportView('order-activity')"><span class="module-card-icon">◷</span><span class="module-card-copy"><strong>Order Activity Audit</strong><span>See order edits, item and order cancellations, discounts, payments and staff actions.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('discounts')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
         <button type="button" class="module-navigation-card" onclick="showSalesReportView('non-chargeable')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Completed orders recorded without payment.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     </div>
@@ -2324,16 +2355,72 @@
 
 <div class="dashboard-box sales-audit-box">
     <div class="sales-audit-header">
-        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review completed sales by order, invoice, channel, customer, tax, payment and balance. CSV export follows the supplied 102-column audit layout; fields not recorded by Slash are left blank.</p></div>
+        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review completed sales, payment and balance details, plus kitchen prep time by item and station.</p></div>
         <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
     </div>
     <div id="salesAuditStatus" class="access-muted" role="status">Choose a date range above, then load the transaction audit.</div>
     <div class="table-container">
         <table>
-            <thead><tr><th>Business date</th><th>Invoice date</th><th>Invoice number</th><th>Order number</th><th>Channel / table</th><th>Customer</th><th>Payment modes</th><th>Gross</th><th>Discount</th><th>Other charges</th><th>Taxes</th><th>Total</th><th>Paid</th><th>Balance due</th><th>Sale status</th></tr></thead>
-            <tbody id="salesAuditBody"><tr><td colspan="15">No audit loaded.</td></tr></tbody>
+            <thead><tr><th>Business date</th><th>Invoice date</th><th>Invoice number</th><th>Order number</th><th>Channel / table</th><th>Customer</th><th>Payment modes</th><th>Gross</th><th>Discount</th><th>Other charges</th><th>Taxes</th><th>Total</th><th>Paid</th><th>Balance due</th><th>Average prep</th><th>Longest prep</th><th>Kitchen stations</th><th>Sale status</th></tr></thead>
+            <tbody id="salesAuditBody"><tr><td colspan="18">No audit loaded.</td></tr></tbody>
         </table>
     </div>
+    <section class="sales-audit-prep">
+        <div class="sales-audit-header">
+            <div><h4>Kitchen prep time by item &amp; station</h4><p class="access-muted">Ticket wait and prep timers use the selected report period. Active tickets keep counting until marked ready.</p></div>
+            <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadKitchenPrepTimesReport()">Refresh prep times</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadKitchenPrepTimesCSV()">↓ Download prep CSV</button></div>
+        </div>
+        <div id="kitchenPrepTimesStatus" class="access-muted" role="status">Load transactions to see item and station prep timing.</div>
+        <div class="kitchen-prep-filters"><input id="kitchenPrepItemFilter" type="search" placeholder="Filter item or order…" oninput="renderKitchenPrepTimesTable()" aria-label="Filter prep times by item or order"><select id="kitchenPrepStationFilter" onchange="renderKitchenPrepTimesTable()" aria-label="Filter prep times by station"><option value="">All stations</option></select></div>
+        <div class="table-container">
+            <table>
+                <thead><tr><th>Order</th><th>Ticket</th><th>Item</th><th>Station</th><th>Quantity</th><th>Status</th><th>Ticket received</th><th>Prep started</th><th>Ready</th><th>Prep time</th><th>Elapsed</th></tr></thead>
+                <tbody id="kitchenPrepTimesBody"><tr><td colspan="11">No kitchen prep data loaded.</td></tr></tbody>
+            </table>
+        </div>
+    </section>
+</div>
+
+<div class="dashboard-box sale-items-transaction-box">
+    <div class="sales-audit-header">
+        <div><h3>🧾 Sale items by transaction</h3><p class="access-muted">One row per item sold, grouped by its completed transaction and using the selected report date range.</p></div>
+        <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSaleItemsByTransactionReport()">Load item sales</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadSaleItemsByTransactionCSV()">↓ Download CSV</button></div>
+    </div>
+    <div id="saleItemsTransactionStatus" class="access-muted" role="status">Choose a date range above, then load item sales.</div>
+    <div class="table-container">
+        <table>
+            <thead><tr><th>Transaction date</th><th>Invoice</th><th>Order</th><th>Channel / table</th><th>Customer</th><th>Item</th><th>Category</th><th>Qty</th><th>Unit price</th><th>Line total</th><th>Transaction total</th><th>Payment</th></tr></thead>
+            <tbody id="saleItemsTransactionBody"><tr><td colspan="12">No item sales loaded.</td></tr></tbody>
+        </table>
+    </div>
+</div>
+
+<div class="dashboard-box qr-menu-analytics-box">
+    <div class="sales-audit-header">
+        <div><h3>⌁ QR Menu Analytics</h3><p class="access-muted">Guest menu activity and popular QR orders for the last 30 days.</p></div>
+        <button type="button" class="cancel-btn" onclick="loadQrMenuAnalyticsReport()">Refresh analytics</button>
+    </div>
+    <div id="qrAnalyticsStatus" class="access-muted" role="status">Load analytics to see the latest QR menu activity.</div>
+    <div class="qr-analytics-kpis" aria-live="polite">
+        <article><span>Menu views</span><strong id="qrAnalyticsViews">—</strong></article>
+        <article><span>Unique visitors</span><strong id="qrAnalyticsVisitors">—</strong></article>
+        <article><span>Carts started</span><strong id="qrAnalyticsCarts">—</strong></article>
+        <article><span>Checkout starts</span><strong id="qrAnalyticsCheckouts">—</strong></article>
+        <article><span>QR orders</span><strong id="qrAnalyticsOrders">—</strong></article>
+        <article><span>Abandoned carts</span><strong id="qrAnalyticsAbandoned">—</strong></article>
+        <article><span>Visitor conversion</span><strong id="qrAnalyticsConversion">—</strong></article>
+    </div>
+    <h4 class="qr-analytics-subheading">Popular QR menu items</h4>
+    <div class="table-container"><table><thead><tr><th>Item</th><th>Category</th><th>Qty sold</th><th>Sales</th></tr></thead><tbody id="qrPopularItemsBody"><tr><td colspan="4">No analytics loaded.</td></tr></tbody></table></div>
+</div>
+
+<div class="dashboard-box order-activity-audit-box">
+    <div class="sales-audit-header">
+        <div><h3>◷ Order Activity Audit</h3><p class="access-muted">Staff and customer events recorded against orders during the selected date range.</p></div>
+        <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadOrderActivityAuditReport()">Load activity</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadReportTableCSV('orderActivityAuditBody','order-activity-audit','Order activity audit')">↓ Download CSV</button></div>
+    </div>
+    <div id="orderActivityAuditStatus" class="access-muted" role="status">Choose a date range above, then load order activity.</div>
+    <div class="table-container"><table><thead><tr><th>Date / time</th><th>Order</th><th>Channel / table</th><th>Activity</th><th>Details</th><th>Customer</th><th>Changed by</th></tr></thead><tbody id="orderActivityAuditBody"><tr><td colspan="7">No order activity loaded.</td></tr></tbody></table></div>
 </div>
 
 
@@ -2919,16 +3006,28 @@
         <div class="bill-header">
             <img id="billRestaurantLogo" class="bill-restaurant-logo" alt="Business logo" hidden>
             <h2 id="billRestaurantName">SLASH POS</h2>
+            <p id="billBusinessLegalName" hidden></p>
             <p id="billRestaurantAddress">
                 Cafe Management System
             </p>
             <p id="billRestaurantPhone"></p>
+            <p id="billRestaurantGstin"></p>
+            <p id="billRestaurantFssai" hidden></p>
         </div>
+        <p id="billInvoiceTitle" class="bill-invoice-title">Invoice</p>
         <div id="billCustomHeader" class="bill-custom-header" hidden></div>
+
+        <section id="billPrintIntro" class="bill-print-intro" aria-label="Invoice details">
+            <div id="billPrintToken" class="bill-print-token" hidden></div>
+            <div class="bill-print-guest"><strong id="billPrintGuestName">Guest</strong><small id="billPrintCustomerCode" hidden></small></div>
+            <div class="bill-print-invoice-row"><strong id="billPrintInvoiceNumber">Invoice —</strong><span id="billPrintItemCount">0 items (0 Qty)</span></div>
+            <div class="bill-print-date-row"><span id="billPrintDate"></span><span id="billPrintCashier" hidden></span></div>
+            <div id="billPrintOrderContext" class="bill-print-order-context" hidden></div>
+        </section>
 
         <hr>
 
-        <div class="bill-info">
+        <div id="billInfo" class="bill-info">
 
             <div>
                 <strong>Order No:</strong>
@@ -3025,22 +3124,28 @@
                 <strong id="billTotal">₹0.00</strong>
             </div>
 
+            <div id="billRoundedTotalRow" class="bill-rounded-total">
+                <span>Bill Total (rounded)</span>
+                <strong id="billRoundedTotal">₹0.00</strong>
+            </div>
+
         </div>
 
         <hr>
 
-        <div class="bill-payment">
+        <div id="billPayment" class="bill-payment">
 
-            <strong>Payment:</strong>
+	        <strong class="bill-payment-title">Payment Summary</strong>
 	        <span id="billPaymentMethod">-</span>
 
             <div id="billPaymentAllocations" class="bill-payment-allocations"></div>
-            <div class="bill-payment-balance"><span>Amount Collected</span><strong id="billAmountCollected">₹0.00</strong></div>
+            <div id="billCollectedRow" class="bill-payment-balance"><span>Amount Collected</span><strong id="billAmountCollected">₹0.00</strong></div>
             <div class="bill-payment-balance due"><span>Amount Due</span><strong id="billAmountDue">₹0.00</strong></div>
 
         </div>
 
         <div class="bill-footer">
+            <p id="billRcmLine">RCM applicable: NO</p>
             <p id="billCustomFooter">Thank You!
 Visit Again 😊</p>
         </div>
@@ -3064,6 +3169,13 @@ Visit Again 😊</p>
 
     </div>
 
+</div>
+
+<div id="customerOrderActivityModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customerOrderActivityTitle">
+    <div class="modal-content customer-order-activity-dialog">
+        <div class="modal-header"><div><span class="menu-eyebrow">CUSTOMER HISTORY</span><h2 id="customerOrderActivityTitle">Order activity</h2></div><button class="close-btn" type="button" onclick="closeCustomerOrderActivity()" aria-label="Close customer order activity">✕</button></div>
+        <div id="customerOrderActivityList" class="order-activity-list customer-order-history-list" aria-live="polite"><p class="access-muted">Loading orders…</p></div>
+    </div>
 </div>
 
 
@@ -3108,6 +3220,16 @@ Visit Again 😊</p>
         <div class="form-group"><label for="cancelOrderReason">Cancellation reason</label><select id="cancelOrderReason"></select></div>
         <p id="cancelOrderDialogError" class="cancel-order-error" role="alert" hidden></p>
         <div class="modal-actions"><button type="button" class="table-action-btn" onclick="closeCancelOrderDialog()">Keep order</button><button type="button" class="cancel-btn" id="confirmCancelOrderButton" onclick="submitCancelOrder()">Cancel order</button></div>
+    </div>
+</div>
+
+<div id="cancelItemModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="cancelItemDialogTitle">
+    <div class="modal-content cancel-order-dialog">
+        <div class="modal-heading"><div><span class="module-eyebrow">ITEM CANCELLATION</span><h2 id="cancelItemDialogTitle">Remove order item</h2></div><button type="button" class="close-btn" onclick="closeCancelItemDialog()" aria-label="Close item cancellation dialog">✕</button></div>
+        <p id="cancelItemDialogDescription" class="cancel-order-description">Choose a reason to remove this item.</p>
+        <div class="form-group"><label for="cancelItemReason">Cancellation reason</label><select id="cancelItemReason"></select></div>
+        <p id="cancelItemDialogError" class="cancel-order-error" role="alert" hidden></p>
+        <div class="modal-actions"><button type="button" class="table-action-btn" onclick="closeCancelItemDialog()">Keep item</button><button type="button" class="cancel-btn" id="confirmCancelItemButton" onclick="confirmCancelItem()">Remove item</button></div>
     </div>
 </div>
 

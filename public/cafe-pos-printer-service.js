@@ -217,7 +217,7 @@ const server = http.createServer(async (req, res) => {
       if (!printer) return send(res, 404, { error: `Windows printer not found: ${printerName}` });
 
       const receipt = req.url === '/test'
-        ? `SLASH POS\nPRINTER TEST\n${printerName}\n${new Date().toLocaleString()}\n\n\n`
+        ? `SLASH POS\nPRINTER TEST\n${printerName}\n${new Date().toLocaleString("en-IN",{timeZone:"Asia/Kolkata"})}\n\n\n`
         : String(body.receipt || '');
       if (!receipt) return send(res, 400, { error: 'receipt is required.' });
 

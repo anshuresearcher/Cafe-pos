@@ -5,6 +5,38 @@
 // ==========================================
 
 const API = "/api";
+const POS_TIME_ZONE = "Asia/Kolkata";
+function parsePOSDate(value) {
+    if (value instanceof Date) return value;
+    if (value === null || value === undefined || value === "") return new Date(NaN);
+    const raw = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return new Date(`${raw}T12:00:00.000Z`);
+    const utcWallClock = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(raw);
+    return new Date(utcWallClock ? `${raw.replace(" ", "T")}Z` : raw);
+}
+function formatPOSDateTime(value = new Date()) {
+    if (value === null || value === undefined || value === "") return "";
+    const raw = String(value).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+        const [, year, month, day] = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+        return `${day}/${month}/${year}`;
+    }
+    const date = parsePOSDate(value);
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("en-IN", { timeZone: POS_TIME_ZONE });
+}
+function formatPOSTime(value) {
+    const date = parsePOSDate(value);
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleTimeString("en-IN", { timeZone: POS_TIME_ZONE, hour: "2-digit", minute: "2-digit" });
+}
+function getPOSDateKey(value = new Date()) {
+    const raw = typeof value === "string" ? value.trim() : "";
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const date = parsePOSDate(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: POS_TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    const part = type => parts.find(item => item.type === type)?.value || "";
+    return `${part("year")}-${part("month")}-${part("day")}`;
+}
 let authToken = "";
 sessionStorage.removeItem("cafeAuthToken");
 let currentUser = null;
@@ -84,6 +116,7 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
 }
 
 let cart = [];
+let cartItemCancellationReasons = [];
 let orderType = "Takeaway";
 // Empty until settings are loaded. This lets the saved POS preference choose the
 // first channel for a fresh billing session instead of silently keeping Takeaway.
@@ -121,8 +154,8 @@ const DEFAULT_CANCELLATION_REASONS = ["Customer request", "Duplicate order", "It
 function normalizeCancellationReasons(value) { return [...new Set((Array.isArray(value) ? value : []).map(reason => String(reason || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30); }
 
 let appSettings = {
-    restaurantName: "SLASH POS", address: "", phone: "", gstin: "",
-    header: "Cafe Management System", footer: "Thank You!\nVisit Again 😊",
+    restaurantName: "SLASH POS", businessLegalName: "", address: "", phone: "", gstin: "", fssai: "",
+    header: "Cafe Management System", footer: "Visit Again!\nThank you.",
     showInvoice: true, showCustomer: true, showCustomerPhone: true,
     showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
     showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
@@ -135,6 +168,8 @@ let appSettings = {
     printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
+    qrCleanTableNotification: true, qrCleanTableSound: true, qrCleanTableBuzzer: false,
+    qrCallWaiterNotification: true, qrCallWaiterSound: true, qrCallWaiterBuzzer: false,
     sessionTimeout: 12, auditLog: false,
     uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide",
     customerInfoRequirements: {},
@@ -193,6 +228,7 @@ function normalizeOrderBillItems(items, order = {}) {
             name: item?.name || item?.item_name || item?.product_name || "Item",
             price,
             quantity,
+            unit: item?.unit || item?.measuring_unit || "ea",
             options: Array.isArray(item?.options) ? item.options : [],
             lineTotal,
             taxRate: Math.max(0, Number(item?.taxRate ?? item?.tax_rate ?? 0)),
@@ -621,7 +657,7 @@ async function loginUser(event) {
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();stopQrTableServiceAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){try {
     const r = await api("/auth/me");
 
@@ -670,16 +706,20 @@ function applyPermissionsToUI(){
                     ? "kot_groups"
                     : (page === "table-qr-menu" ? "menu" : page));
 
-        let visible = hasPermission(mod, "view");
+        let visible = page === "kot-groups"
+            ? (hasPermission("kot_groups", "view") || hasPermission("printer", "view"))
+            : hasPermission(mod, "view");
         if (page === "table-qr-menu") visible = visible && hasLicenseAddon("Table QR");
         if (page === "marketing") visible = visible && hasLicenseAddon("Marketing");
 
-        if(
-            (page === "kitchen" || page === "kot-groups") &&
-            appSettings.kotEnabled === false &&
-            appSettings.kotDisabledBehavior === "hide"
-        ){
-            visible = false;
+        if (page === "kitchen" && appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide") visible = false;
+        if (page === "kot-groups") {
+            const kotGroupsCard = document.getElementById("kotGroupsModuleCard");
+            const printerCard = document.getElementById("printerModuleCard");
+            const kotGroupsHidden = appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide";
+            if (kotGroupsCard) kotGroupsCard.hidden = !hasPermission("kot_groups", "view") || kotGroupsHidden;
+            if (printerCard) printerCard.hidden = !hasPermission("printer", "view");
+            if (visible && kotGroupsHidden && !hasPermission("printer", "view")) visible = false;
         }
 
         btn.style.display = visible ? "" : "none";
@@ -846,7 +886,7 @@ async function syncPOSData(){
     if(pageId==="payments"&&hasPermission("payments","view"))jobs.push({label:"Payments",run:loadPayments});
     if(pageId==="reports")jobs.push({label:"Reports",run:async()=>{await loadReports();await loadSalesAuditReport();await loadOrderCategoryReports();}});
     if(pageId==="advanced-reports"&&hasPermission("advanced_reports","view"))jobs.push({label:"Advanced reports",run:loadAdvancedReports});
-    if(pageId==="printer"&&hasPermission("printer","view"))jobs.push({label:"Printers",run:loadPrinters});
+    if(pageId==="kot-groups"&&hasPermission("printer","view"))jobs.push({label:"Printers",run:loadPrinters});
     if(pageId==="expenses"&&hasPermission("expenses","view"))jobs.push({label:"Expenses",run:loadExpenses});
 
     let completed=0,failed=0;
@@ -957,6 +997,7 @@ async function startAuthenticatedApp(){
     startSessionHeartbeat();
     startReservationAutoRefresh();
     startPOSQrOrderAlerts();
+    startQrTableServiceAlerts();
     stopKOTAlertPolling();
     kotAlertInitialized=false;
     knownPendingKOTIds=new Set();
@@ -973,15 +1014,17 @@ async function startAuthenticatedApp(){
 function showPage(pageName) {
     if (pageName === "loyalty") pageName = "marketing";
 
-    if ((pageName === "kitchen" || pageName === "kot-groups") && appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide") {
-        return;
-    }
+    if (pageName === "kitchen" && appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide") return;
+    if (pageName === "kot-groups" && appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide" && !hasPermission("printer", "view")) return;
 
     if (pageName === "table-qr-menu" && !hasLicenseAddon("Table QR")) { alert("Table QR is a paid add-on. Contact support to activate it."); return; }
     if (pageName === "marketing" && !hasLicenseAddon("Marketing")) { alert("Marketing is a paid add-on. Contact support to activate it."); return; }
 
     const permissionModule = pageName === "new-order" ? "new_order" : (pageName === "table-view" ? "tables" : ((pageName === "table-qr-menu" || pageName === "menu") ? "menu" : (pageName === "kot-groups" ? "kot_groups" : (pageName === "advanced-reports" ? "advanced_reports" : pageName))));
-    if (!currentUser || !hasPermission(permissionModule, "view")) {
+    const canOpenModule = pageName === "kot-groups"
+        ? (hasPermission("kot_groups", "view") || hasPermission("printer", "view"))
+        : hasPermission(permissionModule, "view");
+    if (!currentUser || !canOpenModule) {
         if (currentUser) alert("You do not have permission to open this module.");
         return;
     }
@@ -1128,9 +1171,8 @@ function showPage(pageName) {
     }
 
     if (pageName === "kot-groups") {
-
-        loadKOTGroups();
-
+        if (hasPermission("kot_groups", "view") && !(appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide")) loadKOTGroups();
+        if (hasPermission("printer", "view")) loadPrinters();
     }
 
 
@@ -1204,7 +1246,7 @@ const SETTINGS_FEATURES = [
     { key: "cancellation-reasons", title: "Cancellation Reasons", icon: "↩️", description: "Manage the reasons staff select when cancelling orders." },
     { key: "printer-receipt", title: "Printer & Receipt", icon: "🖨️", description: "Set receipt branding, UPI details and print behavior." },
     { key: "operations", title: "Operations", icon: "🕒", description: "Set opening hours, order type and order note behavior." },
-    { key: "alerts-customer-experience", title: "Alert & Customer Experience", icon: "🔔", description: "Set customer messages, stock alerts and KOT alerts." },
+    { key: "alerts-customer-experience", title: "Alert & Customer Experience", icon: "🔔", description: "Set customer messages, KOT alerts and QR table-service notifications and sounds." },
     { key: "kitchen-kot", title: "Kitchen / KOT", icon: "👨‍🍳", description: "Control the kitchen ticket workflow." },
     { key: "data-admin", title: "Data & Admin", icon: "🛡️", description: "Configure session timeout and audit logging." },
     { key: "appearance", title: "Appearance", icon: "🎨", description: "Adjust interface density, theme label and billing buttons." },
@@ -1273,9 +1315,20 @@ function showKOTGroupsView(view = "overview") {
     const overview = document.getElementById("kotGroupsOverview");
     const detail = document.getElementById("kotGroupsDetail");
     const editor = document.getElementById("kotGroupEditorPanel");
+    const printer = document.getElementById("printerDetail");
+    const kotGroupsCard = document.getElementById("kotGroupsModuleCard");
+    const printerCard = document.getElementById("printerModuleCard");
+    const kotGroupsHidden = appSettings.kotEnabled === false && appSettings.kotDisabledBehavior === "hide";
+    if (kotGroupsCard) kotGroupsCard.hidden = !hasPermission("kot_groups", "view") || kotGroupsHidden;
+    if (printerCard) printerCard.hidden = !hasPermission("printer", "view");
+    if ((view === "groups" || view === "editor") && (!hasPermission("kot_groups", "view") || kotGroupsHidden)) return;
+    if (view === "printer" && !hasPermission("printer", "view")) return;
     if (overview) overview.hidden = view !== "overview";
     if (detail) detail.hidden = view !== "groups";
     if (editor) editor.hidden = view !== "editor";
+    if (printer) printer.hidden = view !== "printer";
+    if (view === "groups") loadKOTGroups();
+    if (view === "printer") loadPrinters();
 }
 
 function showAdvancedReportsView(reportKey = "overview") {
@@ -1309,7 +1362,10 @@ function showSalesReportView(reportKey = "overview") {
         "order-type": { title: "Sales by Order Type", description: "Compare dine-in, takeaway and other order channels.", body: "reportOrderTypeBody" },
         daily: { title: "Daily Sales", description: "Track sales and order counts across the selected dates.", body: "reportDailyBody" },
         gst: { title: "GST / Tax Report", description: "Taxable sales and GST collected.", body: "reportGstBody" },
+        "sale-items-transaction": { title: "Sale Items by Transaction", description: "Review every sold item under its completed transaction and export the details.", body: "saleItemsTransactionBody" },
         audit: { title: "Sale Transaction Audit", description: "Review completed sales by order with invoice, payment, tax and balance details.", body: "salesAuditBody" },
+        "qr-analytics": { title: "QR Menu Analytics", description: "Review QR menu views, guest activity, popular items and abandoned carts over the last 30 days.", body: "qrPopularItemsBody" },
+        "order-activity": { title: "Order Activity Audit", description: "Review edits, cancellations, discounts, payments and staff actions recorded against orders.", body: "orderActivityAuditBody" },
         discounts: { title: "Discounted Orders", description: "Completed orders that used a discount.", body: "reportDiscountOrdersBody" },
         "non-chargeable": { title: "Non-chargeable Orders", description: "Completed orders recorded without payment.", body: "reportNonChargeableOrdersBody" }
     };
@@ -1326,6 +1382,69 @@ function showSalesReportView(reportKey = "overview") {
         panel.dataset.salesReportPanel = key;
         panel.hidden = !selected || key !== reportKey;
     });
+    if (reportKey === "sale-items-transaction") loadSaleItemsByTransactionReport();
+    if (reportKey === "qr-analytics") loadQrMenuAnalyticsReport();
+    if (reportKey === "order-activity") loadOrderActivityAuditReport();
+}
+
+async function loadQrMenuAnalyticsReport() {
+    const status = document.getElementById("qrAnalyticsStatus");
+    const body = document.getElementById("qrPopularItemsBody");
+    if (status) status.textContent = "Loading the last 30 days of QR menu activity…";
+    if (body) body.innerHTML = '<tr><td colspan="4">Loading popular items…</td></tr>';
+    try {
+        const result = await api("/reports/qr-menu-analytics");
+        const summary = result.summary || {};
+        setText("qrAnalyticsViews", Number(summary.menuViews || 0).toLocaleString());
+        setText("qrAnalyticsVisitors", Number(summary.uniqueVisitors || 0).toLocaleString());
+        setText("qrAnalyticsCarts", Number(summary.cartsStarted || 0).toLocaleString());
+        setText("qrAnalyticsCheckouts", Number(summary.checkoutStarts || 0).toLocaleString());
+        setText("qrAnalyticsOrders", Number(summary.qrOrders || 0).toLocaleString());
+        setText("qrAnalyticsAbandoned", Number(summary.abandonedCarts || 0).toLocaleString());
+        setText("qrAnalyticsConversion", `${Number(summary.conversionRate || 0).toFixed(1)}%`);
+        const items = Array.isArray(result.popularItems) ? result.popularItems : [];
+        if (body) body.innerHTML = items.length ? items.map(item => `<tr><td><strong>${esc(item.item_name || "Item")}</strong></td><td>${esc(item.category || "—")}</td><td>${Number(item.quantity_sold || 0).toLocaleString()}</td><td>${money(item.sales)}</td></tr>`).join("") : '<tr><td colspan="4">No QR orders found in the last 30 days.</td></tr>';
+        if (status) status.textContent = `Updated just now · ${Number(result.periodDays || 30)} day view. Cart abandonment counts carts with items and no later order after 30 minutes.`;
+    } catch (error) {
+        if (body) body.innerHTML = `<tr><td colspan="4">Unable to load QR analytics: ${esc(error.message || "Please try again.")}</td></tr>`;
+        if (status) status.textContent = "QR menu analytics could not be loaded.";
+    }
+}
+
+async function loadOrderActivityAuditReport() {
+    const status = document.getElementById("orderActivityAuditStatus");
+    const body = document.getElementById("orderActivityAuditBody");
+    const exportButton = document.querySelector(".order-activity-audit-box [data-export-module='reports']");
+    const range = document.getElementById("reportDateFilter")?.value || "today";
+    const from = document.getElementById("reportFromDate")?.value || "";
+    const to = document.getElementById("reportToDate")?.value || "";
+    if (range === "custom" && (!from || !to || from > to)) {
+        if (status) status.textContent = "Choose a valid From and To date before loading order activity.";
+        return;
+    }
+    const params = new URLSearchParams({ range });
+    if (range === "custom") { params.set("from", from); params.set("to", to); }
+    if (status) status.textContent = "Loading order activity…";
+    if (body) body.innerHTML = '<tr><td colspan="7">Loading activity…</td></tr>';
+    if (exportButton) exportButton.hidden = !hasPermission("reports", "export");
+    try {
+        const result = await api(`/reports/order-activity?${params.toString()}`);
+        const activities = Array.isArray(result.activities) ? result.activities : [];
+        if (body) body.innerHTML = activities.length ? activities.map(entry => `
+            <tr>
+                <td>${esc(entry.created_at ? formatPOSDateTime(entry.created_at) : "—")}</td>
+                <td><strong>${esc(entry.order_number || `#${entry.order_id}`)}</strong><small class="audit-order-status">${esc(entry.order_status || "")}</small></td>
+                <td>${esc(entry.order_type || "—")}${entry.table_number ? ` · ${esc(entry.table_number)}` : ""}</td>
+                <td>${esc(entry.event_type || "Activity")}</td>
+                <td>${esc(entry.description || "—")}</td>
+                <td>${esc(entry.customer_name || "—")}</td>
+                <td>${esc(entry.actor || "Staff")}${entry.actor_user_id ? ` · #${esc(entry.actor_user_id)}` : ""}</td>
+            </tr>`).join("") : '<tr><td colspan="7">No order activity found for this date range.</td></tr>';
+        if (status) status.textContent = `${activities.length.toLocaleString()} activity entr${activities.length === 1 ? "y" : "ies"} loaded${activities.length >= 2000 ? " · showing the newest 2,000" : ""}.`;
+    } catch (error) {
+        if (body) body.innerHTML = `<tr><td colspan="7">Unable to load order activity: ${esc(error.message || "Please try again.")}</td></tr>`;
+        if (status) status.textContent = "Order activity could not be loaded.";
+    }
 }
 
 
@@ -1385,25 +1504,28 @@ function addToCart(id,name,price,menuItem=null,variant=null,options=[],basePrice
 
 function changeQuantity(index, amount) {
 
-    if (!cart[index]) {
+    return changeCartQuantity(index, amount);
 
-        return;
+}
 
+async function changeCartQuantity(index, amount) {
+    const item = cart[index];
+    if (!item) return;
+
+    if (amount > 0 && Number(item.orderItemId) > 0 && Number(item.quantity) < Number(item.savedQuantity || 0)) {
+        const reasonIndex = cartItemCancellationReasons.map(entry => Number(entry.orderItemId)).lastIndexOf(Number(item.orderItemId));
+        if (reasonIndex >= 0) cartItemCancellationReasons.splice(reasonIndex, 1);
     }
 
-
-    cart[index].quantity += amount;
-
-
-    if (cart[index].quantity <= 0) {
-
-        cart.splice(index, 1);
-
+    if (amount < 0 && Number(item.orderItemId) > 0 && Number(item.quantity) <= Number(item.savedQuantity || 0)) {
+        const reason = await requestItemCancellationReason(item);
+        if (!reason) return;
+        cartItemCancellationReasons.push({ orderItemId: Number(item.orderItemId), reason, quantity: 1 });
     }
 
-
+    item.quantity += amount;
+    if (item.quantity <= 0) cart.splice(index, 1);
     updateCart();
-
 }
 
 
@@ -2002,6 +2124,7 @@ function renderBillingSaleChannelOptions() {
 
 function clearNewOrderDraft() {
     cart = [];
+    cartItemCancellationReasons = [];
     currentOpenOrderId = null;
     currentOpenOrderData = null;
     const saveButton=document.getElementById("saveOrderBtn");if(saveButton)saveButton.textContent="💾 Save Order";
@@ -2554,7 +2677,7 @@ async function openPayment() {
     const splitAmount = document.getElementById("splitPaymentAmount");
     if (splitAmount) splitAmount.value = "";
     const date = document.getElementById("paymentOrderDate");
-    if (date) date.textContent = new Date().toLocaleString();
+    if (date) date.textContent = formatPOSDateTime();
     const type = document.getElementById("paymentOrderType");
     if (type) type.textContent = orderType + (document.getElementById("tableNumber")?.value ? " · " + document.getElementById("tableNumber").value : "");
     document.getElementById("paymentCurrencySymbol") && (document.getElementById("paymentCurrencySymbol").textContent = appSettings.currency || "₹");
@@ -2745,12 +2868,13 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             chargeAdjustmentName: b.chargeId ? b.chargeName : null,
             marketingDealId: b.marketingDealId, marketingDealName: b.marketingDealName,
             notes: document.getElementById("billingOrderNotes")?.value.trim() || null,
-            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, basePrice: item.basePrice ?? item.price, options: item.options || [], quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode }))
+            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, basePrice: item.basePrice ?? item.price, options: item.options || [], quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode })),
+            itemCancellationReasons: cartItemCancellationReasons.slice()
         };
         let order;
         let orderNumber;
         const isNewOrder = !currentOpenOrderId;
-        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), options: item.options || [], taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0), taxMode: item.taxMode || "exclusive" }));
+        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), unit: item.unit || "ea", options: item.options || [], taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0), taxMode: item.taxMode || "exclusive" }));
         const kotEnabled = appSettings.kotEnabled !== false;
         const checkoutPayload = {
             payments: paymentsToRecord,
@@ -2766,9 +2890,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
-            const updated = isQrExistingOrder
-                ? await api(`/orders/${orderId}/settle`, { method: "POST", body: JSON.stringify({ ...checkoutPayload, createKot: false }) })
-                : await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
+            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
             order = updated.order;
             orderNumber = order.order_number;
             settlement = updated;
@@ -2787,6 +2909,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const paymentSummary = settlement.paymentSummary || {};
         closePayment();
         cart = [];
+        cartItemCancellationReasons = [];
         currentOpenOrderId = null;
         currentOpenOrderData = null;
         const tableInput = document.getElementById("tableNumber");
@@ -2815,6 +2938,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             paymentMethod,
             customerId: completedOrder.customer_id || billingCustomer?.id || null,
             customerName: completedOrder.customer_name || billingCustomer?.name || customerName || priorOrder.customer_name || null,
+            customerCode: billingCustomer?.customer_code || billingCustomer?.code || null,
             customerPhone: completedOrder.customer_phone || billingCustomer?.phone || customerPhone || priorOrder.customer_phone || null,
             customerEmail: completedOrder.customer_email || billingCustomer?.email || customerEmail || priorOrder.customer_email || null,
             customerGstin: completedOrder.customer_gstin || billingCustomer?.gstin || customerDetails.gstin || null,
@@ -2823,6 +2947,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             customerCity: completedOrder.customer_city || billingCustomer?.city || customerDetails.city || null,
             customerState: completedOrder.customer_state || billingCustomer?.state || customerDetails.state || null,
             paymentAllocations: paymentSummary.allocations || [],
+            cashierName: currentUser?.display_name || currentUser?.username || "",
             amountCollected: Number(paymentSummary.amountCollected || 0),
             amountDue: Number(paymentSummary.amountDue || 0),
             items: billItems
@@ -2906,10 +3031,12 @@ async function saveOpenOrder() {
                     marketingDealName: b.marketingDealName,
                     notes: orderNotes || null,
                     createKot: appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save",
-                    items
+                    items,
+                    itemCancellationReasons: cartItemCancellationReasons.slice()
                 })
             });
             cart = [];
+            cartItemCancellationReasons = [];
             currentOpenOrderId = null;
             currentOpenOrderData = null;
             updateCart();
@@ -2957,15 +3084,18 @@ async function payOpenOrder(orderId) {
         currentOpenOrderId = orderId;
         currentOpenOrderData = data;
         const order = data.order;
+        cartItemCancellationReasons = [];
         cart = (data.items || []).map(item => ({
             id: item.menu_id || ("order-item-" + item.id),
             variantId: item.variant_id || null,
-            cartKey: item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id),
+            cartKey: `${item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id)}:${(item.options || []).flatMap(set => set.options || []).map(option => String(option.id)).sort().join(",")}`,
             name: item.item_name,
             price: Number(item.price),
             basePrice: Number(item.price)-((item.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0)),
             options: item.options || [],
             quantity: Number(item.quantity),
+            orderItemId: Number(item.id),
+            savedQuantity: Number(item.quantity),
             unit: item.unit || 'ea',
             taxRate: Number(item.tax_rate ?? 5),
             taxMode: item.tax_mode === 'inclusive' ? 'inclusive' : 'exclusive'
@@ -3010,9 +3140,15 @@ window.openBillPreview = function(data) {
     const isCleanPreview = data?.viewMode === "clean";
     modal?.classList.toggle("bill-preview-sidecar", data?.viewMode === "side-panel");
     modal?.classList.toggle("bill-preview-clean", isCleanPreview);
+    modal?.classList.add("bill-preview-receipt");
 
     const restaurantName = document.getElementById("billRestaurantName");
-    if (restaurantName) restaurantName.textContent = isCleanPreview ? "Order" : (appSettings.restaurantName || "SLASH POS");
+    if (restaurantName) restaurantName.textContent = appSettings.restaurantName || "SLASH POS";
+    const businessLegalName = document.getElementById("billBusinessLegalName");
+    if (businessLegalName) {
+        businessLegalName.textContent = String(appSettings.businessLegalName || "").trim();
+        businessLegalName.hidden = !businessLegalName.textContent;
+    }
     const restaurantLogo = document.getElementById("billRestaurantLogo");
     if (restaurantLogo) {
         const logo = businessLogoUrl();
@@ -3020,16 +3156,35 @@ window.openBillPreview = function(data) {
         restaurantLogo.hidden = !logo || isCleanPreview;
     }
     const restaurantAddress = document.getElementById("billRestaurantAddress");
-    if (restaurantAddress) restaurantAddress.textContent = appSettings.address || "Cafe Management System";
+    if (restaurantAddress) {
+        restaurantAddress.textContent = appSettings.address || "";
+        restaurantAddress.hidden = !restaurantAddress.textContent;
+    }
     const restaurantPhone = document.getElementById("billRestaurantPhone");
-    if (restaurantPhone) restaurantPhone.textContent = appSettings.phone || "";
+    if (restaurantPhone) {
+        restaurantPhone.textContent = appSettings.phone ? `Phone: ${appSettings.phone}` : "";
+        restaurantPhone.hidden = !restaurantPhone.textContent;
+    }
+    const restaurantGstin = document.getElementById("billRestaurantGstin");
+    if (restaurantGstin) {
+        restaurantGstin.textContent = appSettings.gstin ? `GST#: ${appSettings.gstin}` : "";
+        restaurantGstin.hidden = !restaurantGstin.textContent;
+    }
+    const restaurantFssai = document.getElementById("billRestaurantFssai");
+    if (restaurantFssai) {
+        restaurantFssai.textContent = appSettings.fssai ? `FSSAI#: ${appSettings.fssai}` : "";
+        restaurantFssai.hidden = !restaurantFssai.textContent;
+    }
     const customHeader = document.getElementById("billCustomHeader");
     if (customHeader) {
-        customHeader.textContent = String(appSettings.header || "").trim();
+        const configuredHeader = String(appSettings.header || "").trim();
+        customHeader.textContent = configuredHeader === "Cafe Management System" ? "" : configuredHeader;
         customHeader.hidden = !customHeader.textContent;
     }
+    const invoiceTitle = document.getElementById("billInvoiceTitle");
+    if (invoiceTitle) invoiceTitle.textContent = data?.isOpenOrder ? "Order" : "Invoice";
     const customFooter = document.getElementById("billCustomFooter");
-    if (customFooter) customFooter.textContent = String(appSettings.footer || "Thank You!\nVisit Again 😊");
+    if (customFooter) customFooter.textContent = String(appSettings.footer || "Visit Again!\nThank you.").replace("Thank You!\nVisit Again 😊", "Visit Again!\nThank you.");
     const poweredBy = document.getElementById("billPoweredBy");
     if (poweredBy) {
         poweredBy.textContent = "Powered by Slash";
@@ -3056,10 +3211,36 @@ window.openBillPreview = function(data) {
     const items = normalizeOrderBillItems(sourceItems, billOrder);
     const taxBreakdown = Array.isArray(data?.taxBreakdown) ? data.taxBreakdown : buildBillTaxBreakdown(items, data.discount, data.gst);
     window.currentBillData = { ...data, items, taxBreakdown };
+    const totalQuantity = items.reduce((sum, item) => sum + Math.max(0, Number(item.quantity || 0)), 0);
+    const customerCode = data?.customerCode || (data?.customerId ? `#${data.customerId}` : "");
+    const printToken = document.getElementById("billPrintToken");
+    if (printToken) {
+        printToken.textContent = `Token No: ${data.tokenNumber}`;
+        printToken.hidden = !data.tokenNumber;
+    }
+    setText("billPrintGuestName", data?.customerName || "Guest");
+    const printCustomerCode = document.getElementById("billPrintCustomerCode");
+    if (printCustomerCode) {
+        printCustomerCode.textContent = customerCode;
+        printCustomerCode.hidden = !customerCode;
+    }
+    setText("billPrintInvoiceNumber", `${data?.isOpenOrder ? "Order" : "Invoice"} ${data?.invoiceNumber || data?.orderNumber || "—"}`);
+    setText("billPrintItemCount", `${items.length} ${items.length === 1 ? "item" : "items"} (${totalQuantity} Qty)`);
+    setText("billPrintDate", data?.date || formatPOSDateTime());
+    const printCashier = document.getElementById("billPrintCashier");
+    if (printCashier) {
+        printCashier.textContent = data?.cashierName || "";
+        printCashier.hidden = !printCashier.textContent;
+    }
+    const orderContext = document.getElementById("billPrintOrderContext");
+    if (orderContext) {
+        orderContext.textContent = [data?.orderType, data?.tableNumber ? `Table ${data.tableNumber}` : "", Number(data?.pax) > 0 ? `${Number(data.pax)} PAX` : ""].filter(Boolean).join(" · ");
+        orderContext.hidden = !orderContext.textContent;
+    }
     const itemCount = document.getElementById("billQuickItemCount");
     if (itemCount) itemCount.textContent = `${items.length} ${items.length === 1 ? "item" : "items"}`;
     const subtotalLabel = document.getElementById("billSubtotalLabel");
-    if (subtotalLabel) subtotalLabel.textContent = isCleanPreview ? "Sub Total" : "Subtotal";
+    if (subtotalLabel) subtotalLabel.textContent = "Sub Total";
     const totalLabel = document.getElementById("billTotalLabel");
     if (totalLabel) totalLabel.textContent = isCleanPreview ? "Bill Total" : "TOTAL";
     const nameHeader = document.getElementById("billItemNameHeader");
@@ -3164,7 +3345,7 @@ window.openBillPreview = function(data) {
     setText("billInvoiceNumber", data.invoiceNumber || "-");
 
     document.getElementById("billDate").textContent =
-        data.date || new Date().toLocaleString();
+        data.date || formatPOSDateTime();
 
     document.getElementById("billOrderType").textContent =
         data.isOpenOrder ? `OPEN ORDER · ${data.orderType || "-"}` : data.orderType || "-";
@@ -3206,30 +3387,43 @@ window.openBillPreview = function(data) {
         ).join("");
         billTaxBreakdown.style.display = taxBreakdown.length ? "block" : "none";
     }
+    if (billGstRow) billGstRow.style.display = taxBreakdown.length ? "none" : (isCleanPreview && Number(data.gst || 0) <= 0 ? "none" : "");
 
-    document.getElementById("billTotal").textContent =
-        money(data.total || 0);
+    const roundedTotal = Number(data.total || 0);
+    const roundingAdjustmentValue = Number(data.roundingAdjustment || 0);
+    const unroundedTotal = roundedTotal - roundingAdjustmentValue;
+    setText("billTotalLabel", "Bill Total");
+    setText("billTotal", money(unroundedTotal));
+    setText("billRoundedTotal", money(roundedTotal));
+    const roundedTotalRow = document.getElementById("billRoundedTotalRow");
+    if (roundedTotalRow) roundedTotalRow.style.display = "flex";
 
     const billRoundingRow = document.getElementById("billRoundingRow");
-    const roundingAdjustment = Number(data.roundingAdjustment || 0);
-    if (billRoundingRow) billRoundingRow.style.display = Math.abs(roundingAdjustment) < 0.005 ? "none" : "flex";
-    setText("billRounding", money(roundingAdjustment));
+    if (billRoundingRow) billRoundingRow.style.display = "none";
+    setText("billRounding", money(roundingAdjustmentValue));
 
-    document.getElementById("billPaymentMethod").textContent =
-        data.paymentMethod || "-";
     const allocations = Array.isArray(data.paymentAllocations) ? data.paymentAllocations : [];
-    const allocationList = document.getElementById("billPaymentAllocations");
-    if (allocationList) allocationList.innerHTML = allocations.length
-        ? allocations.map(payment => `<div><span>${esc(payment.method || "Payment")}</span><strong>${money(payment.amount || 0)}</strong></div>`).join("")
-        : "";
     const collected = data.amountCollected === undefined
         ? allocations.reduce((sum, payment) => sum + Number(payment.amount || 0), 0)
         : Math.max(0, Number(data.amountCollected || 0));
+    const allocationList = document.getElementById("billPaymentAllocations");
+    if (allocationList) allocationList.innerHTML = allocations.length
+        ? allocations.map(payment => `<div><span>${esc(payment.method || "Payment")}</span><strong>${money(payment.amount || 0)}</strong></div>`).join("")
+        : (!data.isOpenOrder && collected > 0 ? `<div><span>${esc(data.paymentMethod || "Payment")}</span><strong>${money(collected)}</strong></div>` : "");
+    const paymentMethodLine = document.getElementById("billPaymentMethod");
+    if (paymentMethodLine) {
+        paymentMethodLine.textContent = "";
+        paymentMethodLine.hidden = true;
+    }
     const due = data.amountDue === undefined
         ? Math.max(0, Number(data.total || 0) - collected)
         : Math.max(0, Number(data.amountDue || 0));
     setText("billAmountCollected", money(collected));
     setText("billAmountDue", money(due));
+    const collectedRow = document.getElementById("billCollectedRow");
+    if (collectedRow) collectedRow.style.display = "none";
+    const paymentSection = document.getElementById("billPayment");
+    if (paymentSection) paymentSection.style.display = data.isOpenOrder ? "none" : "block";
 
     const tableRow = document.getElementById("billTableRow");
 
@@ -3268,23 +3462,17 @@ window.openBillPreview = function(data) {
 
         body.innerHTML = "";
 
-        items.forEach(function(item) {
-
+        items.forEach(function(item, index) {
             const row = document.createElement("tr");
-
             const qty = Number(item.quantity || 0);
             const price = Number(item.price || 0);
-            const lineTotal = qty * price;
-
-            const optionText=formatItemOptionNames(item.options);
-            row.innerHTML =
-                "<td>" + esc(item.name || "-") + (optionText?`<br><small>${esc(optionText)}</small>`:"") + "</td>" +
-                "<td>" + qty + "</td>" +
-                "<td>" + money(price) + "</td>" +
-                "<td>" + money(lineTotal) + "</td>";
-
+            const lineTotal = Number(item.lineTotal) > 0 || price === 0 ? Number(item.lineTotal || 0) : qty * price;
+            const optionText = formatItemOptionNames(item.options);
+            const unit = String(item.unit || "ea").trim();
+            const name = appSettings.uppercaseItems ? String(item.name || "-").toUpperCase() : String(item.name || "-");
+            row.className = "bill-print-item-row";
+            row.innerHTML = `<td colspan="3"><strong>${index + 1}. ${esc(name)}</strong><small>${qty} @ ${esc(money(price))}/${esc(unit)}</small>${optionText ? `<small class="bill-print-item-options">${esc(optionText)}</small>` : ""}</td><td class="bill-print-item-total">${esc(money(lineTotal))}</td>`;
             body.appendChild(row);
-
         });
     }
 
@@ -3350,18 +3538,25 @@ window.printThermalBill = async function(options = {}) {
     try {
         // LOCAL = Windows installed printer. Print directly through the local Slash POS Printer Service.
         if (defaultPrinter.connection_type === "local") {
-            const receipt = printerReceiptText(data);
+            const receipt = printerReceiptText(data, defaultPrinter.paper_width || appSettings.paperWidth || "80");
             if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(defaultPrinter.name)) {
                 const result = await window.cafePOSDesktop.saveReceiptPdf({
                     kind: "invoice",
                     bill: data,
                     settings: {
                         restaurantName: appSettings.restaurantName,
+                        businessLegalName: appSettings.businessLegalName,
+                        businessType: appSettings.businessType,
                         address: appSettings.address,
                         phone: appSettings.phone,
                         gstin: appSettings.gstin,
+                        fssai: appSettings.fssai,
                         currency: appSettings.currency,
-                        businessLogoUrl: businessLogoUrl()
+                        businessLogoUrl: businessLogoUrl(),
+                        header: appSettings.header,
+                        footer: appSettings.footer,
+                        customerMessage: appSettings.customerMessage,
+                        showPoweredByCafePilot: appSettings.showPoweredByCafePilot
                     }
                 });
                 if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the invoice PDF.");
@@ -3396,8 +3591,8 @@ window.printThermalBill = async function(options = {}) {
         }
 
         if (defaultPrinter.connection_type === "bluetooth") {
-            const receipt = printerReceiptText(data);
-            for (let copy = 0; copy < billCopies; copy++) await sendBluetoothPrinterText(defaultPrinter, receipt);
+            const receipt = printerReceiptText(data, defaultPrinter.paper_width || appSettings.paperWidth || "80");
+            for (let copy = 0; copy < billCopies; copy++) await sendBluetoothPrinterText(defaultPrinter, receipt, false);
             await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
             return;
@@ -3454,8 +3649,7 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
         const channel = String(document.getElementById("ordersChannelFilter")?.value || "").toLocaleLowerCase();
         const paymentMode = document.getElementById("ordersPaymentFilter")?.value || "";
         const localDateKey = value => {
-            const date = new Date(value);
-            return Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+            return getPOSDateKey(value);
         };
         const visibleOrders = baseOrders.filter(order => {
             const orderDate = localDateKey(order.created_at);
@@ -3476,7 +3670,7 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
             const status = String(order.status || "Open");
             const statusClass = group(order);
             const dueOrder = hasAmountDue(order);
-            const orderDate = order.created_at ? new Date(order.created_at).toLocaleString() : "";
+            const orderDate = order.created_at ? formatPOSDateTime(order.created_at) : "";
             const tableMeta = [order.sale_channel || order.order_type, order.table_number ? `Table ${esc(order.table_number)}${Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}` : ""].filter(Boolean).map(esc).join(" · ") || "-";
             const orderId = Number(order.id);
             const cardClass = `order-list-card ${selected ? "selected" : ""}`;
@@ -3576,8 +3770,7 @@ function downloadOrdersCSV() {
         const dueOrder = group === "closed" && getOrderAmountDue(order) > 0;
         const inSelectedBucket = statusFilter === "amount_due" ? dueOrder : group === statusFilter && !(statusFilter === "closed" && dueOrder);
         if (!inSelectedBucket) return false;
-        const date = new Date(order.created_at);
-        const dateKey = Number.isNaN(date.getTime()) ? "" : `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}-${String(date.getDate()).padStart(2,"0")}`;
+        const dateKey = getPOSDateKey(order.created_at);
         const from = document.getElementById("ordersDateFrom")?.value || "";
         const to = document.getElementById("ordersDateTo")?.value || "";
         const channel = String(document.getElementById("ordersChannelFilter")?.value || "").toLowerCase();
@@ -3590,11 +3783,11 @@ function downloadOrdersCSV() {
     if (!orders.length) return alert("No orders match the current filters.");
     const columns = [["Order number","order_number"],["Order ID","id"],["Date","created_at"],["Status","status"],["Sale channel","sale_channel"],["Table","table_number"],["PAX","pax"],["Customer","customer_name"],["Phone","customer_phone"],["Payment mode","payment_method"],["Subtotal","subtotal"],["Discount","discount"],["Charges","service_charge"],["GST","gst"],["Total","total"],["Amount due","amount_due"]];
     const cell = value => '"' + String(value ?? "").replace(/"/g, '""') + '"';
-    const csv = "\uFEFF" + [columns.map(([label]) => label),...orders.map(order => columns.map(([,key]) => key === "created_at" && order[key] ? new Date(order[key]).toLocaleString() : key === "payment_method" && Array.isArray(order.payment_modes) && order.payment_modes.length ? order.payment_modes.join(" + ") : order[key]))].map(row => row.map(cell).join(",")).join("\r\n");
+    const csv = "\uFEFF" + [columns.map(([label]) => label),...orders.map(order => columns.map(([,key]) => key === "created_at" && order[key] ? formatPOSDateTime(order[key]) : key === "payment_method" && Array.isArray(order.payment_modes) && order.payment_modes.length ? order.payment_modes.join(" + ") : order[key]))].map(row => row.map(cell).join(",")).join("\r\n");
     const url = URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));
     const link = document.createElement("a");
     link.href = url;
-    link.download = `cafe-pos-orders-${new Date().toISOString().slice(0,10)}.csv`;
+    link.download = `cafe-pos-orders-${getPOSDateKey()}.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(url),1000);
 }
@@ -3622,7 +3815,7 @@ async function viewOrderActivity(orderId) {
         list.innerHTML = entries.length ? entries.map(item => `
             <article class="order-activity-entry">
                 <span class="order-activity-marker" aria-hidden="true"></span>
-                <div class="order-activity-copy"><strong>${esc(item.event_type || "Order updated")}</strong><p>${esc(item.description || "-")}</p><small>${esc(item.actor || "Staff")} · ${esc(item.created_at ? new Date(item.created_at).toLocaleString() : "-")}</small></div>
+                <div class="order-activity-copy"><strong>${esc(item.event_type || "Order updated")}</strong><p>${esc(item.description || "-")}</p><small>${esc(item.actor || "Staff")} · ${esc(item.created_at ? formatPOSDateTime(item.created_at) : "-")}</small></div>
             </article>`).join("") : '<p class="access-muted">No activity has been recorded for this order.</p>';
     } catch (error) {
         list.innerHTML = `<p class="access-muted">Unable to load activity: ${esc(error.message)}</p>`;
@@ -3929,7 +4122,7 @@ async function viewOrder(orderId) {
         if (empty) empty.hidden = true;
         if (box) box.hidden = false;
         if (title) title.textContent = order.order_number || `Order #${order.id}`;
-        if (hint) hint.textContent = `${order.created_at ? new Date(order.created_at).toLocaleString() : ""}${order.customer_name ? ` · ${order.customer_name}` : ""}`;
+        if (hint) hint.textContent = `${order.created_at ? formatPOSDateTime(order.created_at) : ""}${order.customer_name ? ` · ${order.customer_name}` : ""}`;
         if (actions) {
             const status = String(order.status || "").toLowerCase();
             const closed = status === "completed";
@@ -3991,6 +4184,51 @@ function closeOrderDetails() {
 
 
 let pendingCancellationOrderId = null;
+let pendingItemCancellationResolver = null;
+function requestItemCancellationReason(item) {
+    return new Promise(resolve => {
+        const order = currentOpenOrderData?.order || {};
+        const reasons = normalizeCancellationReasons(appSettings.cancellationReasons || DEFAULT_CANCELLATION_REASONS);
+        const select = document.getElementById("cancelItemReason");
+        if (select) select.innerHTML = reasons.map(reason => `<option value="${esc(reason)}">${esc(reason)}</option>`).join("");
+        const closed = String(order.status || "").toLowerCase() === "completed";
+        const orderLabel = order.order_number || (currentOpenOrderId ? `#${currentOpenOrderId}` : "this order");
+        const description = document.getElementById("cancelItemDialogDescription");
+        if (description) description.textContent = `Remove one ${item.name || "item"} from ${closed ? "closed bill" : "open order"} ${orderLabel}? Choose a reason to record this cancellation.`;
+        const error = document.getElementById("cancelItemDialogError");
+        if (error) {
+            error.textContent = reasons.length ? "" : "Add a cancellation reason in Settings before removing items.";
+            error.hidden = reasons.length > 0;
+        }
+        const confirmButton = document.getElementById("confirmCancelItemButton");
+        if (confirmButton) confirmButton.disabled = reasons.length === 0;
+        pendingItemCancellationResolver = resolve;
+        document.getElementById("cancelItemModal").style.display = "flex";
+    });
+}
+
+function finishItemCancellationReason(reason = "") {
+    const modal = document.getElementById("cancelItemModal");
+    if (modal) modal.style.display = "none";
+    const resolve = pendingItemCancellationResolver;
+    pendingItemCancellationResolver = null;
+    if (resolve) resolve(reason);
+}
+
+function closeCancelItemDialog() {
+    finishItemCancellationReason("");
+}
+
+function confirmCancelItem() {
+    const reason = document.getElementById("cancelItemReason")?.value || "";
+    const error = document.getElementById("cancelItemDialogError");
+    if (!reason) {
+        if (error) { error.textContent = "Choose a cancellation reason before removing the item."; error.hidden = false; }
+        return;
+    }
+    finishItemCancellationReason(reason);
+}
+
 function cancelOrder(orderId) {
     const order = currentOrders.find(entry => Number(entry.id) === Number(orderId));
     const closed = String(order?.status || "").toLowerCase() === "completed";
@@ -4065,7 +4303,7 @@ async function printCurrentOrder() {
         orderType: order.order_type || "-",
         tableNumber: order.table_number || "",
         pax: order.pax || null,
-        date: order.created_at ? new Date(order.created_at).toLocaleString() : new Date().toLocaleString(),
+        date: order.created_at ? formatPOSDateTime(order.created_at) : formatPOSDateTime(),
         customerName: order.customer_name || "",
         customerPhone: order.customer_phone || "",
         customerEmail: order.customer_email || "",
@@ -5076,11 +5314,14 @@ let knownPendingKOTIds=new Set();
 let kotAlertAudioContext=null;
 let pendingKOTAlertSounds=0;
 let pendingQrAlertSounds=0;
+let pendingQrServiceAlertSounds=0;
+let pendingQrServiceVoiceRequests=[];
 
 function setKOTTab(tab){
     kotState.tab=tab;
     document.querySelectorAll(".kot-tab").forEach(b=>b.classList.remove("active"));
-    document.getElementById(tab==="pending"?"kotTabPending":tab==="ready"?"kotTabReady":"kotTabCompleted")?.classList.add("active");
+    const tabIds={pending:"kotTabPending",ready:"kotTabReady",completed:"kotTabCompleted",cancelled:"kotTabCancelled"};
+    document.getElementById(tabIds[tab]||tabIds.pending)?.classList.add("active");
     renderKOT();
 }
 
@@ -5114,14 +5355,17 @@ function ensureKOTAlertAudio(){
 
 function primeKOTAlertAudio(){
     // Resume only from a real login/pointer/key gesture, then replay alerts queued while audio was locked.
+    flushPendingQrServiceVoices();
     const context=ensureKOTAlertAudio();
     if(!context)return;
     const flush=()=>{
         if(context.state!=="running")return;
-        const qrCount=Math.min(3,pendingQrAlertSounds),kotCount=Math.min(3,pendingKOTAlertSounds);
-        pendingQrAlertSounds=0;pendingKOTAlertSounds=0;
+        const qrCount=Math.min(3,pendingQrAlertSounds),kotCount=Math.min(3,pendingKOTAlertSounds),serviceCount=Math.min(3,pendingQrServiceAlertSounds),serviceVoices=pendingQrServiceVoiceRequests.splice(0);
+        pendingQrAlertSounds=0;pendingKOTAlertSounds=0;pendingQrServiceAlertSounds=0;
         for(let i=0;i<qrCount;i++)emitPOSQrOrderAlertSound();
         for(let i=0;i<kotCount;i++)emitKOTAlertSound();
+        for(let i=0;i<serviceCount;i++)emitPOSNotificationBuzzer();
+        serviceVoices.forEach(queueQrTableServiceVoice);
     };
     if(context.state==="running"){flush();return;}
     context.resume().then(flush).catch(()=>{});
@@ -5184,22 +5428,38 @@ function showKOTArrivalToast(count){
     window.__kotToastTimer=setTimeout(()=>toast.classList.remove("show"),4500);
 }
 
+async function autoPrintQrFollowupTicket(ticket){
+    const rows=await api(`/kot?orderId=${encodeURIComponent(ticket.orderId)}&print=1`);
+    const batch=(rows||[]).filter(item=>Number(item.ticket_number||1)===Number(ticket.ticketNumber));
+    // Background polls cannot open browser print dialogs or Bluetooth pickers.
+    // Auto-send only when every station has a configured local/network printer.
+    if(!batch.length||batch.some(item=>!Number(item.printer_id)||!["local","network"].includes(String(item.printer_connection_type||""))))return;
+    await printKOT(ticket.orderId,undefined,ticket.ticketNumber);
+}
+
 function inspectNewKOTAlerts(items){
     if(!canKitchenReceiveKOTAlerts()) return;
-    // QR tickets are announced by the QR order poll so they still alert when
-    // the POS opens after they arrived. Keep this poll for non-QR KOTs to avoid
-    // playing two sounds for the same QR order.
-    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)&&!isQrTrackedOrder(i)).map(i=>Number(i.id)));
+    // The QR order poll announces first orders. This poll also announces later
+    // ticket batches added to an already accepted QR order.
+    const pendingIds=new Set((items||[]).filter(i=>["Pending","Preparing"].includes(i.status)&&(!isQrTrackedOrder(i)||Number(i.ticket_number||1)>1)).map(i=>Number(i.id)));
     if(!kotAlertInitialized){
         knownPendingKOTIds=pendingIds;
         kotAlertInitialized=true;
         return;
     }
-    const newCount=[...pendingIds].filter(id=>!knownPendingKOTIds.has(id)).length;
+    const newlyPendingIds=[...pendingIds].filter(id=>!knownPendingKOTIds.has(id));
+    const newCount=newlyPendingIds.length;
     knownPendingKOTIds=pendingIds;
     if(newCount>0){
         playKOTAlertSound();
         showKOTArrivalToast(newCount);
+        const newIds=new Set(newlyPendingIds);
+        const newQrBatches=new Map((items||[]).filter(item=>newIds.has(Number(item.id))&&isQrTrackedOrder(item)&&Number(item.ticket_number||1)>1).map(item=>[`${item.order_id}:${item.ticket_number}`,{orderId:Number(item.order_id),ticketNumber:Number(item.ticket_number)}]));
+        if(hasPermission("kitchen","print"))newQrBatches.forEach(ticket=>Promise.resolve().then(()=>autoPrintQrFollowupTicket(ticket)).catch(error=>console.warn("New QR kitchen ticket print failed:",error)));
+        if(newQrBatches.size){
+            if(document.getElementById("orders")?.classList.contains("active-page"))Promise.resolve().then(()=>updateOrdersTable(true,false)).catch(()=>{});
+            if([...newQrBatches.values()].some(ticket=>ticket.orderId===Number(window.selectedOrderId)))Promise.resolve().then(()=>viewOrder(Number(window.selectedOrderId))).catch(()=>{});
+        }
     }
 }
 
@@ -5227,29 +5487,45 @@ function stopKOTAlertPolling(){
     if(kotAlertTimer){clearInterval(kotAlertTimer);kotAlertTimer=null;}
 }
 
+function formatKOTAge(value, now = Date.now()) {
+    const time = new Date(value || now).getTime();
+    if (!Number.isFinite(time)) return "Time unavailable";
+    const seconds = Math.max(0, Math.floor((now - time) / 1000));
+    if (seconds < 5) return "Just now";
+    if (seconds < 60) return `${seconds} second${seconds === 1 ? "" : "s"} ago`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+    const days = Math.floor(hours / 24);
+    return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
 function renderKOT(){
     const items=Array.isArray(kotState.items)?kotState.items:[],groups={};
     items.forEach(item=>{
-        if(!groups[item.order_id])groups[item.order_id]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,pax:item.pax,status:item.status,createdAt:item.created_at,items:[]};
-        groups[item.order_id].items.push(item);
-        const ss=groups[item.order_id].items.map(i=>i.status);
-        groups[item.order_id].status=ss.every(s=>s==="Completed")?"Completed":ss.some(s=>s==="Ready")?"Ready":ss.some(s=>s==="Preparing")?"Preparing":"Pending";
+        const ticketNumber=Number(item.ticket_number||1),key=`${item.order_id}:${ticketNumber}`;
+        if(!groups[key])groups[key]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,pax:item.pax,orderStatus:item.order_status,ticketNumber,status:item.status,createdAt:item.created_at,items:[]};
+        groups[key].items.push(item);
+        const ss=groups[key].items.map(i=>i.status);
+        groups[key].status=String(groups[key].orderStatus||"").toLowerCase()==="cancelled"?"Cancelled":ss.every(s=>s==="Completed")?"Completed":ss.some(s=>s==="Ready")?"Ready":ss.some(s=>s==="Preparing")?"Preparing":"Pending";
     });
-    const all=Object.values(groups),pending=all.filter(o=>o.status==="Pending"||o.status==="Preparing"),ready=all.filter(o=>o.status==="Ready"),completed=all.filter(o=>o.status==="Completed");
-    setText("kotCountPending",pending.length);setText("kotCountReady",ready.length);setText("kotCountCompleted",completed.length);
-    const selected=kotState.tab==="pending"?pending:kotState.tab==="ready"?ready:completed,container=document.getElementById("kotContainer");
+    const all=Object.values(groups),pending=all.filter(o=>o.status==="Pending"||o.status==="Preparing"),ready=all.filter(o=>o.status==="Ready"),completed=all.filter(o=>o.status==="Completed"),cancelled=all.filter(o=>o.status==="Cancelled");
+    setText("kotCountPending",pending.length);setText("kotCountReady",ready.length);setText("kotCountCompleted",completed.length);setText("kotCountCancelled",cancelled.length);
+    const selected=kotState.tab==="pending"?pending:kotState.tab==="ready"?ready:kotState.tab==="cancelled"?cancelled:completed,container=document.getElementById("kotContainer");
     if(!container)return;
     container.innerHTML="";
     if(!selected.length){container.innerHTML=`<div class="dashboard-box"><p>No KOTs for this tab/date range.</p></div>`;return;}
     selected.forEach(order=>{
         let next=order.status==="Pending"?"Preparing":order.status==="Preparing"?"Ready":order.status==="Ready"?"Completed":null;
         const card=document.createElement("div");
-        card.className="kot-card";
+        card.className="kot-card"+(order.status==="Cancelled"?" kot-card-cancelled":"");
         const byGroup={};
         (order.items||[]).forEach(item=>{const key=item.kot_group_id?String(item.kot_group_id):"none";if(!byGroup[key])byGroup[key]={name:item.kot_group_name||"Unassigned",station:item.kot_group_station||"Kitchen",items:[]};byGroup[key].items.push(item);});
-        const groupedHtml=Object.values(byGroup).map(g=>`<div class="kot-group-block"><div class="kot-group-heading"><strong>${esc(g.name)}</strong><span>${esc(g.station)}</span></div>${g.items.map(item=>{const options=formatItemOptionNames(item.options);return `<div class="kot-item"><span class="kot-item-copy">${esc(item.item_name)}${options?`<small class="kot-item-options">${esc(options)}</small>`:""}</span><strong>× ${item.quantity}</strong></div>`;}).join("")}</div>`).join("");
-        const actions=(appSettings.kotEnabled===false)?'<span class="access-muted">KOT workflow disabled in Settings</span>':(next?`<button class="big-btn" onclick="updateKOTOrder(${order.orderId}, '${next}')">${next==="Preparing"?"👨‍🍳 Start Preparing":next==="Ready"?"✅ Mark Ready":"✅ Complete"}</button>`:`<span>✅ Completed</span>`);
-        card.innerHTML=`<div class="kot-header"><strong>${esc(order.orderNumber)}</strong><span>${esc(order.orderType)}</span></div><div class="kot-table">Table: ${esc(order.tableNumber||"-")}${Number(order.pax)>0?` · ${Number(order.pax)} PAX`:""}</div><div class="kot-items">${groupedHtml}</div><div class="kot-status">Status: <strong>${esc(order.status)}</strong></div><div class="kot-actions">${actions}${appSettings.kotEnabled!==false?`<button class="big-btn" onclick="printKOT(${order.orderId})">🖨️ Print KOT</button>`:""}</div>`;
+        const groupedHtml=Object.values(byGroup).map(g=>`<div class="kot-group-block"><div class="kot-group-heading"><strong>${esc(g.name)}</strong><span>${esc(g.station)}</span></div>${g.items.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="kot-item ${fullyCancelled?"kot-item-cancelled":""}"><span class="kot-item-copy">${fullyCancelled?`<del>${esc(item.item_name)}</del>`:esc(item.item_name)}${options?`<small class="kot-item-options">${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("")}</div>`).join("");
+        const actions=order.status==="Cancelled"?'<span class="kot-cancelled-label">✕ Cancelled order · items are crossed out</span>':(appSettings.kotEnabled===false)?'<span class="access-muted">KOT workflow disabled in Settings</span>':(next?`<button class="big-btn" onclick="updateKOTOrder(${order.orderId}, '${next}', ${order.ticketNumber})">${next==="Preparing"?"👨‍🍳 Start Preparing":next==="Ready"?"✅ Mark Ready":"✅ Complete"}</button>`:`<span>✅ Completed</span>`);
+        const receivedAt=order.createdAt?formatPOSTime(order.createdAt):"";
+        card.innerHTML=`<div class="kot-header"><strong>${esc(order.orderNumber)} · Ticket #${order.ticketNumber}</strong><span>${esc(order.orderType)}</span></div><div class="kot-table">Table: ${esc(order.tableNumber||"-")}${Number(order.pax)>0?` · ${Number(order.pax)} PAX`:""}</div><div class="kot-age-label" title="Ticket arrival time">Received ${esc(formatKOTAge(order.createdAt))}${receivedAt?` · ${esc(receivedAt)}`:""}</div><div class="kot-items">${groupedHtml}</div><div class="kot-status">Status: <strong>${esc(order.status)}</strong></div><div class="kot-actions">${actions}${appSettings.kotEnabled!==false?`<button class="big-btn" onclick="printKOT(${order.orderId},undefined,${order.ticketNumber})">🖨️ Print Ticket #${order.ticketNumber}</button>`:""}</div>`;
         container.appendChild(card);
     });
 }
@@ -5271,10 +5547,10 @@ async function loadKOT(isPoll=false){
     }
 }
 
-async function updateKOTOrder(orderId,status){
+async function updateKOTOrder(orderId,status,ticketNumber){
     if(appSettings.kotEnabled===false)return alert("KOT / Kitchen workflow is disabled in Settings.");
     try{
-        const orderItems=(kotState.items||[]).filter(item=>Number(item.order_id)===Number(orderId));
+        const orderItems=(kotState.items||[]).filter(item=>Number(item.order_id)===Number(orderId)&&(ticketNumber===undefined||Number(item.ticket_number||1)===Number(ticketNumber))&&Number(item.quantity||0)>0&&String(item.status||"").toLowerCase()!=="completed");
         if(!orderItems.length)return alert("KOT not found for the selected date/filter.");
         for(const item of orderItems){
             await api(`/kot/${item.id}`,{method:"PUT",body:JSON.stringify({status})});
@@ -5300,7 +5576,7 @@ async function printOpenOrder(orderId){
         const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
-        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
+        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",cashierName:order.cashier_name||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),unit:item.unit||"ea",options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
         window.openBillPreview(bill);
         await window.printThermalBill({ manual: true });
     }catch(error){alert("Unable to print open order: "+error.message);}
@@ -5317,7 +5593,9 @@ async function viewOrderBill(orderId){
             isOpenOrder:!["completed","cancelled"].includes(String(order.status||"").toLowerCase()),
             orderNumber:order.order_number||`#${orderId}`,
             invoiceNumber:order.invoice_number||"",
-            date:order.created_at?new Date(order.created_at).toLocaleString():new Date().toLocaleString(),
+            customerCode:order.customer_id?`#${order.customer_id}`:"",
+            cashierName:order.cashier_name||"",
+            date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),
             orderType:order.order_type||"",
             tableNumber:order.table_number||"",
             pax:Number(order.pax||0),
@@ -5327,6 +5605,7 @@ async function viewOrderBill(orderId){
             serviceCharge:Number(order.service_charge||0),
             chargeName:order.charge_adjustment_name||"",
             gst:Number(order.gst||0),
+            roundingAdjustment:Number(order.rounding_adjustment||0),
             total:Number(order.total||0),
             paymentMethod:order.payment_method||"Unpaid",
             paymentAllocations:Array.isArray(paymentSummary?.allocations)?paymentSummary.allocations:[],
@@ -5361,32 +5640,46 @@ async function openOrderKOTView(orderId = window.selectedOrderId){
     modal.style.display = "flex";
     try {
         const isCancelled = String(order?.status || "").toLowerCase() === "cancelled";
+        const isUnacceptedQrOrder = (Boolean(order?.public_tracking_token) || /^QR-/i.test(String(order?.order_number || ""))) && String(order?.status || "").toLowerCase() === "pending";
         let tickets = await api(`/kot?orderId=${encodeURIComponent(id)}`);
-        if (!tickets?.length && appSettings.kotEnabled !== false && !isCancelled && hasPermission("kitchen", "print")) {
+        if (!tickets?.length && appSettings.kotEnabled !== false && !isCancelled && !isUnacceptedQrOrder && hasPermission("kitchen", "print")) {
             await api(`/orders/${id}/kot`, { method: "POST" });
             tickets = await api(`/kot?orderId=${encodeURIComponent(id)}`);
         }
         const canPrintKOT = hasPermission("kitchen", "print") && appSettings.kotEnabled !== false;
-        const groups = new Map();
-        (tickets || []).forEach(ticket => {
-            const key = ticket.kot_group_id ? String(ticket.kot_group_id) : "unassigned";
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key).push(ticket);
-        });
         if (!tickets?.length) {
-            body.innerHTML = '<div class="order-kot-empty"><span class="orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>No KOT tickets for this order</strong><p>Map menu items or categories to a KOT group and assign its printer in Settings → KOT Groups.</p></div>';
+            body.innerHTML = isUnacceptedQrOrder
+                ? '<div class="order-kot-empty"><span class="orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>Waiting for order acceptance</strong><p>The kitchen ticket will be created and sent when this QR order is accepted.</p></div>'
+                : '<div class="order-kot-empty"><span class="orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><strong>No KOT tickets for this order</strong><p>Map menu items or categories to a KOT group and assign its printer in Settings → KOT Groups.</p></div>';
         } else {
-            body.innerHTML = `<div class="order-kot-summary"><strong>${tickets.length} kitchen item${tickets.length === 1 ? "" : "s"}</strong><span>Tickets are routed to the printer saved on each KOT group.</span></div>` + [...groups.entries()].map(([key, groupTickets]) => {
-                const first = groupTickets[0];
-                const groupName = first.kot_group_name || "Unassigned";
-                const station = first.kot_group_station || "Kitchen";
-                const printer = first.printer_name || "No printer assigned · uses the print dialog";
-                const items = groupTickets.map(ticket => {
-                    const options = formatItemOptionNames(ticket.options);
-                    return `<li><div><strong>${esc(ticket.item_name || "Item")}</strong>${options ? `<small>${esc(options)}</small>` : ""}</div><span>× ${Number(ticket.quantity || 0)}</span><em>${esc(ticket.status || "Pending")}</em></li>`;
+            const ticketBatches = new Map();
+            (tickets || []).forEach(ticket => {
+                const ticketNumber = Number(ticket.ticket_number || 1);
+                if (!ticketBatches.has(ticketNumber)) ticketBatches.set(ticketNumber, []);
+                ticketBatches.get(ticketNumber).push(ticket);
+            });
+            body.innerHTML = `<div class="order-kot-summary"><strong>${tickets.length} kitchen item${tickets.length === 1 ? "" : "s"}</strong><span>Each add-on batch keeps the same order number and gets its own kitchen ticket.</span></div>` + [...ticketBatches.entries()].map(([ticketNumber, batchTickets]) => {
+                const groups = new Map();
+                batchTickets.forEach(ticket => {
+                    const key = ticket.kot_group_id ? String(ticket.kot_group_id) : "unassigned";
+                    if (!groups.has(key)) groups.set(key, []);
+                    groups.get(key).push(ticket);
+                });
+                const cards = [...groups.entries()].map(([key, groupTickets]) => {
+                    const first = groupTickets[0];
+                    const groupName = first.kot_group_name || "Unassigned";
+                    const station = first.kot_group_station || "Kitchen";
+                    const printer = first.printer_name || "No printer assigned · uses the print dialog";
+                    const items = groupTickets.map(ticket => {
+                        const options = formatItemOptionNames(ticket.options);
+                        const quantity=Number(ticket.quantity||0),cancelled=Number(ticket.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;
+                        return `<li class="${fullyCancelled?"order-kot-cancelled":""}"><div><strong>${fullyCancelled?`<del>${esc(ticket.item_name||"Item")}</del>`:esc(ticket.item_name||"Item")}</strong>${options?`<small>${esc(options)}</small>`:""}</div><span>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</span><em>${fullyCancelled?"Cancelled":esc(ticket.status||"Pending")}</em></li>`;
+                    }).join("");
+                    const groupArgument = key === "unassigned" ? "'unassigned'" : String(Number(key));
+                    return `<article class="order-kot-group-card"><header><div><strong>${esc(groupName)}</strong><small>${esc(station)}</small></div><span class="order-kot-item-count">${groupTickets.length} item${groupTickets.length === 1 ? "" : "s"}</span></header><div class="order-kot-printer"><span>Assigned printer</span><strong>${esc(printer)}</strong></div><ul>${items}</ul>${canPrintKOT ? `<button type="button" class="table-action-btn" onclick="reprintKOTGroup(${id},${groupArgument},${ticketNumber})">🖨️ Print / Reprint this group</button>` : ""}</article>`;
                 }).join("");
-                const groupArgument = key === "unassigned" ? "'unassigned'" : String(Number(key));
-                return `<article class="order-kot-group-card"><header><div><strong>${esc(groupName)}</strong><small>${esc(station)}</small></div><span class="order-kot-item-count">${groupTickets.length} item${groupTickets.length === 1 ? "" : "s"}</span></header><div class="order-kot-printer"><span>Assigned printer</span><strong>${esc(printer)}</strong></div><ul>${items}</ul>${canPrintKOT ? `<button type="button" class="table-action-btn" onclick="reprintKOTGroup(${id},${groupArgument})">🖨️ Print / Reprint this group</button>` : ""}</article>`;
+                const ticketAge = formatKOTAge(batchTickets[0]?.created_at);
+                return `<section class="order-kot-ticket-batch"><h3>Kitchen ticket #${ticketNumber} · ${esc(order?.order_number || `Order #${id}`)}</h3><p class="order-kot-received-time">Received ${esc(ticketAge)} · ${esc(batchTickets[0]?.created_at ? formatPOSDateTime(batchTickets[0].created_at) : "Time unavailable")}</p>${cards}</section>`;
             }).join("");
         }
         if (printAll) printAll.disabled = !tickets?.length || !canPrintKOT;
@@ -5400,13 +5693,14 @@ function closeOrderKOTView(){
     if (modal) modal.style.display = "none";
 }
 
-async function reprintKOTGroup(orderId, groupId){
-    await printKOT(orderId, groupId);
+async function reprintKOTGroup(orderId, groupId, ticketNumber){
+    await printKOT(orderId, groupId, ticketNumber);
 }
 
-async function printKOT(orderId, onlyGroupId){
+async function printKOT(orderId, onlyGroupId, ticketNumber){
     try{
         let tickets=await api(`/kot?orderId=${encodeURIComponent(Number(orderId))}&print=1`);
+        if (ticketNumber !== undefined) tickets = tickets.filter(ticket => Number(ticket.ticket_number || 1) === Number(ticketNumber));
         if (onlyGroupId !== undefined) {
             tickets = tickets.filter(ticket => onlyGroupId === "unassigned"
                 ? !Number(ticket.kot_group_id)
@@ -5417,8 +5711,9 @@ async function printKOT(orderId, onlyGroupId){
         tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
         for(const [groupId,groupTickets] of buckets){
             const first=groupTickets[0],groupName=first.kot_group_name||"Kitchen";
-            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Time: ${new Date(first.created_at||Date.now()).toLocaleString()}`,"--------------------------------"];
-            groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options);receipt.push(`${item.item_name||"Item"} x${Number(item.quantity||0)}`);if(options)receipt.push(`  + ${options}`);});
+            const ticketTime = parsePOSDate(first.created_at || Date.now());
+            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Ticket: #${Number(first.ticket_number||1)}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Received: ${formatKOTAge(ticketTime)} · ${formatPOSDateTime(ticketTime)}`,"--------------------------------"];
+            groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0);receipt.push(`${quantity<=0&&cancelled>0?"CANCELLED: ":""}${item.item_name||"Item"} x${quantity}${cancelled>0?` (cancelled x${cancelled})`:""}`);if(options)receipt.push(`  + ${options}`);});
             receipt.push("--------------------------------", "KITCHEN COPY", "", "");
             const text=receipt.join("\n");
             const printerId=Number(first.printer_id||0);
@@ -5432,8 +5727,8 @@ async function printKOT(orderId, onlyGroupId){
             }else{
                 const win=window.open("","_blank","width=420,height=700");
                 if(!win)return alert("Please allow pop-ups to print KOT.");
-                const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options);return `<div class="item"><span>${esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>× ${Number(item.quantity||0)}</strong></div>`;}).join("");
-                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>${esc(new Date(first.created_at||Date.now()).toLocaleString())}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+                const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="item ${fullyCancelled?"cancelled":""}"><span>${fullyCancelled?`<del>${esc(item.item_name||"Item")}</del>`:esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("");
+                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)} · Ticket ${Number(first.ticket_number||1)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.item.cancelled{color:#777}.item del{color:#777}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Ticket: <b>#${Number(first.ticket_number||1)}</b><br>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>Received: <b>${esc(formatKOTAge(ticketTime))}</b><br>${esc(formatPOSDateTime(ticketTime))}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
                 win.document.close();
             }
         }
@@ -5573,6 +5868,8 @@ async function setMenuItemAvailability(id,available){
 }
 
 let restaurantMenuPublication=null;
+let qrMenuCategoryNames=[];
+let qrCategoryOrder=[];
 async function editMenuItem(id){const item=currentMenu.find(x=>Number(x.id)===Number(id));if(item)openAddMenuModal(item);}
 function renderMenuChannelFields(selectedChannels=null, channelPrices={}, basePrice=0){
     const availability=document.getElementById('menuChannelAvailability'),prices=document.getElementById('menuChannelPriceGrid');
@@ -5757,7 +6054,7 @@ async function downloadExistingMenuSpreadsheet() {
         const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
         const link = document.createElement("a");
         link.href = url;
-        link.download = `cafe-pos-existing-menu-${new Date().toISOString().slice(0, 10)}.csv`;
+        link.download = `cafe-pos-existing-menu-${getPOSDateKey()}.csv`;
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (error) {
@@ -6111,7 +6408,7 @@ function renderAccessUsers() {
             <td>${esc(user.username)}</td>
             <td>${profileBadge({name: profileName})}</td>
             <td><span class="access-status ${user.active ? "active" : "inactive"}">${user.active ? "Active" : "Inactive"}</span></td>
-            <td>${user.created_at ? new Date(user.created_at).toLocaleString() : "-"}</td>
+            <td>${user.created_at ? formatPOSDateTime(user.created_at) : "-"}</td>
             <td>
                 ${user.can_manage ? `
                 <button onclick="editAccessUser(${user.id})">✏️ Edit</button>
@@ -6491,15 +6788,18 @@ async function editOpenOrder(orderId) {
         if(status==='cancelled'||(isClosed&&!canEditClosed)||(!isClosed&&!canEditActive))return alert(isClosed?'You do not have permission to edit this closed bill.':'You do not have permission to edit this open order.');
         currentOpenOrderId = orderId;
         currentOpenOrderData = data;
+        cartItemCancellationReasons = [];
         cart = (data.items || []).map(item => ({
             id: item.menu_id || ("order-item-" + item.id),
             variantId: item.variant_id || null,
-            cartKey: item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id),
+            cartKey: `${item.variant_id ? `${item.menu_id}:${item.variant_id}` : String(item.menu_id || item.id)}:${(item.options || []).flatMap(set => set.options || []).map(option => String(option.id)).sort().join(",")}`,
             name: item.item_name,
             price: Number(item.price),
             basePrice: Number(item.price)-((item.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0)),
             options: item.options || [],
             quantity: Number(item.quantity),
+            orderItemId: Number(item.id),
+            savedQuantity: Number(item.quantity),
             unit: item.unit || "ea",
             taxRate: Number(item.tax_rate ?? 5),
             taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive"
@@ -6639,7 +6939,7 @@ async function loadMarketingPushCampaigns() {
         renderMarketingPushCampaigns();
     } catch(error) { marketingPushCampaigns=[];status.textContent="Could not load notification setup: "+error.message;if(create)create.disabled=true;list.innerHTML='<div class="marketing-empty-state">Notification setup is unavailable.</div>'; }
 }
-function renderMarketingPushCampaigns(){const list=document.getElementById("marketingPushCampaigns");if(!list)return;if(!marketingPushCampaigns.length){list.innerHTML='<div class="marketing-empty-state">No customer messages have been sent yet.</div>';return;}list.innerHTML=marketingPushCampaigns.map(c=>{const date=c.sent_at||c.created_at;return `<article class="marketing-push-card"><div class="marketing-push-card-top"><span>${esc(String(c.status||"sent").toUpperCase())}</span><span>${date?esc(new Date(date).toLocaleString()):""}</span></div><h4>${esc(c.title||"Promotion")}</h4><p>${esc(c.message||"")}</p><small>Sent ${Number(c.sent_count||0)} - Failed ${Number(c.failed_count||0)} - Audience ${Number(c.subscriber_count||0)}</small><button type="button" class="table-action-btn" onclick="deleteMarketingPushCampaign(${Number(c.id)})">Delete message</button></article>`;}).join("");}
+function renderMarketingPushCampaigns(){const list=document.getElementById("marketingPushCampaigns");if(!list)return;if(!marketingPushCampaigns.length){list.innerHTML='<div class="marketing-empty-state">No customer messages have been sent yet.</div>';return;}list.innerHTML=marketingPushCampaigns.map(c=>{const date=c.sent_at||c.created_at;return `<article class="marketing-push-card"><div class="marketing-push-card-top"><span>${esc(String(c.status||"sent").toUpperCase())}</span><span>${date?esc(formatPOSDateTime(date)):""}</span></div><h4>${esc(c.title||"Promotion")}</h4><p>${esc(c.message||"")}</p><small>Sent ${Number(c.sent_count||0)} - Failed ${Number(c.failed_count||0)} - Audience ${Number(c.subscriber_count||0)}</small><button type="button" class="table-action-btn" onclick="deleteMarketingPushCampaign(${Number(c.id)})">Delete message</button></article>`;}).join("");}
 async function deleteMarketingPushCampaign(id){if(!Number.isInteger(Number(id))||!confirm("Delete this notification message from your history?"))return;try{await api(`/marketing/push-campaigns/${Number(id)}`,{method:"DELETE"});marketingPushCampaigns=marketingPushCampaigns.filter(c=>Number(c.id)!==Number(id));renderMarketingPushCampaigns();showProfileToast("Notification message deleted.");}catch(error){alert(error.message||"Could not delete the notification message.");}}
 function openMarketingPushForm(){if(!marketingPushConfig?.configured){alert("Web push delivery is not configured on this POS server. Ask your POS administrator to enable it.");return;}if(!marketingPushConfig?.menuEnabled){alert("Publish the Table QR menu before sending a message.");return;}if(!Number(marketingPushConfig?.subscriberCount||0)){alert("No guests have subscribed yet. Invite guests to tap Get offers on the QR menu.");return;}document.getElementById("marketingPushTitle").value="";document.getElementById("marketingPushMessage").value="";document.getElementById("marketingPushFormStatus").textContent="";const button=document.getElementById("marketingPushSendButton");button.disabled=false;button.textContent="Send to subscribers";document.getElementById("marketingPushModal").style.display="flex";}
 function closeMarketingPushForm(){document.getElementById("marketingPushModal")?.style.setProperty("display","none");}
@@ -7068,9 +7368,11 @@ async function loadSettings() {
     appSettings.defaultPayment = preferredPaymentMethod();
 
     setSettingValue("settingRestaurantName", appSettings.restaurantName);
+    setSettingValue("settingBusinessLegalName", appSettings.businessLegalName || "");
     setSettingValue("settingAddress", appSettings.address);
     setSettingValue("settingPhone", appSettings.phone);
     setSettingValue("settingGstin", appSettings.gstin);
+    setSettingValue("settingFssai", appSettings.fssai || "");
     pendingBusinessLogoUrl = null;
     businessLogoChanged = false;
     setRestaurantLogoPreview(currentUser?.logo_url || "");
@@ -7108,6 +7410,12 @@ async function loadSettings() {
     setSettingValue("settingAllowOrderNotes", appSettings.allowOrderNotes); setSettingValue("settingShowItemNotes", appSettings.showItemNotes);
     setSettingValue("settingLowStockThreshold", appSettings.lowStockThreshold); setSettingValue("settingCustomerMessage", appSettings.customerMessage);
     setSettingValue("settingEnableNotifications", appSettings.enableNotifications); setSettingValue("settingEnableKOTSound", appSettings.enableKOTSound); setSettingValue("settingKOTAlertInterval", appSettings.kotAlertInterval);
+    setSettingValue("settingQrCleanTableNotification", appSettings.qrCleanTableNotification !== false);
+    setSettingValue("settingQrCleanTableSound", appSettings.qrCleanTableSound !== false);
+    setSettingValue("settingQrCleanTableBuzzer", appSettings.qrCleanTableBuzzer === true);
+    setSettingValue("settingQrCallWaiterNotification", appSettings.qrCallWaiterNotification !== false);
+    setSettingValue("settingQrCallWaiterSound", appSettings.qrCallWaiterSound !== false);
+    setSettingValue("settingQrCallWaiterBuzzer", appSettings.qrCallWaiterBuzzer === true);
     setSettingValue("settingSessionTimeout", appSettings.sessionTimeout);
     setSettingValue("settingAuditLog", appSettings.auditLog);
     setSettingValue("settingUiDensity", appSettings.uiDensity); setSettingValue("settingAccentLabel", appSettings.accentLabel); setSettingValue("settingLargeBilling", appSettings.largeBilling);
@@ -7189,11 +7497,13 @@ function businessLogoUrl() {
 async function saveSettings() {
     const next = {
         restaurantName: readSettingValue("settingRestaurantName") || "SLASH POS",
+        businessLegalName: readSettingValue("settingBusinessLegalName") || "",
         address: readSettingValue("settingAddress") || "",
         phone: readSettingValue("settingPhone") || "",
         gstin: readSettingValue("settingGstin") || "",
+        fssai: readSettingValue("settingFssai") || "",
         header: readSettingValue("settingHeader") || "",
-        footer: readSettingValue("settingFooter") || "Thank You!\nVisit Again 😊",
+        footer: readSettingValue("settingFooter") || "Visit Again!\nThank you.",
         showInvoice: readSettingValue("settingShowInvoice"),
         showCustomer: readSettingValue("settingShowCustomer"),
         showCustomerPhone: readSettingValue("settingShowCustomerPhone"),
@@ -7228,6 +7538,12 @@ async function saveSettings() {
         openingTime: readSettingValue("settingOpeningTime") || "09:00", closingTime: readSettingValue("settingClosingTime") || "23:00", defaultOrderType: readSettingValue("settingDefaultOrderType") || "Takeaway",
         allowOrderNotes: readSettingValue("settingAllowOrderNotes"), showItemNotes: readSettingValue("settingShowItemNotes"), lowStockThreshold: Number(readSettingValue("settingLowStockThreshold")) || 0,
         customerMessage: readSettingValue("settingCustomerMessage") || "Thank you for visiting!", enableNotifications: readSettingValue("settingEnableNotifications"), enableKOTSound: readSettingValue("settingEnableKOTSound"), kotAlertInterval: Math.min(60, Math.max(3, Number(readSettingValue("settingKOTAlertInterval")) || 5)),
+        qrCleanTableNotification: readSettingValue("settingQrCleanTableNotification") !== false,
+        qrCleanTableSound: readSettingValue("settingQrCleanTableSound") !== false,
+        qrCleanTableBuzzer: readSettingValue("settingQrCleanTableBuzzer") === true,
+        qrCallWaiterNotification: readSettingValue("settingQrCallWaiterNotification") !== false,
+        qrCallWaiterSound: readSettingValue("settingQrCallWaiterSound") !== false,
+        qrCallWaiterBuzzer: readSettingValue("settingQrCallWaiterBuzzer") === true,
         sessionTimeout: Number(readSettingValue("settingSessionTimeout")) || 12, auditLog: readSettingValue("settingAuditLog"),
         uiDensity: readSettingValue("settingUiDensity") || "comfortable", accentLabel: readSettingValue("settingAccentLabel") || "", largeBilling: readSettingValue("settingLargeBilling"),
         kotEnabled: readSettingValue("settingKOTEnabled"), kotDisabledBehavior: readSettingValue("settingKOTDisabledBehavior") || "hide", posChannelPreferences: readPOSPreferencesFromForm(), customerInfoRequirements: readCustomerInfoRequirementsFromForm(), posSalesChannels: POS_CHANNELS.map(channel=>({...channel}))
@@ -7267,8 +7583,8 @@ async function saveSettings() {
 function resetSettings() {
     if (!confirm("Reset all settings to defaults?")) return;
     appSettings = {
-        restaurantName: "SLASH POS", address: "", phone: "", gstin: "",
-        header: "Cafe Management System", footer: "Thank You!\nVisit Again 😊",
+        restaurantName: "SLASH POS", businessLegalName: "", address: "", phone: "", gstin: "", fssai: "",
+        header: "Cafe Management System", footer: "Visit Again!\nThank you.",
         showInvoice: true, showCustomer: true, showCustomerPhone: true,
         showOrder: true, showOrderType: true, showTable: true, showTimestamp: true,
         showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
@@ -7281,6 +7597,8 @@ function resetSettings() {
         printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
         defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5, customerInfoRequirements: {},
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
+        qrCleanTableNotification: true, qrCleanTableSound: true, qrCleanTableBuzzer: false,
+        qrCallWaiterNotification: true, qrCallWaiterSound: true, qrCallWaiterBuzzer: false,
         sessionTimeout: 12, auditLog: false,
         uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide"
     };
@@ -7347,12 +7665,13 @@ async function loadCustomers() {
                     </td>
 
                     <td>
-                        ${new Date(
+                        ${formatPOSDateTime(
                             customer.created_at
-                        ).toLocaleString()}
+                        )}
                     </td>
 
                     <td>
+                        <button type="button" class="customer-order-activity-btn" onclick="viewCustomerOrderActivity(${Number(customer.id)})" title="View this customer’s orders and order activity">Order activity</button>
 
                         <button
                             onclick="editCustomer(${customer.id})"
@@ -7388,6 +7707,60 @@ async function loadCustomers() {
 
 }
 
+async function viewCustomerOrderActivity(customerId) {
+    if (!hasPermission("customers", "view")) return showProfileToast("You don’t have permission to view customers.");
+    const modal = document.getElementById("customerOrderActivityModal");
+    const list = document.getElementById("customerOrderActivityList");
+    const title = document.getElementById("customerOrderActivityTitle");
+    if (!modal || !list) return;
+    modal.style.display = "flex";
+    if (title) title.textContent = "Order activity";
+    list.innerHTML = '<p class="access-muted">Loading orders…</p>';
+    try {
+        const result = await api(`/customers/${Number(customerId)}/order-activity`);
+        const customer = result.customer || {};
+        const activity = Array.isArray(result.activity) ? result.activity : [];
+        if (title) title.textContent = customer.name ? `${customer.name} · Order activity` : "Order activity";
+        const orders = new Map();
+        activity.forEach(item => {
+            const key = String(item.order_id || item.order_number || "unknown");
+            if (!orders.has(key)) orders.set(key, { order: item, events: [] });
+            orders.get(key).events.push(item);
+        });
+        list.innerHTML = orders.size ? Array.from(orders.values()).map(({ order, events }) => `
+            <article class="customer-order-history-card">
+                <header class="customer-order-history-header">
+                    <div class="customer-order-history-main">
+                        <span class="customer-order-history-label">ORDER</span>
+                        <strong>${esc(order.order_number || `#${order.order_id}`)}</strong>
+                        <small>${esc(order.order_type || "Order")}${order.table_number ? ` · ${esc(order.table_number)}` : ""} · ${esc(formatPOSDateTime(order.order_created_at || order.created_at))}</small>
+                    </div>
+                    <div class="customer-order-history-total">
+                        <span class="customer-order-status-pill">${esc(order.order_status || "")}</span>
+                        <strong>${money(order.order_total || 0)}</strong>
+                    </div>
+                </header>
+                <div class="customer-order-history-events" aria-label="Activity for this order">
+                    ${events.map(item => `
+                        <div class="customer-order-history-event">
+                            <span class="customer-order-history-marker" aria-hidden="true"></span>
+                            <div><strong>${esc(item.event_type || "Order placed")}</strong>
+                                ${item.description ? `<p>${esc(item.description)}</p>` : ""}
+                                <small>${esc(item.actor || "Staff")} · ${esc(formatPOSDateTime(item.created_at))}</small>
+                            </div>
+                        </div>`).join("")}
+                </div>
+            </article>`).join("") : '<div class="orders-empty-state"><strong>No orders yet</strong><small>This customer has no orders on record.</small></div>';
+    } catch (error) {
+        list.innerHTML = `<p class="access-muted">Unable to load customer order activity: ${esc(error.message || "Please try again.")}</p>`;
+    }
+}
+
+function closeCustomerOrderActivity() {
+    const modal = document.getElementById("customerOrderActivityModal");
+    if (modal) modal.style.display = "none";
+}
+
 function csvSafeCell(value){
     let text=String(value??"");
     if(typeof value!=="number"&&/^[\t\r ]*[=+\-@]/.test(text))text="'"+text;
@@ -7407,7 +7780,7 @@ async function downloadCustomersCSV(){
             ["Customer ID","id"],["Name","name"],["Phone","phone"],["Email","email"],["GSTIN","gstin"],
             ["Birth date","birth_date"],["Address","address"],["City","city"],["State","state"],["Created at","created_at"]
         ];
-        downloadCsvRows(`cafe-pos-customers-${new Date().toISOString().slice(0,10)}.csv`,[
+        downloadCsvRows(`cafe-pos-customers-${getPOSDateKey()}.csv`,[
             columns.map(([label])=>label),
             ...((Array.isArray(customers)?customers:[]).map(customer=>columns.map(([,key])=>customer?.[key]??"")))
         ]);
@@ -7420,7 +7793,7 @@ function downloadReportTableCSV(bodyId,filename,label){
     const headers=[...(table?.querySelectorAll("thead tr:last-child th")||[])].map(cell=>cell.innerText.replace(/\s+/g," ").trim());
     if(!body||!headers.length)return alert("This report table is not available yet.");
     const rows=[...body.querySelectorAll("tr")].map(row=>[...row.cells].map(cell=>cell.innerText.replace(/\s+/g," ").trim())).filter(row=>row.length===headers.length);
-    downloadCsvRows(`${filename}-${new Date().toISOString().slice(0,10)}.csv`,[headers,...rows]);
+    downloadCsvRows(`${filename}-${getPOSDateKey()}.csv`,[headers,...rows]);
     showProfileToast(`${label} report downloaded.`);
 }
 
@@ -7742,9 +8115,9 @@ async function loadPayments() {
                     </td>
 
                     <td>
-                        ${new Date(
+                        ${formatPOSDateTime(
                             payment.created_at
-                        ).toLocaleString()}
+                        )}
                     </td>
 
                 `;
@@ -7877,7 +8250,7 @@ async function updateDashboard() {
 
 let salesAuditTransactions = [];
 const SALES_AUDIT_EXPORT_COLUMNS = [
-    "Branch Name", "Branch Code", "BranchLabels", "Business Brand", "Business Date", "Invoice Number", "Customer TIN number/PAN no.", "Statement Number", "Invoice Date", "Sale Status", "Advance Order", "E-Invoice IRN Status", "E-Invoice IRN Number", "E-Invoice Remarks", "E-Invoice Customer TIN", "Amount Returned", "Return Payment Mode", "Fulfillment Status", "Invoice Type", "Order Number", "Offline Order Number", "Order Source", "Source Order Number", "Source Outlet Id", "Open Order Amount", "Gross Amount", "Discounts", "Direct Charge Amount", "Net Amount", "Other Charge Amount", "Taxes", "Rounding", "Tip", "Total", "Paid Amount", "Balance Due", "% Discount", "Tax paid by Aggregator", "Payment Modes", "Materials Cost", "Supplies Cost", "Channel", "Channel Label", "Session", "Label", "Tags", "Order Notes", "Resource Group Name", "Number of Items", "Total Quantity", "By Reservation", "Reservation Source", "Reservation Reference", "Number Of People", "Duration (Minutes)", "Number of Tickets", "Number of Modified Tickets", "Number of Cancelled Tickets", "Number of Bill Prints", "Modified After Print", "Modified After Close", "Change Logs After Print", "Bill Print Log", "Created Date", "Created By", "Closed By", "Sale By", "Delivery Mode", "Delivery By", "Delivery User ID", "Time to Accept", "Time to Prepare", "Time to Process", "Time to Assign", "Time to Rider Arrive", "Time to Dispatch", "Time to Deliver", "Time to Settle", "Time to Cancel", "Cancel/Void Date", "Cancel/Void By", "Reason For Cancel/Void/Non Chargeable", "Remarks for Cancel/Void/Non Chargeable", "Source Reason for Cancel/Void", "Customer Id", "Customer Name", "Company Name", "Customer Phone", "Phone Prefix", "Deliver To Contact", "Deliver To Phone", "Deliver To Phone Prefix", "Deliver To Address", "Delivery To Latitude", "Delivery To Longitude", "Last Update from Device", "Target Order Number", "Bill Link", "Warnings", "Source Customer Id", "Charges Amount (Initial)", "Charges Amount (Removed)"
+    "Branch Name", "Branch Code", "BranchLabels", "Business Brand", "Business Date", "Invoice Number", "Customer TIN number/PAN no.", "Statement Number", "Invoice Date", "Sale Status", "Advance Order", "E-Invoice IRN Status", "E-Invoice IRN Number", "E-Invoice Remarks", "E-Invoice Customer TIN", "Amount Returned", "Return Payment Mode", "Fulfillment Status", "Invoice Type", "Order Number", "Offline Order Number", "Order Source", "Source Order Number", "Source Outlet Id", "Open Order Amount", "Gross Amount", "Discounts", "Direct Charge Amount", "Net Amount", "Other Charge Amount", "Taxes", "Rounding", "Tip", "Total", "Paid Amount", "Balance Due", "% Discount", "Tax paid by Aggregator", "Payment Modes", "Materials Cost", "Supplies Cost", "Channel", "Channel Label", "Session", "Label", "Tags", "Order Notes", "Resource Group Name", "Number of Items", "Total Quantity", "By Reservation", "Reservation Source", "Reservation Reference", "Number Of People", "Duration (Minutes)", "Number of Tickets", "Number of Modified Tickets", "Number of Cancelled Tickets", "Number of Bill Prints", "Modified After Print", "Modified After Close", "Change Logs After Print", "Bill Print Log", "Created Date", "Created By", "Closed By", "Sale By", "Delivery Mode", "Delivery By", "Delivery User ID", "Time to Accept", "Time to Prepare", "Time to Process", "Time to Assign", "Time to Rider Arrive", "Time to Dispatch", "Time to Deliver", "Time to Settle", "Time to Cancel", "Cancel/Void Date", "Cancel/Void By", "Reason For Cancel/Void/Non Chargeable", "Remarks for Cancel/Void/Non Chargeable", "Source Reason for Cancel/Void", "Customer Id", "Customer Name", "Company Name", "Customer Phone", "Phone Prefix", "Deliver To Contact", "Deliver To Phone", "Deliver To Phone Prefix", "Deliver To Address", "Delivery To Latitude", "Delivery To Longitude", "Last Update from Device", "Target Order Number", "Bill Link", "Warnings", "Source Customer Id", "Charges Amount (Initial)", "Charges Amount (Removed)", "Average Kitchen Prep Time (Minutes)", "Longest Kitchen Prep Time (Minutes)", "Kitchen Stations"
 ];
 
 async function loadSalesAuditReport() {
@@ -7893,15 +8266,15 @@ async function loadSalesAuditReport() {
     const params = new URLSearchParams({ range });
     if (range === "custom") { params.set("from", from); params.set("to", to); }
     if (status) status.textContent = "Loading sale transactions…";
-    if (body) body.innerHTML = '<tr><td colspan="15">Loading sales…</td></tr>';
+    if (body) body.innerHTML = '<tr><td colspan="18">Loading sales…</td></tr>';
     try {
         const result = await api(`/reports/sales-audit?${params.toString()}`);
         salesAuditTransactions = Array.isArray(result.transactions) ? result.transactions : [];
         if (!body) return;
         body.innerHTML = salesAuditTransactions.length ? salesAuditTransactions.map(row => `
             <tr>
-                <td>${esc(row.business_date ? new Date(row.business_date).toLocaleString() : "-")}</td>
-                <td>${esc(row.invoice_date ? new Date(row.invoice_date).toLocaleString() : "-")}</td>
+                <td>${esc(row.business_date ? formatPOSDateTime(row.business_date) : "-")}</td>
+                <td>${esc(row.invoice_date ? formatPOSDateTime(row.invoice_date) : "-")}</td>
                 <td>${esc(row.invoice_number || "-")}</td>
                 <td><strong>${esc(row.order_number || `#${row.order_id}`)}</strong></td>
                 <td>${esc(row.channel_label || row.order_type || "-")}${row.table_number ? ` · ${esc(row.table_number)}` : ""}</td>
@@ -7914,20 +8287,173 @@ async function loadSalesAuditReport() {
                 <td>${money(row.bill_total)}</td>
                 <td>${money(row.amount_collected)}</td>
                 <td>${money(row.amount_due)}</td>
+                <td>${row.average_prep_minutes == null ? "—" : `${Number(row.average_prep_minutes).toFixed(1)} min`}</td>
+                <td>${row.longest_prep_minutes == null ? "—" : `${Number(row.longest_prep_minutes).toFixed(1)} min`}</td>
+                <td>${esc(row.kitchen_stations || "—")}</td>
                 <td>${esc(row.order_status || "-")}</td>
-            </tr>`).join("") : '<tr><td colspan="15">No sale transactions found for this period.</td></tr>';
+            </tr>`).join("") : '<tr><td colspan="18">No sale transactions found for this period.</td></tr>';
         if (status) status.textContent = `${salesAuditTransactions.length} completed sale${salesAuditTransactions.length === 1 ? "" : "s"} loaded. Each order is one row; split payment methods are combined.`;
+        await loadKitchenPrepTimesReport({ range, from, to });
     } catch (error) {
         salesAuditTransactions = [];
-        if (body) body.innerHTML = `<tr><td colspan="15">Unable to load audit: ${esc(error.message)}</td></tr>`;
+        if (body) body.innerHTML = `<tr><td colspan="18">Unable to load audit: ${esc(error.message)}</td></tr>`;
         if (status) status.textContent = "The transaction audit could not be loaded.";
     }
+}
+
+let kitchenPrepTimes = [];
+function getSelectedSalesReportRange() {
+    const range = document.getElementById("reportDateFilter")?.value || "today";
+    const from = document.getElementById("reportFromDate")?.value || "";
+    const to = document.getElementById("reportToDate")?.value || "";
+    return { range, from, to };
+}
+
+async function loadKitchenPrepTimesReport(selection = getSelectedSalesReportRange()) {
+    const status = document.getElementById("kitchenPrepTimesStatus");
+    const body = document.getElementById("kitchenPrepTimesBody");
+    const exportButton = document.querySelector(".sales-audit-prep [data-export-module='reports']");
+    if (selection.range === "custom" && (!selection.from || !selection.to || selection.from > selection.to)) {
+        if (status) status.textContent = "Choose a valid From and To date before loading kitchen prep times.";
+        return;
+    }
+    const params = new URLSearchParams({ range: selection.range });
+    if (selection.range === "custom") { params.set("from", selection.from); params.set("to", selection.to); }
+    if (status) status.textContent = "Loading kitchen ticket timing…";
+    if (body) body.innerHTML = '<tr><td colspan="11">Loading kitchen prep times…</td></tr>';
+    try {
+        const result = await api(`/reports/kitchen-prep-times?${params.toString()}`);
+        kitchenPrepTimes = Array.isArray(result.tickets) ? result.tickets : [];
+        if (exportButton) exportButton.hidden = !hasPermission("reports", "export");
+        const stationFilter = document.getElementById("kitchenPrepStationFilter");
+        if (stationFilter) {
+            const selectedStation = stationFilter.value;
+            const stations = [...new Set(kitchenPrepTimes.map(ticket => ticket.station_name || ticket.station || "Kitchen"))].sort((a, b) => a.localeCompare(b));
+            stationFilter.innerHTML = '<option value="">All stations</option>' + stations.map(station => `<option value="${esc(station)}">${esc(station)}</option>`).join("");
+            if (stations.includes(selectedStation)) stationFilter.value = selectedStation;
+        }
+        renderKitchenPrepTimesTable();
+        if (status) status.textContent = `${kitchenPrepTimes.length} kitchen ticket item${kitchenPrepTimes.length === 1 ? "" : "s"} loaded by routed station.`;
+    } catch (error) {
+        kitchenPrepTimes = [];
+        if (body) body.innerHTML = `<tr><td colspan="11">Unable to load prep times: ${esc(error.message || "Please try again.")}</td></tr>`;
+        if (status) status.textContent = "Kitchen prep-time data could not be loaded.";
+    }
+}
+
+function renderKitchenPrepTimesTable() {
+    const body = document.getElementById("kitchenPrepTimesBody");
+    if (!body) return;
+    const query = String(document.getElementById("kitchenPrepItemFilter")?.value || "").trim().toLocaleLowerCase();
+    const selectedStation = document.getElementById("kitchenPrepStationFilter")?.value || "";
+    const visibleTickets = kitchenPrepTimes.filter(ticket => {
+        const station = ticket.station_name || ticket.station || "Kitchen";
+        const searchable = [ticket.order_number, ticket.order_id, ticket.item_name, station].some(value => String(value || "").toLocaleLowerCase().includes(query));
+        return searchable && (!selectedStation || station === selectedStation);
+    });
+    body.innerHTML = visibleTickets.length ? visibleTickets.map(ticket => {
+        const quantity = Number(ticket.quantity || 0);
+        const cancelled = Number(ticket.cancelled_quantity || 0);
+        const prepMinutes = ticket.prep_minutes == null ? "—" : `${Number(ticket.prep_minutes).toFixed(1)} min`;
+        const elapsed = ticket.elapsed_minutes == null ? "—" : `${Number(ticket.elapsed_minutes).toFixed(1)} min`;
+        return `<tr>
+            <td><strong>${esc(ticket.order_number || `#${ticket.order_id}`)}</strong>${ticket.table_number ? `<small class="audit-order-status">${esc(ticket.order_type || "")} · ${esc(ticket.table_number)}</small>` : ""}</td>
+            <td>#${Number(ticket.ticket_number || 1)}</td>
+            <td>${esc(ticket.item_name || "Item")}${cancelled ? `<small class="audit-order-status">${cancelled} cancelled</small>` : ""}</td>
+            <td>${esc(ticket.station_name || ticket.station || "Kitchen")}</td>
+            <td>${quantity}</td>
+            <td><span class="kitchen-prep-status is-${String(ticket.ticket_status || "pending").toLowerCase()}">${esc(ticket.ticket_status || "Pending")}</span></td>
+            <td>${ticket.ticket_received_at ? esc(formatPOSDateTime(ticket.ticket_received_at)) : "—"}</td>
+            <td>${ticket.prep_started_at ? esc(formatPOSDateTime(ticket.prep_started_at)) : "—"}</td>
+            <td>${ticket.prep_completed_at ? esc(formatPOSDateTime(ticket.prep_completed_at)) : "—"}</td>
+            <td><strong>${prepMinutes}</strong></td>
+            <td>${elapsed}</td>
+        </tr>`;
+    }).join("") : `<tr><td colspan="11">${kitchenPrepTimes.length ? "No kitchen tickets match these filters." : "No kitchen tickets found in this period."}</td></tr>`;
+}
+
+function downloadKitchenPrepTimesCSV() {
+    if (!hasPermission("reports", "export")) return showProfileToast("You don’t have permission to export reports.");
+    if (!kitchenPrepTimes.length) return showProfileToast("Load kitchen prep times before downloading the CSV.");
+    const columns = ["Order Number", "Ticket Number", "Item", "Station", "Quantity", "Cancelled Quantity", "Status", "Ticket Received (IST)", "Prep Started (IST)", "Ready (IST)", "Prep Time (Minutes)", "Elapsed Since Ticket (Minutes)"];
+    const rows = kitchenPrepTimes.map(ticket => [
+        ticket.order_number || `#${ticket.order_id}`, Number(ticket.ticket_number || 1), ticket.item_name || "Item",
+        ticket.station_name || ticket.station || "Kitchen", Number(ticket.quantity || 0), Number(ticket.cancelled_quantity || 0),
+        ticket.ticket_status || "Pending", formatPOSDateTime(ticket.ticket_received_at), formatPOSDateTime(ticket.prep_started_at),
+        formatPOSDateTime(ticket.prep_completed_at), ticket.prep_minutes ?? "", ticket.elapsed_minutes ?? ""
+    ]);
+    downloadCsvRows(`kitchen-prep-time-${getPOSDateKey()}.csv`, [columns, ...rows]);
+    showProfileToast("Kitchen prep-time report downloaded.");
+}
+
+let saleItemsByTransaction = [];
+async function loadSaleItemsByTransactionReport() {
+    const status = document.getElementById("saleItemsTransactionStatus");
+    const body = document.getElementById("saleItemsTransactionBody");
+    const exportButton = document.querySelector(".sale-items-transaction-box [data-export-module='reports']");
+    const range = document.getElementById("reportDateFilter")?.value || "today";
+    const from = document.getElementById("reportFromDate")?.value || "";
+    const to = document.getElementById("reportToDate")?.value || "";
+    if (range === "custom" && (!from || !to || from > to)) {
+        if (status) status.textContent = "Choose a valid From and To date before loading item sales.";
+        return;
+    }
+    const params = new URLSearchParams({ range });
+    if (range === "custom") { params.set("from", from); params.set("to", to); }
+    if (status) status.textContent = "Loading sold items…";
+    if (body) body.innerHTML = '<tr><td colspan="12">Loading item sales…</td></tr>';
+    try {
+        const result = await api(`/reports/sale-items-by-transaction?${params.toString()}`);
+        saleItemsByTransaction = Array.isArray(result.items) ? result.items : [];
+        if (exportButton) exportButton.hidden = !hasPermission("reports", "export");
+        if (!body) return;
+        body.innerHTML = saleItemsByTransaction.length ? saleItemsByTransaction.map(row => `
+            <tr>
+                <td>${esc(row.transaction_date ? formatPOSDateTime(row.transaction_date) : "-")}</td>
+                <td>${esc(row.invoice_number || "-")}</td>
+                <td><strong>${esc(row.order_number || `#${row.order_id}`)}</strong></td>
+                <td>${esc(row.channel_label || row.order_type || "-")}${row.table_number ? ` · ${esc(row.table_number)}` : ""}</td>
+                <td>${esc(row.customer_name || "-")}</td>
+                <td>${esc(row.item_name || "Item")}</td>
+                <td>${esc(row.category || "-")}</td>
+                <td>${Number(row.quantity || 0)}</td>
+                <td>${money(row.unit_price)}</td>
+                <td>${money(row.line_total)}</td>
+                <td>${money(row.transaction_total)}</td>
+                <td>${esc(row.payment_modes || "-")}</td>
+            </tr>`).join("") : '<tr><td colspan="12">No completed item sales found for this period.</td></tr>';
+        if (status) status.textContent = `${saleItemsByTransaction.length} sold item line${saleItemsByTransaction.length === 1 ? "" : "s"} loaded from completed transactions.`;
+    } catch (error) {
+        saleItemsByTransaction = [];
+        if (body) body.innerHTML = `<tr><td colspan="12">Unable to load item sales: ${esc(error.message)}</td></tr>`;
+        if (status) status.textContent = "The item-by-transaction report could not be loaded.";
+    }
+}
+
+function downloadSaleItemsByTransactionCSV() {
+    if (!hasPermission("reports", "export")) return showProfileToast("You don’t have permission to export reports.");
+    if (!saleItemsByTransaction.length) return showProfileToast("Load item sales before downloading the CSV.");
+    const columns = ["Transaction Date", "Invoice Number", "Order Number", "Channel", "Table", "Customer", "Item", "Category", "Quantity", "Unit Price", "Line Total", "Transaction Total", "Payment Modes"];
+    const dateText = value => value ? formatPOSDateTime(value) : "";
+    const rows = saleItemsByTransaction.map(row => [
+        dateText(row.transaction_date), row.invoice_number || "", row.order_number || `#${row.order_id}`,
+        row.channel_label || row.order_type || "", row.table_number || "", row.customer_name || "",
+        row.item_name || "", row.category || "", Number(row.quantity || 0), Number(row.unit_price || 0),
+        Number(row.line_total || 0), Number(row.transaction_total || 0), row.payment_modes || ""
+    ]);
+    const content = "\uFEFF" + [columns, ...rows].map(row => row.map(csvSafeCell).join(",")).join("\r\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `sale-items-by-transaction-${getPOSDateKey()}.csv`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function downloadSalesAuditCSV() {
     if(!hasPermission("reports","export"))return showProfileToast("You don’t have permission to export reports.");
     if (!salesAuditTransactions.length) return alert("Load sale transactions before downloading the audit.");
-    const auditDate = value => value ? new Date(value).toLocaleString() : "";
+    const auditDate = value => value ? formatPOSDateTime(value) : "";
     const content = "\uFEFF" + [SALES_AUDIT_EXPORT_COLUMNS, ...salesAuditTransactions.map(row => {
         const values = {
             "Branch Name": row.business_name, "Branch Code": row.business_code, "Business Brand": row.business_name,
@@ -7948,17 +8474,20 @@ function downloadSalesAuditCSV() {
             "Change Logs After Print": row.changes_after_print, "Bill Print Log": auditDate(row.bill_printed_at),
             "Created Date": auditDate(row.created_at), "Created By": row.created_by, "Closed By": row.closed_by,
             "Sale By": row.created_by, "Delivery Mode": /deliver/i.test(String(row.order_type || "")) ? row.order_type : "",
-            "Time to Accept": row.time_to_accept, "Time to Prepare": row.time_to_prepare,
+            "Time to Accept": row.time_to_accept, "Time to Prepare": row.average_prep_minutes ?? row.time_to_prepare,
             "Customer Id": row.customer_id, "Customer Name": row.customer_name, "Customer Phone": row.customer_phone,
             "Deliver To Address": /deliver/i.test(String(row.order_type || "")) ? row.customer_address : "",
-            "Reason For Cancel/Void/Non Chargeable": row.non_chargeable_reason || row.cancellation_reason
+            "Reason For Cancel/Void/Non Chargeable": row.non_chargeable_reason || row.cancellation_reason,
+            "Average Kitchen Prep Time (Minutes)": row.average_prep_minutes,
+            "Longest Kitchen Prep Time (Minutes)": row.longest_prep_minutes,
+            "Kitchen Stations": row.kitchen_stations
         };
         return SALES_AUDIT_EXPORT_COLUMNS.map(column => values[column] ?? "");
     })].map(row => row.map(csvSafeCell).join(",")).join("\r\n");
     const blobUrl = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = blobUrl;
-    link.download = `sale-transaction-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    link.download = `sale-transaction-audit-${getPOSDateKey()}.csv`;
     link.click();
     setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
 }
@@ -8896,7 +9425,7 @@ async function downloadSalesSummaryCSV(){
     try{
         const query=orderCategoryReportQuery(true,true);if(!query)return;
         const data=await api(`/reports/sales-summary?${query}`);
-        downloadCsvRows(`cafe-pos-sales-summary-${new Date().toISOString().slice(0,10)}.csv`,[["Description","Total"],...salesSummaryReportRows(data)]);
+        downloadCsvRows(`cafe-pos-sales-summary-${getPOSDateKey()}.csv`,[["Description","Total"],...salesSummaryReportRows(data)]);
         showProfileToast("Sales summary report downloaded.");
     }catch(error){alert(error.message||"Could not download the sales summary.");}
 }
@@ -9168,7 +9697,7 @@ async function loadExpenses(){
     setText('expenseTotal',money(sum?.total?.total ?? sum?.total ?? 0));setText('expenseCount',sum?.count||0);window._expenseCategories=cats;const body=document.getElementById('expensesBody');if(!body)return;body.innerHTML=rows.length?rows.map(e=>`<tr><td>${esc(e.expense_date)}</td><td>${esc(e.category_name||'Uncategorised')}</td><td>${money(e.amount)}</td><td>${esc(e.payment_method)}</td><td>${esc(e.note||'')}</td><td>${esc(e.created_by_name||'-')}</td><td><button class="table-action-btn" onclick="deleteExpense(${e.id})">Delete</button></td></tr>`).join(''):'<tr><td colspan="7">No expenses found.</td></tr>';
   }catch(e){console.error(e);const b=document.getElementById('expensesBody');if(b)b.innerHTML=`<tr><td colspan="7">${esc(e.message)}</td></tr>`;}
 }
-function openExpenseModal(){renderPaymentModeOptions();const m=document.getElementById('expenseModal');if(m)m.style.display='flex';const d=document.getElementById('expenseDate');if(d&&!d.value)d.value=new Date().toISOString().slice(0,10);loadExpenseCategories();}
+function openExpenseModal(){renderPaymentModeOptions();const m=document.getElementById('expenseModal');if(m)m.style.display='flex';const d=document.getElementById('expenseDate');if(d&&!d.value)d.value=getPOSDateKey();loadExpenseCategories();}
 function closeExpenseModal(){document.getElementById('expenseModal')?.style.setProperty('display','none');}
 async function loadExpenseCategories(){try{const cats=await api('/expenses/categories');const s=document.getElementById('expenseCategory');if(s)s.innerHTML=cats.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');}catch(e){}}
 async function saveExpense(){try{const amount=Number(document.getElementById('expenseAmount')?.value||0);if(amount<=0)return alert('Enter a valid expense amount.');await api('/expenses',{method:'POST',body:JSON.stringify({categoryId:Number(document.getElementById('expenseCategory')?.value||0)||null,amount,paymentMethod:document.getElementById('expensePayment')?.value||preferredPaymentMethod(),expenseDate:document.getElementById('expenseDate')?.value||null,note:document.getElementById('expenseNote')?.value||''})});closeExpenseModal();document.getElementById('expenseAmount').value='';document.getElementById('expenseNote').value='';await loadExpenses();alert('Expense saved.');}catch(e){alert(e.message);}}
@@ -9177,7 +9706,7 @@ async function deleteExpense(id){if(!confirm('Delete this expense?'))return;try{
 async function loadLoyaltySettings(){try{const s=await api('/loyalty/settings');setSettingValue('loyaltyPointsPerCurrency',s.points_per_currency);setSettingValue('loyaltyCurrencyPerPoint',s.currency_per_point);setSettingValue('loyaltyMinRedeem',s.min_redeem_points);setSettingValue('loyaltyWelcome',s.welcome_points);setSettingValue('loyaltyEnabled',s.enabled);await loadLoyaltyCustomers();}catch(e){console.error(e);}}
 async function saveLoyaltySettings(){try{await api('/loyalty/settings',{method:'PUT',body:JSON.stringify({pointsPerCurrency:Number(document.getElementById('loyaltyPointsPerCurrency')?.value||0),currencyPerPoint:Number(document.getElementById('loyaltyCurrencyPerPoint')?.value||1),minRedeemPoints:Number(document.getElementById('loyaltyMinRedeem')?.value||100),welcomePoints:Number(document.getElementById('loyaltyWelcome')?.value||0),enabled:document.getElementById('loyaltyEnabled')?.checked!==false})});alert('Loyalty settings saved.');}catch(e){alert(e.message);}}
 async function loadLoyaltyCustomers(){try{const rows=await api('/customers');const s=document.getElementById('loyaltyCustomerSelect');if(s)s.innerHTML='<option value="">Select customer…</option>'+rows.map(c=>`<option value="${c.id}">${esc(c.name)} · ${esc(c.phone||'')}</option>`).join('');}catch(e){}}
-async function loadSelectedLoyaltyCustomer(){const id=document.getElementById('loyaltyCustomerSelect')?.value;if(!id)return;try{const r=await api('/loyalty/customers/'+id);setText('loyaltyBalance',r.balance);const b=document.getElementById('loyaltyHistoryBody');if(b)b.innerHTML=r.history.length?r.history.map(h=>`<tr><td>${esc(new Date(h.created_at).toLocaleString())}</td><td>${esc(h.transaction_type)}</td><td>${h.points>0?'+':''}${h.points}</td><td>${esc(h.note||'')}</td></tr>`).join(''):'<tr><td colspan="4">No loyalty transactions.</td></tr>';}catch(e){alert(e.message);}}
+async function loadSelectedLoyaltyCustomer(){const id=document.getElementById('loyaltyCustomerSelect')?.value;if(!id)return;try{const r=await api('/loyalty/customers/'+id);setText('loyaltyBalance',r.balance);const b=document.getElementById('loyaltyHistoryBody');if(b)b.innerHTML=r.history.length?r.history.map(h=>`<tr><td>${esc(formatPOSDateTime(h.created_at))}</td><td>${esc(h.transaction_type)}</td><td>${h.points>0?'+':''}${h.points}</td><td>${esc(h.note||'')}</td></tr>`).join(''):'<tr><td colspan="4">No loyalty transactions.</td></tr>';}catch(e){alert(e.message);}}
 
 
 function saveInvoiceDesigner(){appSettings.accentLabel=document.getElementById('designerAccent')?.value||'';appSettings.logoUrl=document.getElementById('designerLogo')?.value||'';appSettings.receiptFont=document.getElementById('designerFontSize')?.value||'13';appSettings.designerShowNotes=document.getElementById('designerShowNotes')?.checked!==false;appSettings.designerShowInvoiceMeta=document.getElementById('designerShowInvoiceMeta')?.checked!==false;appSettings.designerCompact=document.getElementById('designerCompact')?.checked===true;localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));renderInvoiceDesignerPreview();api('/settings',{method:'PUT',body:JSON.stringify(appSettings)}).then(()=>alert('Invoice design saved.')).catch(()=>alert('Saved locally; server settings unavailable.'));}
@@ -9220,30 +9749,72 @@ function showPrinterMessage(text,error=false){const el=document.getElementById("
 function togglePrinterFields(){const type=printerFormValue("printerType");document.getElementById("localPrinterFields").style.display=type==="local"?"block":"none";document.getElementById("networkPrinterFields").style.display=type==="network"?"grid":"none";document.getElementById("bluetoothPrinterFields").style.display=type==="bluetooth"?"block":"none";if(type==="local")discoverWindowsPrinters()}
 function resetPrinterForm(){document.getElementById("printerForm")?.reset();document.getElementById("printerId").value="";document.getElementById("printerType").value="local";document.getElementById("printerPort").value="9100";document.getElementById("printerServiceUuid").value="000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value="00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerFormTitle").textContent="Add Printer";togglePrinterFields()}
 function renderPrinters(){const body=document.getElementById("printersBody");if(!body)return;const rows=window.cafePrinters||[];body.innerHTML=rows.map(function(p){const type=p.connection_type||"local";const address=type==="network"?esc(p.host)+":"+esc(p.port):type==="bluetooth"?esc(p.bluetooth_name||p.name):"Windows direct printing";const label=type==="network"?"Network / IP":type==="bluetooth"?"Bluetooth":"Local computer";return '<tr><td>'+esc(p.name)+'</td><td>'+label+'</td><td>'+address+'</td><td>'+esc(p.paper_width)+'mm</td><td>'+(p.is_default?'<span class="access-status active">Default</span>':'—')+'</td><td><div class="action-row"><button type="button" onclick="testPrinter('+Number(p.id)+')">Test</button><button type="button" class="cancel-btn" onclick="editPrinter('+Number(p.id)+')">Edit</button><button type="button" class="danger-btn" onclick="deletePrinter('+Number(p.id)+')">Delete</button></div></td></tr>'}).join("")||'<tr><td colspan="6">No printers saved for this business.</td></tr>'}
-async function loadPrinters(){try{window.cafePrinters=await api("/printers");renderPrinters();showPrinterMessage("");await discoverWindowsPrinters()}catch(e){window.cafePrinters=[];renderPrinters();showPrinterMessage(e.message,true);await discoverWindowsPrinters()}}
-function editPrinter(id){const p=(window.cafePrinters||[]).find(function(x){return Number(x.id)===Number(id)});if(!p)return;document.getElementById("printerId").value=p.id;document.getElementById("printerName").value=p.name||"";document.getElementById("printerType").value=p.connection_type||"local";document.getElementById("printerHost").value=p.host||"";document.getElementById("printerPort").value=p.port||9100;document.getElementById("printerBluetoothName").value=p.bluetooth_name||"";document.getElementById("printerServiceUuid").value=p.service_uuid||"000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value=p.characteristic_uuid||"00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerPaperWidth").value=p.paper_width||"80";document.getElementById("printerIsDefault").checked=Boolean(p.is_default);document.getElementById("printerFormTitle").textContent="Edit Printer";togglePrinterFields();document.getElementById("printer").scrollIntoView({behavior:"smooth",block:"start"})}
+async function loadPrinters(){try{window.cafePrinters=await api("/printers");setText("printerCount",window.cafePrinters.length);renderPrinters();showPrinterMessage("");await discoverWindowsPrinters()}catch(e){window.cafePrinters=[];setText("printerCount",0);renderPrinters();showPrinterMessage(e.message,true);await discoverWindowsPrinters()}}
+function editPrinter(id){const p=(window.cafePrinters||[]).find(function(x){return Number(x.id)===Number(id)});if(!p)return;document.getElementById("printerId").value=p.id;document.getElementById("printerName").value=p.name||"";document.getElementById("printerType").value=p.connection_type||"local";document.getElementById("printerHost").value=p.host||"";document.getElementById("printerPort").value=p.port||9100;document.getElementById("printerBluetoothName").value=p.bluetooth_name||"";document.getElementById("printerServiceUuid").value=p.service_uuid||"000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value=p.characteristic_uuid||"00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerPaperWidth").value=p.paper_width||"80";document.getElementById("printerIsDefault").checked=Boolean(p.is_default);document.getElementById("printerFormTitle").textContent="Edit Printer";togglePrinterFields();document.getElementById("kot-groups").scrollIntoView({behavior:"smooth",block:"start"})}
 async function savePrinter(){try{const id=printerFormValue("printerId");const type=printerFormValue("printerType");const selectedWindowsPrinter=type==="local"?(document.getElementById("windowsPrinterSelect")?.value||""):"";const printerName=(type==="local"&&selectedWindowsPrinter)?selectedWindowsPrinter:printerFormValue("printerName").trim();const body={name:printerName,connectionType:type,host:printerFormValue("printerHost").trim(),port:Number(printerFormValue("printerPort")||9100),bluetoothName:printerFormValue("printerBluetoothName").trim(),serviceUuid:printerFormValue("printerServiceUuid").trim(),characteristicUuid:printerFormValue("printerCharacteristicUuid").trim(),paperWidth:printerFormValue("printerPaperWidth")||"80",isDefault:document.getElementById("printerIsDefault").checked};const saved=await api(id?"/printers/"+id:"/printers",{method:id?"PUT":"POST",body:JSON.stringify(body)});showPrinterMessage("Printer saved.");resetPrinterForm();await loadPrinters();if(saved.printer)showPrinterMessage("Saved "+saved.printer.name+".")}catch(e){showPrinterMessage(e.message,true)}}
 async function deletePrinter(id){if(!confirm("Delete this saved printer?"))return;try{await api("/printers/"+id,{method:"DELETE"});await loadPrinters();showPrinterMessage("Printer deleted.")}catch(e){showPrinterMessage(e.message,true)}}
-function printerReceiptText(data){
+function printerReceiptText(data,paperWidth="80"){
+    const width=paperWidth==="58"?32:48;
     const currency=appSettings.currency||"₹";
     const moneyValue=value=>currency+Number(value||0).toFixed(2);
+    const clean=value=>String(value??"").replace(/[\u0000-\u001f\u007f]/g," ").trim();
+    const items=Array.isArray(data.items)?data.items:[];
     const allocations=Array.isArray(data.paymentAllocations)?data.paymentAllocations:[];
     const taxBreakdown=Array.isArray(data.taxBreakdown)?data.taxBreakdown:buildBillTaxBreakdown(data.items,data.discount,data.gst);
     const amountCollected=data.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(data.amountCollected||0);
     const amountDue=data.amountDue===undefined?Math.max(0,Number(data.total||0)-amountCollected):Number(data.amountDue||0);
-    const lines=[appSettings.restaurantName||"SLASH POS",appSettings.address||"",appSettings.phone?"Phone: "+appSettings.phone:"",appSettings.gstin?"GSTIN: "+appSettings.gstin:"","--------------------------------",data.isOpenOrder?"OPEN ORDER / PROFORMA":"Invoice: "+(data.invoiceNumber||"-"),"Order: "+(data.orderNumber||"-"),"Type: "+(data.orderType||"-"),data.tableNumber?"Table: "+data.tableNumber+(Number(data.pax)>0?" · "+Number(data.pax)+" PAX":""):"","Date: "+(data.date||new Date().toLocaleString()),data.customerName?"Customer: "+data.customerName:"",data.customerPhone?"Phone: "+data.customerPhone:"",data.customerEmail?"Email: "+data.customerEmail:"",data.customerGstin?"Customer GSTIN: "+data.customerGstin:"",data.customerBirthDate?"Customer DOB: "+data.customerBirthDate:"",data.customerAddress?"Address: "+data.customerAddress:"",data.customerCity?"City: "+data.customerCity:"",data.customerState?"State: "+data.customerState:"","--------------------------------","ITEM / QTY / AMOUNT"];
-    (Array.isArray(data.items)?data.items:[]).forEach(function(item){lines.push((appSettings.uppercaseItems?String(item.name||"-").toUpperCase():(item.name||"-"))+" x"+Number(item.quantity||0)+"  "+moneyValue(Number(item.price||0)*Number(item.quantity||0)));const options=formatItemOptionNames(item.options);if(options)lines.push("  + "+options)});
-    lines.push("--------------------------------","Subtotal: "+moneyValue(data.subtotal||0));
-    if(Number(data.discount||0)>0)lines.push((data.discountName?"Discount · "+data.discountName:"Discount")+": -"+moneyValue(data.discount));
-    if(Number(data.serviceCharge||0)>0)lines.push((data.chargeName?"Charge · "+data.chargeName:"Charges")+": "+moneyValue(data.serviceCharge));
-    taxBreakdown.forEach(row=>lines.push(row.component+" "+formatBillTaxRate(row.rate)+"% on "+moneyValue(row.taxableBase)+": "+moneyValue(row.taxAmount)));
-    lines.push("GST: "+moneyValue(data.gst||0));
-    if(Math.abs(Number(data.roundingAdjustment||0))>=0.005)lines.push("Rounding: "+moneyValue(data.roundingAdjustment));
-    lines.push("TOTAL: "+moneyValue(data.total||0),"Payment: "+(data.paymentMethod||"-"));
-    allocations.forEach(payment=>lines.push("  "+String(payment.method||"Payment")+": "+moneyValue(payment.amount||0)));
-    lines.push("Amount collected: "+moneyValue(amountCollected),"Amount due: "+moneyValue(amountDue),"--------------------------------",appSettings.footer||"Thank you!");
-    lines.splice(4,0,...String(appSettings.header||"").split(/\r?\n/).map(line=>line.trim()).filter(Boolean));
-    if(appSettings.showPoweredByCafePilot!==false)lines.push("Powered by Slash");
+    const wrap=(value,limit=width)=>{const words=clean(value).split(/\s+/);const result=[];let line="";for(let word of words){while(word.length>limit){if(line)result.push(line);result.push(word.slice(0,limit));word=word.slice(limit);line="";}if(!word)continue;const next=line?line+" "+word:word;if(next.length>limit){if(line)result.push(line);line=word;}else line=next;}if(line)result.push(line);return result;};
+    const pair=(label,value)=>{const right=String(value??"");const left=String(label||"");if(left.length+right.length+1<=width)return[left.padEnd(width-right.length)+right];return[...wrap(left),...wrap(right).map((line,index)=>index===0?line.padStart(width):line)];};
+    const divider="-".repeat(width),lines=[];
+    const add=(value)=>lines.push(...wrap(value));
+    const center=(value)=>wrap(value).map(line=>line.padStart(Math.floor((width+line.length)/2)));
+    const legalName=clean(appSettings.businessLegalName||"");
+    center(appSettings.restaurantName||"SLASH POS").forEach(line=>lines.push(line));
+    if(legalName)center(legalName).forEach(line=>lines.push(line));
+    wrap(appSettings.address||"").forEach(line=>lines.push(...center(line)));
+    if(appSettings.phone)center("Phone: "+appSettings.phone).forEach(line=>lines.push(line));
+    if(appSettings.gstin)center("GST#: "+appSettings.gstin).forEach(line=>lines.push(line));
+    if(appSettings.fssai)center("FSSAI#: "+appSettings.fssai).forEach(line=>lines.push(line));
+    const customHeader=clean(appSettings.header||"");
+    if(customHeader&&customHeader!=="Cafe Management System")customHeader.split(/\r?\n/).forEach(value=>center(value).forEach(line=>lines.push(line)));
+    center(data.isOpenOrder?"Order":"Invoice").forEach(line=>lines.push(line));
+    if(data.tokenNumber)add("Token No: "+data.tokenNumber);
+    add(data.customerName||"Guest");
+    const customerCode=data.customerCode||(data.customerId?"#"+data.customerId:"");
+    if(customerCode)add(customerCode);
+    lines.push(divider);
+    const totalQty=items.reduce((sum,item)=>sum+Math.max(0,Number(item.quantity||0)),0);
+    const invoiceLabel=data.isOpenOrder?(data.orderNumber||"-"):(data.invoiceNumber||data.orderNumber||"-");
+    lines.push(...pair((data.isOpenOrder?"Order ":"Invoice ")+invoiceLabel,`${items.length} ${items.length===1?"item":"items"} (${totalQty} Qty)`));
+    lines.push(...pair(data.date||formatPOSDateTime(),data.cashierName||""));
+    const orderContext=[data.orderType,data.tableNumber?"Table "+data.tableNumber:"",Number(data.pax)>0?Number(data.pax)+" PAX":""].filter(Boolean).join(" · ");
+    if(orderContext)add(orderContext);
+    lines.push(divider);
+    items.forEach((item,index)=>{
+        const name=appSettings.uppercaseItems?clean(item.name||"-").toUpperCase():clean(item.name||"-");
+        add((index+1)+". "+name);
+        const qty=Number(item.quantity||0),price=Number(item.price||0),unit=clean(item.unit||"ea");
+        const lineTotal=Number(item.lineTotal)>0||price===0?Number(item.lineTotal||0):qty*price;
+        lines.push(...pair("  "+qty+" @ "+moneyValue(price)+"/"+unit,moneyValue(lineTotal)));
+        const options=formatItemOptionNames(item.options);if(options)add("  "+options);
+    });
+    lines.push(divider,...pair("Sub Total",moneyValue(data.subtotal||0)));
+    if(Number(data.discount||0)>0)lines.push(...pair(data.discountName?"Discount · "+data.discountName:"Discount","-"+moneyValue(data.discount)));
+    if(Number(data.serviceCharge||0)>0)lines.push(...pair(data.chargeName?"Charges · "+data.chargeName:"Charges",moneyValue(data.serviceCharge)));
+    if(taxBreakdown.length){
+        taxBreakdown.forEach(row=>lines.push(...pair(`${clean(row.component||"Tax")} ${formatBillTaxRate(row.rate)}% on ${moneyValue(row.taxableBase||0)}`,moneyValue(row.taxAmount))));
+    }else if(Number(data.gst||0)>0)lines.push(...pair("GST",moneyValue(data.gst)));
+    const roundedTotal=Number(data.total||0),rounding=Number(data.roundingAdjustment||0);
+    lines.push(...pair("Bill Total",moneyValue(roundedTotal-rounding)),...pair("Bill Total (rounded)",moneyValue(roundedTotal)));
+    if(!data.isOpenOrder){
+        lines.push("Payment Summary");
+        if(allocations.length)allocations.forEach(payment=>lines.push(...pair(String(payment.method||"Payment"),moneyValue(payment.amount||0))));
+        else lines.push(...pair(data.paymentMethod||"Payment",moneyValue(amountCollected)));
+        lines.push(...pair("Balance",moneyValue(amountDue)));
+    }
+    lines.push(divider,...center("RCM applicable: NO"));
+    const footer=String(appSettings.footer||appSettings.customerMessage||"Visit Again!\nThank you.").replace("Thank You!\nVisit Again 😊","Visit Again!\nThank you.");
+    footer.split(/\r?\n/).map(value=>value.trim()).filter(Boolean).forEach(value=>center(value).forEach(line=>lines.push(line)));
     return lines.filter(Boolean).join("\n")+"\n\n\n";
 }
 function isBluetoothSelectionCancelled(error){return /user cancell?ed the requestdevice\(\) chooser|bluetooth.*selection.*cancell?ed/i.test(String(error?.message||error||""))}
@@ -9283,7 +9854,7 @@ function setupDesktopBluetoothPicker(){
     });
     window.addEventListener("beforeunload",()=>{stopDevices?.();stopFinished?.();},{once:true});
 }
-async function sendBluetoothPrinterText(printer,text){
+async function sendBluetoothPrinterText(printer,text,center=true){
     if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable. Use a Windows Bluetooth printer or a browser with Bluetooth support.");
     const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";
     const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";
@@ -9296,7 +9867,7 @@ async function sendBluetoothPrinterText(printer,text){
         const characteristic=await service.getCharacteristic(characteristicUuid);
         const bytes=new TextEncoder().encode(text);
         const payload=new Uint8Array(bytes.length+11);
-        payload.set([0x1b,0x40,0x1b,0x61,0x01],0);
+        payload.set(center?[0x1b,0x40,0x1b,0x61,0x01]:[0x1b,0x40,0x1b,0x61,0x00],0);
         payload.set(bytes,5);
         payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);
         const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);
@@ -9319,7 +9890,7 @@ async function printLocalPrinterTest(name){
         if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(name)) {
             const result = await window.cafePOSDesktop.saveReceiptPdf({
                 kind: "test",
-                receipt: "SLASH POS\nPRINTER TEST\n" + name + "\n" + new Date().toLocaleString() + "\n\n\n"
+                receipt: "SLASH POS\nPRINTER TEST\n" + name + "\n" + formatPOSDateTime() + "\n\n\n"
             });
             if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the test PDF.");
             showPrinterMessage("Test PDF saved to " + result.outputFile);
@@ -9373,10 +9944,10 @@ async function loadOrderCategoryReports() {
         const discountBody = document.getElementById("reportDiscountOrdersBody");
         const nonChargeableBody = document.getElementById("reportNonChargeableOrdersBody");
         if (discountBody) discountBody.innerHTML = discounts.length
-            ? discounts.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? new Date(order.created_at).toLocaleString() : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + money(order.discount) + '</td><td>' + esc(order.discount_name || "Discount") + '</td><td>' + esc(order.payment_method || "—") + '</td><td>' + money(order.total) + '</td></tr>').join("")
+            ? discounts.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? formatPOSDateTime(order.created_at) : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + money(order.discount) + '</td><td>' + esc(order.discount_name || "Discount") + '</td><td>' + esc(order.payment_method || "—") + '</td><td>' + money(order.total) + '</td></tr>').join("")
             : '<tr><td colspan="8">No discounted orders in this period.</td></tr>';
         if (nonChargeableBody) nonChargeableBody.innerHTML = nonChargeable.length
-            ? nonChargeable.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? new Date(order.created_at).toLocaleString() : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + esc(order.reason || "Not recorded") + '</td><td>' + money(order.total) + '</td><td>' + esc(order.payment_method || "Non-chargeable") + '</td></tr>').join("")
+            ? nonChargeable.map(order => '<tr><td>' + esc(order.order_number || ("#" + order.order_id)) + '</td><td>' + esc(order.created_at ? formatPOSDateTime(order.created_at) : "—") + '</td><td>' + esc(order.order_type || "—") + '</td><td>' + esc(order.table_number || "—") + '</td><td>' + esc(order.reason || "Not recorded") + '</td><td>' + money(order.total) + '</td><td>' + esc(order.payment_method || "Non-chargeable") + '</td></tr>').join("")
             : '<tr><td colspan="7">No non-chargeable orders in this period.</td></tr>';
         const canExport = hasPermission("reports", "export");
         ["reportDiscountOrdersDownload", "reportNonChargeableOrdersDownload"].forEach(id => {
@@ -9420,7 +9991,7 @@ async function downloadOrderCategoryReport(reportType) {
         const csv = ["\uFEFF" + report.columns.map(column => csvValue(column[0])).join(","), ...report.rows.map(row => report.columns.map(column => csvValue(column[1](row))).join(","))].join("\r\n");
         const link = document.createElement("a");
         link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
-        link.download = "cafe-pos-" + reportType + "-orders-" + new Date().toISOString().slice(0, 10) + ".csv";
+        link.download = "cafe-pos-" + reportType + "-orders-" + getPOSDateKey() + ".csv";
         document.body.appendChild(link);
         link.click();
         link.remove();
@@ -9471,9 +10042,9 @@ async function loadAdvancedReports(){
         if(weekdayBody)weekdayBody.innerHTML=weekday.length?weekday.map(x=>`<tr><td>${esc(String(x.day||'').trim())}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(daypartBody)daypartBody.innerHTML=dayparts.length?dayparts.map(x=>`<tr><td>${esc(x.daypart)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
         if(customersBody)customersBody.innerHTML=customers.length?customers.map(x=>`<tr><td>${esc(x.customer)}</td><td>${x.orders}</td><td>${money(x.sales)}</td></tr>`).join(''):'<tr><td colspan="3">No data.</td></tr>';
-        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?new Date(x.cancelled_at).toLocaleString():'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${esc(x.cancelled_by_user_name||'Unknown user')}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
-        if(discountBody)discountBody.innerHTML=discounts.length?discounts.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${money(x.discount)}</td><td>${esc(x.discount_name||'Discount')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'—')}</td></tr>`).join(''):'<tr><td colspan="7">No discounted orders in this period.</td></tr>';
-        if(nonChargeableBody)nonChargeableBody.innerHTML=nonChargeable.length?nonChargeable.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?new Date(x.created_at).toLocaleString():'—')}</td><td>${esc(x.order_type||'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'Non-chargeable')}</td></tr>`).join(''):'<tr><td colspan="6">No non-chargeable orders in this period.</td></tr>';
+        if(cancelledBody)cancelledBody.innerHTML=cancelled.length?cancelled.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.cancelled_at?formatPOSDateTime(x.cancelled_at):'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${esc(x.cancelled_by_user_name||'Unknown user')}</td><td>${money(x.value)}</td></tr>`).join(''):'<tr><td colspan="5">No cancelled orders in this period.</td></tr>';
+        if(discountBody)discountBody.innerHTML=discounts.length?discounts.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?formatPOSDateTime(x.created_at):'—')}</td><td>${esc(x.order_type||'—')}</td><td>${money(x.discount)}</td><td>${esc(x.discount_name||'Discount')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'—')}</td></tr>`).join(''):'<tr><td colspan="7">No discounted orders in this period.</td></tr>';
+        if(nonChargeableBody)nonChargeableBody.innerHTML=nonChargeable.length?nonChargeable.map(x=>`<tr><td>${esc(x.order_number||`#${x.order_id}`)}</td><td>${esc(x.created_at?formatPOSDateTime(x.created_at):'—')}</td><td>${esc(x.order_type||'—')}</td><td>${esc(x.reason||'Not recorded')}</td><td>${money(x.total)}</td><td>${esc(x.payment_method||'Non-chargeable')}</td></tr>`).join(''):'<tr><td colspan="6">No non-chargeable orders in this period.</td></tr>';
         const canExport=hasPermission('advanced_reports','export');
         ['downloadCancelledReport','downloadDiscountReport','downloadNonChargeableReport'].forEach(id=>{const button=document.getElementById(id);if(button)button.hidden=!canExport;});
         const warningBox=document.getElementById('advancedReportWarnings');
@@ -9508,7 +10079,7 @@ async function downloadAdvancedReport(reportType){
         const csv=['\uFEFF'+report.columns.map(column=>csvValue(column[0])).join(','),...report.rows.map(row=>report.columns.map(column=>csvValue(column[1](row))).join(','))].join('\r\n');
         const link=document.createElement('a');
         link.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
-        link.download=`cafe-pos-${reportType}-${new Date().toISOString().slice(0,10)}.csv`;
+        link.download=`cafe-pos-${reportType}-${getPOSDateKey()}.csv`;
         document.body.appendChild(link);link.click();link.remove();URL.revokeObjectURL(link.href);
         showProfileToast(`${report.title} report downloaded.`);
     }catch(error){alert(error.message||'Could not download this report.');}
@@ -9519,7 +10090,7 @@ function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDATAB
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
-showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'printer':loadPrinters();break;case 'reports':showSalesReportView('overview');loadOrderCategoryReports();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
+showPage = function(pageName){ const requestedPage=pageName==='loyalty'?'marketing':pageName; baseShowPage(pageName); if(!currentUser)return; switch(requestedPage){case 'expenses':loadExpenses();break;case 'reports':showSalesReportView('overview');loadOrderCategoryReports();break;case 'advanced-reports':loadAdvancedReports();break;case 'marketing':loadMarketingDeals();loadMarketingPushCampaigns();loadBillingAdjustments();if(hasPermission('loyalty','view'))loadLoyaltySettings();break;case 'new-order':loadMarketingDeals();loadBillingAdjustments();break;} };
 
 function setupDesktopWindowChrome(){
     const desktop=window.cafePOSDesktop;
@@ -9795,10 +10366,16 @@ async function loadTableQrMenuModule(){
     if(grid)grid.innerHTML='<div class="table-qr-empty">Loading your POS tables…</div>';
     if(stock)stock.innerHTML='<div class="qr-stock-empty">Loading menu items…</div>';
     try{
-        const [tables,items,publication]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings")]);
+        const [tables,items,publication,categories]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings"),api("/menu/categories")]);
         tableQrMenuTables=Array.isArray(tables)?tables:[];
         tableQrMenuItems=Array.isArray(items)?items:[];
         restaurantMenuPublication=publication;
+        qrMenuCategoryNames=(Array.isArray(categories)?categories:[]).filter(category=>category.active!==false).map(category=>String(category.name||"").trim()).filter(Boolean);
+        const savedOrder=Array.isArray(publication.categoryOrder)?publication.categoryOrder:[];
+        const categoryByKey=new Map(qrMenuCategoryNames.map(name=>[name.toLocaleLowerCase(),name]));
+        qrCategoryOrder=[...savedOrder.map(name=>categoryByKey.get(String(name||"").trim().toLocaleLowerCase())).filter(Boolean)];
+        qrMenuCategoryNames.forEach(name=>{if(!qrCategoryOrder.some(entry=>entry.toLocaleLowerCase()===name.toLocaleLowerCase()))qrCategoryOrder.push(name);});
+        renderQrCategoryOrder();
         const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),baseField=document.getElementById("publicMenuBaseUrl"),status=document.getElementById("publicMenuStatus");
         tableQrMenuHeroImages=Array.isArray(publication.heroImages)?publication.heroImages.slice(0,6):[];
         renderQrHeroImages();
@@ -9819,6 +10396,79 @@ async function loadTableQrMenuModule(){
         if(status)status.textContent=error.message||"Guest menu settings are unavailable.";
     }
 }
+
+function renderQrCategoryOrder(){
+    const list=document.getElementById("qrCategoryOrderList");
+    if(!list)return;
+    if(!qrCategoryOrder.length){list.innerHTML='<li class="qr-category-order-empty">Create menu categories first to arrange them for guests.</li>';return;}
+    list.innerHTML=qrCategoryOrder.map((name,index)=>`<li class="qr-category-order-item"><span class="qr-category-order-rank">${index+1}</span><span class="qr-category-order-name">${esc(name)}</span><span class="qr-category-order-actions"><button type="button" class="table-action-btn" aria-label="Move ${esc(name)} up" title="Move up" ${index===0?"disabled":""} onclick="moveQrCategoryOrder(${index},-1)">↑</button><button type="button" class="table-action-btn" aria-label="Move ${esc(name)} down" title="Move down" ${index===qrCategoryOrder.length-1?"disabled":""} onclick="moveQrCategoryOrder(${index},1)">↓</button></span></li>`).join("");
+}
+
+function moveQrCategoryOrder(index,direction){
+    const target=index+direction;
+    if(index<0||target<0||index>=qrCategoryOrder.length||target>=qrCategoryOrder.length)return;
+    [qrCategoryOrder[index],qrCategoryOrder[target]]=[qrCategoryOrder[target],qrCategoryOrder[index]];
+    renderQrCategoryOrder();
+}
+
+async function readQrCategoryOrderFile(file){
+    const status=document.getElementById("qrCategoryOrderStatus");
+    if(!file)return;
+    try{
+        const extension=String(file.name||"").split(".").pop().toLowerCase();
+        const matrix=extension==="xlsx"?await parseMenuXlsx(file):parseMenuDelimited(await file.text(),extension==="tsv"?"\t":",");
+        if(!matrix.length)throw new Error("The file has no category rows.");
+        const normalize=value=>String(value||"").trim().toLocaleLowerCase().replace(/[^a-z0-9]/g,"");
+        const headers=matrix[0].map(normalize);
+        const categoryColumn=headers.findIndex(value=>["category","categories","categoryname"].includes(value));
+        const orderColumn=headers.findIndex(value=>["order","displayorder","sortorder","position","sequence"].includes(value));
+        if(categoryColumn<0||orderColumn<0)throw new Error("Add Category and Order columns to the first row of your CSV or Excel sheet.");
+        const categoryByKey=new Map(qrMenuCategoryNames.map(name=>[name.toLocaleLowerCase(),name]));
+        const imported=[];
+        const seen=new Set();
+        for(const [rowIndex,row] of matrix.slice(1).entries()){
+            const rawName=String(row[categoryColumn]||"").trim();
+            if(!rawName)continue;
+            const name=categoryByKey.get(rawName.toLocaleLowerCase());
+            if(!name)throw new Error(`Row ${rowIndex+2}: “${rawName}” is not an active menu category.`);
+            const key=name.toLocaleLowerCase();
+            if(seen.has(key))throw new Error(`“${name}” appears more than once in the file.`);
+            const order=Number(String(row[orderColumn]||"").trim());
+            if(!Number.isFinite(order)||order<1)throw new Error(`Row ${rowIndex+2}: enter a display order of 1 or higher.`);
+            seen.add(key);
+            imported.push({name,order,index:rowIndex});
+        }
+        if(!imported.length)throw new Error("The file has no category rows to import.");
+        imported.sort((a,b)=>a.order-b.order||a.index-b.index);
+        qrCategoryOrder=[...imported.map(entry=>entry.name),...qrCategoryOrder.filter(name=>!seen.has(name.toLocaleLowerCase()))];
+        renderQrCategoryOrder();
+        if(status)status.textContent=`Imported ${imported.length} categories. Save display order to publish the new sequence.`;
+        showProfileToast("QR menu category order imported.");
+    }catch(error){
+        if(status)status.textContent=error.message||"Could not read this category order file.";
+    }finally{
+        const input=document.getElementById("qrCategoryOrderFile");
+        if(input)input.value="";
+    }
+}
+
+function downloadQrCategoryOrderTemplate(){
+    const rows=[["Category","Order"],...qrCategoryOrder.map((name,index)=>[name,index+1])];
+    downloadCsvRows(`qr-menu-category-order-${getPOSDateKey()}.csv`,rows);
+}
+
+async function saveQrCategoryOrder(){
+    const status=document.getElementById("qrCategoryOrderStatus");
+    try{
+        await api("/menu/public-settings/category-order",{method:"PUT",body:JSON.stringify({categoryOrder:qrCategoryOrder})});
+        if(restaurantMenuPublication)restaurantMenuPublication.categoryOrder=qrCategoryOrder.slice();
+        if(status)status.textContent="Guest QR menu categories will follow this order.";
+        showProfileToast("QR menu category order saved.");
+    }catch(error){
+        if(status)status.textContent=error.message||"Could not save the QR menu category order.";
+    }
+}
+
 async function saveRestaurantMenuSettings(){
     const enabled=document.getElementById("publicMenuEnabled")?.checked===true;
     const priceChannel=document.getElementById("publicMenuPriceChannel")?.value||"online";
@@ -9934,7 +10584,175 @@ function renderQrStockItems(){
 async function printOrderKOT(orderId){
     await printKOT(orderId);
 }
+let posQrServiceRequestCursor=null;
+let posQrServiceRequestTimer=null;
+let posQrServiceRequestBusy=false;
+let posQrServiceRequestGeneration=0;
+let qrServiceSpeechQueue=[];
+let qrServiceSpeechActive=false;
+let qrServiceSpeechGeneration=0;
+let qrServiceSpeechRetryArmed=false;
+let qrServiceSpeechRetryHandler=null;
+function flushPendingQrServiceVoices(){
+    if(!pendingQrServiceVoiceRequests.length)return;
+    const pending=pendingQrServiceVoiceRequests.splice(0);
+    pending.forEach(queueQrTableServiceVoice);
+}
+function armQrServiceSpeechRetry(){
+    if(qrServiceSpeechRetryArmed)return;
+    qrServiceSpeechRetryArmed=true;
+    const retry=()=>{
+        document.removeEventListener("pointerdown",retry,true);
+        document.removeEventListener("keydown",retry,true);
+        qrServiceSpeechRetryArmed=false;
+        qrServiceSpeechRetryHandler=null;
+        if(!currentUser)return;
+        primeKOTAlertAudio();
+        flushPendingQrServiceVoices();
+    };
+    qrServiceSpeechRetryHandler=retry;
+    document.addEventListener("pointerdown",retry,{once:true,capture:true});
+    document.addEventListener("keydown",retry,{once:true,capture:true});
+}
+function showQrTableServiceRequestToast(request){
+    let stack=document.getElementById("qrServiceRequestToastStack");
+    if(!stack){stack=document.createElement("div");stack.id="qrServiceRequestToastStack";stack.className="qr-service-request-toast-stack";stack.setAttribute("aria-live","polite");stack.setAttribute("aria-relevant","additions");document.body.appendChild(stack);}
+    const clean=String(request.request_type||"")==="clean_table",table=String(request.table_number||"").trim()||"—";
+    const toast=document.createElement("article");toast.className="qr-service-request-toast";toast.setAttribute("role","status");
+    const icon=document.createElement("span");icon.className="qr-service-request-icon";icon.setAttribute("aria-hidden","true");icon.textContent=clean?"✧":"♧";
+    const copy=document.createElement("span");copy.className="qr-service-request-copy";
+    const title=document.createElement("strong");title.textContent=clean?`टेबल नंबर ${table} · सफ़ाई का अनुरोध`:`टेबल नंबर ${table} · वेटर का अनुरोध`;
+    const detail=document.createElement("small");detail.textContent=clean?"कृपया इस टेबल को साफ़ करें।":"कृपया इस टेबल पर वेटर भेजें।";
+    copy.append(title,detail);
+    const close=document.createElement("button");close.className="qr-service-request-close";close.type="button";close.setAttribute("aria-label","Dismiss table request notification");close.textContent="×";
+    close.addEventListener("click",()=>toast.remove());toast.append(icon,copy,close);stack.appendChild(toast);
+    requestAnimationFrame(()=>toast.classList.add("show"));
+    toast._hideTimer=setTimeout(()=>{toast.classList.remove("show");setTimeout(()=>toast.remove(),220);},18000);
+}
+function queueQrTableServiceVoice(request){
+    if(!window.speechSynthesis||typeof SpeechSynthesisUtterance!=="function")return;
+    const table=String(request.table_number||"").trim()||"—";
+    const cafeName=String(appSettings.restaurantName||currentUser?.business_name||"रेस्टोरेंट").trim();
+    const text=String(request.request_type||"")==="clean_table"
+        ?`${cafeName}, टेबल नंबर ${table} को कृपया साफ़ कर दें।`
+        :`${cafeName}, टेबल नंबर ${table} पर वेटर को बुलाया जा रहा है।`;
+    qrServiceSpeechQueue.push({text,request,generation:qrServiceSpeechGeneration});
+    if(qrServiceSpeechActive)return;
+    const findHindiVoice=()=>{
+        const voices=window.speechSynthesis.getVoices();
+        const hindiVoices=voices.filter(voice=>/^hi(?:[-_]|$)/i.test(String(voice.lang||"")));
+        const maleVoiceName=/(?:^|[\s_-])male(?:$|[\s_-])|hemant|rishi|madhur|amit|arjun|neeraj|rahul|aditya|rohit|vivek/i;
+        const naturalVoiceName=/natural|neural|premium|enhanced|google/i;
+        const namedMaleVoices=hindiVoices.filter(voice=>maleVoiceName.test(voice.name||""));
+        const candidates=namedMaleVoices.length?namedMaleVoices:hindiVoices;
+        const voiceScore=voice=>
+            (/^hi[-_]IN$/i.test(String(voice.lang||""))?50:0)
+            +(naturalVoiceName.test(`${voice.name||""} ${voice.voiceURI||""}`)?25:0)
+            +(voice.localService===false?5:0)
+            +(voice.default?1:0);
+        return candidates.slice().sort((left,right)=>voiceScore(right)-voiceScore(left))[0]||null;
+    };
+    const waitForHindiVoice=()=>new Promise(resolve=>{
+        const existing=findHindiVoice();
+        if(existing){resolve(existing);return;}
+        let settled=false;
+        const finish=voice=>{if(settled)return;settled=true;clearTimeout(timer);window.speechSynthesis.removeEventListener?.("voiceschanged",onVoicesChanged);resolve(voice||null);};
+        const onVoicesChanged=()=>{const voice=findHindiVoice();if(voice)finish(voice);};
+        const timer=setTimeout(()=>finish(findHindiVoice()),1000);
+        window.speechSynthesis.addEventListener?.("voiceschanged",onVoicesChanged);
+    });
+    const speakNext=async()=>{
+        const next=qrServiceSpeechQueue.shift();
+        if(!next){qrServiceSpeechActive=false;return;}
+        qrServiceSpeechActive=true;
+        const generation=next.generation;
+        const voice=await waitForHindiVoice();
+        if(generation!==qrServiceSpeechGeneration){qrServiceSpeechActive=false;return;}
+        const utterance=new SpeechSynthesisUtterance(next.text);
+        utterance.lang=voice?.lang||"hi-IN";utterance.rate=0.94;utterance.pitch=1;utterance.volume=1;
+        if(voice)utterance.voice=voice;
+        let finished=false;
+        const finishSpeech=event=>{
+            if(finished)return;finished=true;clearTimeout(watchdog);
+            if(event?.error&&generation===qrServiceSpeechGeneration){
+                pendingQrServiceVoiceRequests.push(next.request);
+                armQrServiceSpeechRetry();
+            }
+            setTimeout(speakNext,180);
+        };
+        utterance.onend=finishSpeech;
+        utterance.onerror=finishSpeech;
+        const watchdog=setTimeout(()=>finishSpeech({error:"timeout"}),12000);
+        try{window.speechSynthesis.speak(utterance);}catch(_){finishSpeech({error:"not-allowed"});}
+    };
+    speakNext();
+}
+async function pollQrTableServiceAlerts(){
+    if(!currentUser){stopQrTableServiceAlerts();return;}
+    if(document.visibilityState!=="visible"||posQrServiceRequestBusy)return;
+    const generation=posQrServiceRequestGeneration,businessId=String(currentUser.business_id||"");
+    posQrServiceRequestBusy=true;
+    try{
+        const query=posQrServiceRequestCursor===null?"":"?afterId="+encodeURIComponent(String(posQrServiceRequestCursor));
+        const result=await api("/qr-service-requests"+query);
+        if(generation!==posQrServiceRequestGeneration||businessId!==String(currentUser?.business_id||""))return;
+        const latestId=Math.max(0,Number(result.latestId)||0);
+        if(posQrServiceRequestCursor===null){
+            posQrServiceRequestCursor=latestId;
+            return;
+        }
+        if(posQrServiceRequestCursor>latestId){
+            posQrServiceRequestCursor=latestId;
+        }
+        const requests=Array.isArray(result.requests)?result.requests:[];
+        if(requests.length){
+            const voiceRequests=[];
+            let buzzerCount=0;
+            for(const request of requests){
+                const clean=String(request.request_type||"")==="clean_table";
+                const notificationEnabled=appSettings[clean?"qrCleanTableNotification":"qrCallWaiterNotification"]!==false;
+                const voiceAndBuzzerEnabled=appSettings[clean?"qrCleanTableSound":"qrCallWaiterSound"]!==false;
+                const buzzerOnlyEnabled=appSettings[clean?"qrCleanTableBuzzer":"qrCallWaiterBuzzer"]===true;
+                if(notificationEnabled)showQrTableServiceRequestToast(request);
+                if(voiceAndBuzzerEnabled)voiceRequests.push(request);
+                if(voiceAndBuzzerEnabled||buzzerOnlyEnabled)buzzerCount++;
+            }
+            voiceRequests.forEach(queueQrTableServiceVoice);
+            if(buzzerCount){
+                const audio=ensureKOTAlertAudio();
+                if(audio?.state==="running"){
+                    for(let i=0;i<Math.min(3,buzzerCount);i++)emitPOSNotificationBuzzer();
+                }else{
+                    pendingQrServiceAlertSounds=Math.min(3,pendingQrServiceAlertSounds+buzzerCount);
+                }
+            }
+        }
+        posQrServiceRequestCursor=Math.max(posQrServiceRequestCursor,Number(result.cursorId||result.latestId||0));
+    }catch(error){if(generation===posQrServiceRequestGeneration)console.warn("QR table service notification check failed:",error.message);}
+    finally{if(generation===posQrServiceRequestGeneration)posQrServiceRequestBusy=false;}
+}
+function startQrTableServiceAlerts(){
+    stopQrTableServiceAlerts();
+    if(!currentUser)return;
+    // Treat login/reload as a fresh session: establish a baseline and don't replay
+    // table-service requests that were already present before the POS reopened.
+    posQrServiceRequestCursor=null;
+    if(!window.__qrServiceRequestVisibilityListener){document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible"&&currentUser)pollQrTableServiceAlerts();});window.__qrServiceRequestVisibilityListener=true;}
+    document.addEventListener("pointerdown",primeKOTAlertAudio,{once:true,capture:true});
+    document.addEventListener("keydown",primeKOTAlertAudio,{once:true,capture:true});
+    pollQrTableServiceAlerts();
+    posQrServiceRequestTimer=setInterval(pollQrTableServiceAlerts,5000);
+}
+function stopQrTableServiceAlerts(){
+    posQrServiceRequestGeneration++;
+    if(posQrServiceRequestTimer){clearInterval(posQrServiceRequestTimer);posQrServiceRequestTimer=null;}
+    if(qrServiceSpeechRetryHandler){document.removeEventListener("pointerdown",qrServiceSpeechRetryHandler,true);document.removeEventListener("keydown",qrServiceSpeechRetryHandler,true);qrServiceSpeechRetryHandler=null;qrServiceSpeechRetryArmed=false;}
+    posQrServiceRequestCursor=null;posQrServiceRequestBusy=false;qrServiceSpeechQueue=[];qrServiceSpeechActive=false;qrServiceSpeechGeneration++;pendingQrServiceAlertSounds=0;pendingQrServiceVoiceRequests=[];
+    document.getElementById("qrServiceRequestToastStack")?.remove();
+    try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(_){}
+}
 let posQrOrderAlertCursor=null;
+let posQrOrderActivityCursor=null;
 let posQrOrderAlertTimer=null;
 let posQrOrderAlertBusy=false;
 function playPOSQrOrderAlertSound(){
@@ -9976,24 +10794,34 @@ async function pollPOSQrOrderAlerts(){
     if((!hasPermission("orders","view")&&!hasPermission("kitchen","view"))||posQrOrderAlertBusy)return;
     posQrOrderAlertBusy=true;
     try{
-        const url=posQrOrderAlertCursor===null?"/orders/qr-notifications":"/orders/qr-notifications?afterId="+encodeURIComponent(posQrOrderAlertCursor);
+        const cursors=new URLSearchParams();
+        if(posQrOrderAlertCursor!==null)cursors.set("afterId",String(posQrOrderAlertCursor));
+        if(posQrOrderActivityCursor!==null)cursors.set("afterActivityId",String(posQrOrderActivityCursor));
+        const query=cursors.toString(),url="/orders/qr-notifications"+(query?"?"+query:"");
         const result=await api(url);
         const latest=Number(result.latestOrderId||0);
+        const latestActivity=Number(result.latestActivityId||0);
         const arrivals=Array.isArray(result.orders)?result.orders:[];
+        const updates=Array.isArray(result.updates)?result.updates:[];
         posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
-        if(!arrivals.length)return;
-        // QR orders are a separate arrival source from regular POS KOTs. Alert
-        // kitchen users here instead of relying on the KOT poll's initial seed.
-        if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
-        else playPOSQrOrderAlertSound();
-        showQROrderArrivalToast(arrivals);
-        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        posQrOrderActivityCursor=Math.max(posQrOrderActivityCursor,latestActivity);
+        if(arrivals.length){
+            // QR orders are a separate arrival source from regular POS KOTs. Alert
+            // kitchen users here instead of relying on the KOT poll's initial seed.
+            if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
+            else playPOSQrOrderAlertSound();
+            showQROrderArrivalToast(arrivals);
+        }
+        if((arrivals.length||updates.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        const changedSelectedOrder=updates.some(order=>Number(order.id)===Number(window.selectedOrderId));
+        if(changedSelectedOrder)await viewOrder(Number(window.selectedOrderId));
     }catch(error){console.warn("QR order notification check failed:",error.message);}
     finally{posQrOrderAlertBusy=false;}
 }
 function startPOSQrOrderAlerts(){
     if(posQrOrderAlertTimer){clearInterval(posQrOrderAlertTimer);posQrOrderAlertTimer=null;}
     posQrOrderAlertCursor=null;
+    posQrOrderActivityCursor=null;
     if(!currentUser||(!hasPermission("orders","view")&&!hasPermission("kitchen","view")))return;
     if(!window.__qrKitchenAlertVisibilityListener){
         document.addEventListener("visibilitychange",()=>{

@@ -232,8 +232,7 @@ function escapeHtml(value) {
     })[character]);
 }
 
-function makeInvoicePdfHtml(bill = {}, settings = {}) {
-    const clean = bill.viewMode === "clean";
+function makeInvoicePdfHtml(bill = {}, settings = {}, pageHeightMm = 220) {
     const currency = String(settings.currency || "₹").slice(0, 8);
     const amount = value => {
         const number = Number(value || 0);
@@ -247,49 +246,38 @@ function makeInvoicePdfHtml(bill = {}, settings = {}) {
             return name ? (setName ? `${setName}: ${name}` : name) : "";
         });
     }).filter(Boolean).join(", ") : "";
-    const itemRows = items.map(item => {
-        const quantity = Number(item?.quantity || 0);
+    const itemRows = items.map((item, index) => {
+        const quantity = Math.max(0, Number(item?.quantity || 0));
         const price = Number(item?.price || 0);
+        const lineTotal = Number(item?.lineTotal) > 0 || price === 0 ? Number(item?.lineTotal || 0) : quantity * price;
         const options = optionText(item?.options);
-        return `<tr><td>${escapeHtml(item?.name || "-")}${options ? `<small>${escapeHtml(options)}</small>` : ""}</td><td>${Number.isFinite(quantity) ? quantity : 0}</td><td>${amount(price)}</td><td>${amount((Number.isFinite(quantity) ? quantity : 0) * (Number.isFinite(price) ? price : 0))}</td></tr>`;
+        return `<article class="item"><strong>${index + 1}. ${escapeHtml(item?.name || "-")}</strong><div class="item-sub"><span>${quantity} @ ${amount(price)}/${escapeHtml(item?.unit || "ea")}</span><b>${amount(lineTotal)}</b></div>${options ? `<small>${escapeHtml(options)}</small>` : ""}</article>`;
     }).join("");
-    const detailRows = [
-        ["Order No", bill.orderNumber],
-        bill.invoiceNumber ? ["Invoice", bill.invoiceNumber] : null,
-        ["Date", bill.date || new Date().toLocaleString()],
-        ["Order Type", bill.orderType],
-        bill.tableNumber ? ["Table", `${bill.tableNumber}${Number(bill.pax) > 0 ? ` · ${Number(bill.pax)} PAX` : ""}`] : null
-    ].filter(row => row && row[1]).map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
-    const discount = Number(bill.discount || 0);
-    const charge = Number(bill.serviceCharge || 0);
-    const gst = Number(bill.gst || 0);
-    const rounding = Number(bill.roundingAdjustment || 0);
-    const summaries = [
-        `<div><span>${clean ? "Sub Total" : "Subtotal"}</span><strong>${amount(bill.subtotal)}</strong></div>`,
-        discount > 0 ? `<div><span>${escapeHtml(bill.discountName ? `Discount · ${bill.discountName}` : "Discount")}</span><strong>−${amount(discount)}</strong></div>` : "",
-        charge > 0 ? `<div><span>${escapeHtml(bill.chargeName ? `Charges · ${bill.chargeName}` : "Charges")}</span><strong>${amount(charge)}</strong></div>` : "",
-        gst > 0 || !clean ? `<div><span>GST</span><strong>${amount(gst)}</strong></div>` : "",
-        Math.abs(rounding) >= 0.005 ? `<div><span>Rounding</span><strong>${amount(rounding)}</strong></div>` : "",
-        `<div class="total"><span>${clean ? "Bill Total" : "TOTAL"}</span><strong>${amount(bill.total)}</strong></div>`
+    const taxBreakdown = Array.isArray(bill.taxBreakdown) ? bill.taxBreakdown : [];
+    const rows = [
+        `<div><span>Sub Total</span><b>${amount(bill.subtotal)}</b></div>`,
+        Number(bill.discount || 0) > 0 ? `<div><span>${escapeHtml(bill.discountName ? `Discount · ${bill.discountName}` : "Discount")}</span><b>−${amount(bill.discount)}</b></div>` : "",
+        Number(bill.serviceCharge || 0) > 0 ? `<div><span>${escapeHtml(bill.chargeName ? `Charges · ${bill.chargeName}` : "Charges")}</span><b>${amount(bill.serviceCharge)}</b></div>` : "",
+        ...(taxBreakdown.length ? taxBreakdown.map(tax => `<div><span>${escapeHtml(tax.component || "Tax")} ${escapeHtml(tax.rate || 0)}% on ${amount(tax.taxableBase || 0)}</span><b>${amount(tax.taxAmount || 0)}</b></div>`) : (Number(bill.gst || 0) > 0 ? [`<div><span>GST</span><b>${amount(bill.gst)}</b></div>`] : [])),
+        `<div class="bill-total"><span>Bill Total</span><b>${amount(Number(bill.total || 0) - Number(bill.roundingAdjustment || 0))}</b></div>`,
+        `<div class="rounded-total"><span>Bill Total (rounded)</span><b>${amount(bill.total)}</b></div>`
     ].filter(Boolean).join("");
-    const customer = [bill.customerName, bill.customerPhone, bill.customerEmail, bill.customerGstin ? `GSTIN: ${bill.customerGstin}` : "", bill.customerAddress, bill.customerCity, bill.customerState].filter(Boolean).join(" · ");
-    const collected = bill.amountCollected === undefined
-        ? (Array.isArray(bill.paymentAllocations) ? bill.paymentAllocations.reduce((sum, payment) => sum + Number(payment.amount || 0), 0) : 0)
-        : Number(bill.amountCollected || 0);
+    const allocations = Array.isArray(bill.paymentAllocations) ? bill.paymentAllocations : [];
+    const collected = bill.amountCollected === undefined ? allocations.reduce((sum, entry) => sum + Number(entry.amount || 0), 0) : Number(bill.amountCollected || 0);
     const due = bill.amountDue === undefined ? Math.max(0, Number(bill.total || 0) - collected) : Number(bill.amountDue || 0);
-    const itemCount = `${items.length} ${items.length === 1 ? "item" : "items"}`;
-    const brand = clean ? "Order" : (settings.restaurantName || "SLASH POS");
-    const logoUrl = !clean ? String(settings.businessLogoUrl || "") : "";
-    const logo = /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(logoUrl)
-        ? `<img class="logo" src="${escapeHtml(logoUrl)}" alt="Business logo">`
-        : "";
-    const businessDetails = clean ? "" : [settings.address, settings.phone ? `Phone: ${settings.phone}` : "", settings.gstin ? `GSTIN: ${settings.gstin}` : ""].filter(Boolean).map(value => `<p>${escapeHtml(value)}</p>`).join("");
-    const details = clean ? "" : `<section class="details">${bill.isOpenOrder ? `<div class="open-order">OPEN ORDER / PROFORMA</div>` : ""}${detailRows}${customer ? `<div><span>Customer</span><strong>${escapeHtml(customer)}</strong></div>` : ""}</section>`;
-    const payment = clean ? "" : `<section class="payment"><div><span>Payment</span><strong>${escapeHtml(bill.paymentMethod || "-")}</strong></div>${(Array.isArray(bill.paymentAllocations) ? bill.paymentAllocations : []).map(entry => `<div><span>${escapeHtml(entry?.method || "Payment")}</span><strong>${amount(entry?.amount)}</strong></div>`).join("")}<div><span>Amount Collected</span><strong>${amount(collected)}</strong></div><div><span>Amount Due</span><strong>${amount(due)}</strong></div></section>`;
+    const payments = bill.isOpenOrder ? "" : `<section class="payments"><h2>Payment Summary</h2>${allocations.length ? allocations.map(entry => `<div><span>${escapeHtml(entry?.method || "Payment")}</span><b>${amount(entry?.amount)}</b></div>`).join("") : `<div><span>${escapeHtml(bill.paymentMethod || "Payment")}</span><b>${amount(collected)}</b></div>`}<div><span>Balance</span><b>${amount(due)}</b></div></section>`;
+    const totalQty = items.reduce((sum, item) => sum + Math.max(0, Number(item?.quantity || 0)), 0);
+    const invoiceLabel = bill.isOpenOrder ? bill.orderNumber : (bill.invoiceNumber || bill.orderNumber);
+    const customerCode = bill.customerCode || (bill.customerId ? `#${bill.customerId}` : "");
+    const context = [bill.orderType, bill.tableNumber ? `Table ${bill.tableNumber}` : "", Number(bill.pax) > 0 ? `${Number(bill.pax)} PAX` : ""].filter(Boolean).join(" · ");
+    const customHeader = String(settings.header || "").trim();
+    const footerText = String(settings.footer || settings.customerMessage || "Visit Again!\nThank you.").replace("Thank You!\nVisit Again 😊", "Visit Again!\nThank you.").trim();
+    const details = [settings.address, settings.gstin ? `GST#: ${settings.gstin}` : "", settings.fssai ? `FSSAI#: ${settings.fssai}` : ""].filter(Boolean).map(value => `<div>${escapeHtml(value)}</div>`).join("");
+    const printDate = bill.date || new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(bill.invoiceNumber || bill.orderNumber || "Slash POS Bill")}</title><style>
-@page{size:A4;margin:14mm}*{box-sizing:border-box}body{margin:0;background:#fff;color:#222;font:13px Arial,Helvetica,sans-serif}.bill{width:100%;max-width:548px;margin:0 auto;border:1px solid #e5e7eb;background:#fff}.toolbar{display:flex;align-items:center;min-height:58px;padding:10px 24px;border-bottom:1px solid #e0e2e5;color:#17191c;font-size:20px;font-weight:700}.header{padding:27px 24px 21px;border-bottom:1px solid #dedfe1;text-align:center}.logo{display:block;max-width:150px;max-height:76px;object-fit:contain;margin:0 auto 12px}.header h1{margin:0;color:#222;font-size:20px;font-weight:400}.header p{margin:4px 0 0;color:#62666c;font-size:12px}.details{display:grid;gap:7px;padding:17px 24px;border-bottom:1px solid #dedfe1}.details>div{display:flex;justify-content:space-between;gap:12px;font-size:12px}.details span{color:#666}.details strong{text-align:right;font-weight:500}.details .open-order{justify-content:center;color:#8a4c00;font-weight:700}.quick{display:flex;justify-content:space-between;margin:0 24px;padding:12px 0;border-bottom:1px solid #dedfe1;color:#30343a;font-size:13px}.items{padding:0 24px}.items table{width:100%;border-collapse:collapse;font-size:13px}.items th,.items td{padding:9px 4px;color:#222;vertical-align:top}.items th{border-bottom:1px solid #e1e2e4;font-size:12px;font-weight:700;text-align:left}.items td:nth-child(2),.items th:nth-child(2){text-align:center}.items td:nth-child(n+3),.items th:nth-child(n+3){text-align:right;white-space:nowrap}.items small{display:block;margin-top:3px;color:#62666c;font-size:11px}.summary{margin:0 24px;padding:10px 0 18px;border-top:1px solid #dedfe1}.summary>div,.payment>div{display:flex;justify-content:space-between;gap:14px;padding:6px 0;color:#50545a;font-size:13px}.summary strong,.payment strong{color:#222;font-weight:500}.summary .total{padding-top:10px;border-top:1px solid #e5e7eb;color:#17191c;font-size:21px}.summary .total strong{font-size:21px;font-weight:500}.payment{margin:0 24px;padding:10px 0;border-top:1px solid #dedfe1}.footer{margin:0 24px;padding:13px 0 20px;border-top:1px solid #dedfe1;color:#555;text-align:center;font-size:12px}@media print{.bill{break-inside:avoid;border-radius:0}}
-</style></head><body><main class="bill"><div class="toolbar">Bill</div><header class="header">${logo}<h1>${escapeHtml(brand)}</h1>${businessDetails}</header>${details}<div class="quick"><span>Order</span><span>${itemCount}</span></div><section class="items"><table><thead><tr><th>${clean ? "Name" : "Item"}</th><th>Qty</th><th>${clean ? "Rate" : "Price"}</th><th>${clean ? "Amount" : "Total"}</th></tr></thead><tbody>${itemRows}</tbody></table></section><section class="summary">${summaries}</section>${payment}</main></body></html>`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(invoiceLabel || "Slash POS Invoice")}</title><style>
+@page{size:80mm ${Math.max(150, Number(pageHeightMm) || 220)}mm;margin:4mm}*{box-sizing:border-box}html,body{width:72mm;margin:0;background:#fff;color:#202124;font:10px/1.42 Arial,Helvetica,sans-serif}.receipt{width:72mm;margin:0 auto;padding:0}.business{text-align:center;padding:0 0 8px;border-bottom:1px solid #d8dadd}.business h1{margin:0;font-size:15px;font-weight:500}.legal{margin-top:1px;font-size:12px}.business div{margin-top:2px}.title{margin:7px 0;text-align:center;font-size:16px;font-weight:500}.token{text-align:left;margin:6px 0 14px}.guest{margin:8px 0}.guest strong,.guest small{display:block}.guest strong{font-size:12px;font-weight:400}.guest small{margin-top:2px;color:#666}.meta{display:flex;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #d8dadd;border-bottom:1px solid #d8dadd}.meta strong{font-weight:400}.meta span:last-child{text-align:right}.context{margin:4px 0;color:#50545a}.items{padding:3px 0 0}.item{padding:5px 0 6px;border-bottom:1px solid #dedfe1;break-inside:avoid}.item>strong{display:block;font-size:11px;font-weight:400}.item-sub{display:flex;justify-content:space-between;gap:8px;padding:3px 0 0;color:#777}.item-sub b{color:#202124;font-weight:400;white-space:nowrap}.item small{display:block;color:#666}.summary{padding:6px 0 0}.summary>div,.payments>div{display:flex;justify-content:space-between;gap:8px;padding:2px 0}.summary b,.payments b{font-weight:400;text-align:right;white-space:nowrap}.summary .bill-total{margin-top:3px}.summary .rounded-total{padding:5px 0;font-size:16px}.summary .rounded-total b{font-size:16px}.payments{margin-top:7px}.payments h2{margin:7px 0 2px;font-size:12px;font-weight:400}.payments>div{padding:1px 0}.footer{margin-top:13px;padding-top:2px;color:#82858a;text-align:center;white-space:pre-line}.rcm{text-align:center;color:#82858a;margin-top:13px}
+</style></head><body><main class="receipt"><header class="business"><h1>${escapeHtml(settings.restaurantName || "SLASH POS")}</h1>${settings.businessLegalName ? `<div class="legal">${escapeHtml(settings.businessLegalName)}</div>` : ""}${details}</header>${customHeader && customHeader !== "Cafe Management System" ? `<div class="footer">${escapeHtml(customHeader)}</div>` : ""}<div class="title">${bill.isOpenOrder ? "Order" : "Invoice"}</div>${bill.tokenNumber ? `<div class="token">Token No: ${escapeHtml(bill.tokenNumber)}</div>` : ""}<div class="guest"><strong>${escapeHtml(bill.customerName || "Guest")}</strong>${customerCode ? `<small>${escapeHtml(customerCode)}</small>` : ""}</div><div class="meta"><strong>${escapeHtml(`${bill.isOpenOrder ? "Order" : "Invoice"} ${invoiceLabel || "-"}`)}</strong><span>${items.length} ${items.length === 1 ? "item" : "items"} (${totalQty} Qty)</span></div><div class="meta"><span>${escapeHtml(printDate)}</span><span>${escapeHtml(bill.cashierName || "")}</span></div>${context ? `<div class="context">${escapeHtml(context)}</div>` : ""}<section class="items">${itemRows}</section><section class="summary">${rows}</section>${payments}<div class="rcm">RCM applicable: NO</div><footer class="footer">${escapeHtml(footerText)}</footer></main></body></html>`;
 }
 
 async function saveReceiptPdf(event, payload = {}) {
@@ -321,11 +309,15 @@ async function saveReceiptPdf(event, payload = {}) {
     });
     pdfWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     try {
+        const items = Array.isArray(bill.items) ? bill.items : [];
+        const approximateHeight = Math.min(1000, Math.max(170, 132 + items.reduce((sum, item) => sum + 15 + Math.ceil(String(item?.name || "").length / 34) * 4, 0) + (Array.isArray(bill.taxBreakdown) ? bill.taxBreakdown.length * 5 : 0)));
         const html = kind === "test"
             ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(fileName)}</title><style>@page{size:A4;margin:14mm}body{font:13px Arial,Helvetica,sans-serif;color:#222}main{max-width:548px;margin:0 auto;border:1px solid #e5e7eb;padding:24px}h1{font-size:20px;font-weight:400}pre{font:13px/1.5 Consolas,"Courier New",monospace;white-space:pre-wrap}</style></head><body><main><h1>Slash POS Printer Test</h1><pre>${escapeHtml(receipt)}</pre></main></body></html>`
-            : makeInvoicePdfHtml(bill, payload.settings || {});
+            : makeInvoicePdfHtml(bill, payload.settings || {}, approximateHeight);
         await pdfWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
-        const pdf = await pdfWindow.webContents.printToPDF({ pageSize: "A4", printBackground: true, margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 } });
+        const pdf = await pdfWindow.webContents.printToPDF(kind === "test"
+            ? { pageSize: "A4", printBackground: true, margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 } }
+            : { pageSize: { width: 80000, height: Math.round(approximateHeight * 1000) }, printBackground: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } });
         if (!pdf || pdf.length < 5 || pdf.subarray(0, 5).toString("ascii") !== "%PDF-") {
             throw new Error("The PDF could not be generated.");
         }
