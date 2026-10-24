@@ -6407,12 +6407,13 @@ function renderAccessUsers() {
             <td>${esc(user.display_name)}</td>
             <td>${esc(user.username)}</td>
             <td>${profileBadge({name: profileName})}</td>
-            <td><span class="access-status ${user.active ? "active" : "inactive"}">${user.active ? "Active" : "Inactive"}</span></td>
+            <td><span class="access-status ${user.active ? "active" : "inactive"}">${user.active ? "Active" : "Inactive"}</span>${user.is_blocked ? '<br><span class="access-status blocked">Sign-in blocked</span>' : ""}</td>
             <td>${user.created_at ? formatPOSDateTime(user.created_at) : "-"}</td>
             <td>
                 ${user.can_manage ? `
                 <button onclick="editAccessUser(${user.id})">✏️ Edit</button>
                 <button onclick="toggleAccessUser(${user.id}, ${user.active ? "false" : "true"})">${user.active ? "⏸️ Disable" : "▶️ Enable"}</button>
+                <button onclick="toggleAccessUserBlock(${user.id}, ${user.is_blocked ? "false" : "true"})">${user.is_blocked ? "🔓 Unblock sign-in" : "🔒 Block sign-in"}</button>
                 <button onclick="deleteAccessUser(${user.id})">🗑️ Delete</button>
                 ` : '<span class="access-muted">You cannot manage users at your level or above.</span>'}
             </td>
@@ -6527,6 +6528,17 @@ async function toggleAccessUser(id, active) {
         await loadAccess();
     } catch (error) {
         alert(error.message);
+    }
+}
+
+async function toggleAccessUserBlock(id, blocked) {
+    const nextBlocked = blocked === true || blocked === "true";
+    try {
+        await api(`/access/users/${id}/block`, { method: "PATCH", body: JSON.stringify({ blocked: nextBlocked }) });
+        await loadAccess();
+        showProfileToast(nextBlocked ? "User sign-in blocked." : "User sign-in unblocked.", true);
+    } catch (error) {
+        showProfileToast(error.message || "Could not update the user sign-in block.", true);
     }
 }
 

@@ -653,14 +653,20 @@ async function createSession(user, device) {
     const businessId = Number(user.business_id || 0) || null;
     const deviceId = device?.device_id ? String(device.device_id) : null;
 
-    await pool.query(
-        `
+    const created = await tenantContext.run({ businessId }, () => pool.query(`
+        WITH eligible_user AS (
+            UPDATE app_users
+            SET failed_login_attempts=0,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$3::integer AND business_id=$4::integer AND active=TRUE AND is_blocked=FALSE
+            RETURNING id,business_id
+        )
         INSERT INTO app_sessions (token, token_hash, user_id, business_id, device_id, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        SELECT $1,$2,eligible_user.id,eligible_user.business_id,$5,$6
+        FROM eligible_user
         ON CONFLICT (user_id) DO UPDATE SET token=EXCLUDED.token, token_hash=EXCLUDED.token_hash, business_id=EXCLUDED.business_id, device_id=EXCLUDED.device_id, expires_at=EXCLUDED.expires_at, created_at=CURRENT_TIMESTAMP
-        `,
-        [hashSessionToken(token), hashSessionToken(token), user.id, businessId, deviceId, expiresAt]
-    );
+        RETURNING user_id
+    `, [hashSessionToken(token), hashSessionToken(token), user.id, businessId, deviceId, expiresAt]));
+    if (!created.rows.length) return null;
 
     return {
         token,
@@ -737,7 +743,7 @@ async function loadSessionUser(session) {
     return tenantContext.run({ businessId }, async () => {
         const result = await pool.query(`
             SELECT u.id, u.display_name, u.username, u.profile_id, u.business_id, u.active,u.permissions_override,
-                   u.is_owner,
+                   u.is_owner,u.is_blocked,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
                    b.logo_url, b.currency, b.active AS business_active,
@@ -748,7 +754,7 @@ async function loadSessionUser(session) {
             WHERE u.id = $1 AND u.business_id = $2
         `, [session.userId, businessId]);
         const user = result.rows[0];
-        return user && user.active ? user : null;
+        return user && user.active && user.is_blocked !== true ? user : null;
     });
 }
 
@@ -975,7 +981,7 @@ async function requireAuth(req, res, next) {
             )
             SELECT s.token_hash AS token, s.user_id, s.business_id, s.device_id, s.expires_at,
                    u.id, u.display_name, u.username, u.profile_id, u.business_id AS user_business_id,
-                   u.active, u.permissions_override, u.is_owner,
+                   u.active, u.is_blocked, u.permissions_override, u.is_owner,
                    b.business_name, b.business_type, b.owner_name, b.phone AS business_phone,
                    b.email AS business_email, b.address AS business_address, b.city, b.state, b.gstin,
                    b.currency, b.active AS business_active,
@@ -998,13 +1004,17 @@ async function requireAuth(req, res, next) {
         }
         const user = {
             id: row.id, display_name: row.display_name, username: row.username, profile_id: row.profile_id,
-            business_id: row.user_business_id, active: row.active, permissions_override: row.permissions_override, is_owner: row.is_owner === true,
+            business_id: row.user_business_id, active: row.active, is_blocked: row.is_blocked === true, permissions_override: row.permissions_override, is_owner: row.is_owner === true,
             business_name: row.business_name, business_type: row.business_type, owner_name: row.owner_name,
             business_phone: row.business_phone, business_email: row.business_email, business_address: row.business_address,
             city: row.city, state: row.state, gstin: row.gstin, currency: row.currency,
             business_active: row.business_active, profile_name: row.profile_name, permissions: row.permissions
         };
         if (!user.active) return res.status(401).json({ error: "Session is invalid or user is inactive" });
+        if (user.is_blocked) {
+            await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token_hash=$1", [hashSessionToken(token)]));
+            return res.status(401).json({ error: "This account is blocked. Ask an Admin or Manager to unblock it." });
+        }
         if (!user.business_id || user.business_active === false) return res.status(403).json({ error: "Business account is inactive or not assigned" });
 
         const device = row.device_data;
@@ -1602,13 +1612,9 @@ app.post("/api/auth/login", async (req,res)=>{
 
         const businessId = Number(deviceLicense.device.business_id);
         const identityKey = loginIdentityKey("business", businessId, username);
-        const existingLockout = await getLoginLockout(identityKey);
-        if (existingLockout) {
-            res.setHeader("Retry-After", String(Math.max(1, Math.ceil((existingLockout - Date.now()) / 1000))));
-            return res.status(429).json({ error: "Too many failed sign-in attempts. Try again later." });
-        }
         const r = await tenantContext.run({ businessId }, () => pool.query(`
             SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,u.permissions_override,u.is_owner,
+                u.failed_login_attempts,u.is_blocked,
                 b.business_code,b.business_name,b.business_type,b.owner_name,b.phone AS business_phone,b.email AS business_email,
                 b.address AS business_address,b.city,b.state,b.gstin,b.logo_url,b.currency,b.active AS business_active,
                 p.name AS profile_name,COALESCE(u.permissions_override,p.permissions,'{}'::jsonb) AS permissions
@@ -1618,8 +1624,39 @@ app.post("/api/auth/login", async (req,res)=>{
             WHERE LOWER(u.username)=$1 AND u.business_id=$2
             LIMIT 1`,[username,businessId]));
         const user=r.rows[0];
+        if (user?.is_blocked) {
+            return res.status(423).json({ error: "This account is blocked. Ask an Admin or Manager to unblock it." });
+        }
+        const existingLockout = await getLoginLockout(identityKey);
+        if (existingLockout) {
+            res.setHeader("Retry-After", String(Math.max(1, Math.ceil((existingLockout - Date.now()) / 1000))));
+            return res.status(429).json({ error: "Too many failed sign-in attempts. Try again later." });
+        }
         const passwordValid = user?.active ? await verifyPassword(password,user.password_hash) : false;
         if(!passwordValid) {
+            let accountAttempt = null;
+            if (user?.active) {
+                accountAttempt = await tenantContext.run({ businessId }, () => pool.query(`
+                    UPDATE app_users
+                    SET failed_login_attempts=failed_login_attempts+1,
+                        is_blocked=(failed_login_attempts+1)>=5,
+                        blocked_at=CASE WHEN failed_login_attempts+1>=5 THEN COALESCE(blocked_at,CURRENT_TIMESTAMP) ELSE blocked_at END,
+                        blocked_by_user_id=NULL,
+                        blocked_by_support_user_id=NULL,
+                        block_reason=CASE WHEN failed_login_attempts+1>=5 THEN 'failed_attempts' ELSE block_reason END,
+                        updated_at=CURRENT_TIMESTAMP
+                    WHERE id=$1 AND business_id=$2 AND is_blocked=FALSE
+                    RETURNING failed_login_attempts,is_blocked
+                `, [Number(user.id), businessId])).then(result => result.rows[0] || null);
+            }
+            if (accountAttempt?.is_blocked) {
+                await clearLoginFailures(identityKey);
+                await tenantContext.run({ businessId }, () => pool.query(
+                    "DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2",
+                    [Number(user.id), businessId]
+                ));
+                return res.status(423).json({ error: "This account was blocked after five failed sign-in attempts. Ask an Admin or Manager to unblock it." });
+            }
             const lockedUntil = await recordFailedLogin(identityKey);
             if (lockedUntil) {
                 res.setHeader("Retry-After", String(Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000))));
@@ -1627,9 +1664,12 @@ app.post("/api/auth/login", async (req,res)=>{
             }
             return res.status(401).json({error:"Invalid username or password"});
         }
-        await clearLoginFailures(identityKey);
         delete user.password_hash;
         const session = await createSession(user, deviceLicense.device);
+        if (!session) {
+            return res.status(423).json({ error: "This account is blocked or inactive. Ask an Admin or Manager to restore access." });
+        }
+        await clearLoginFailures(identityKey);
         setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "None", secure: true });
         res.json({ success: true, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
@@ -8429,6 +8469,12 @@ async function ensureAccessTables() {
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE SET NULL`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS permissions_override JSONB`);
     await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_owner BOOLEAN NOT NULL DEFAULT FALSE`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN NOT NULL DEFAULT FALSE`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS blocked_at TIMESTAMPTZ`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS blocked_by_user_id INTEGER`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS blocked_by_support_user_id INTEGER`);
+    await pool.query(`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS block_reason VARCHAR(32)`);
     await pool.query(`
         UPDATE access_profiles
         SET permissions=COALESCE(permissions,'{}'::jsonb)
@@ -8580,7 +8626,8 @@ app.get("/api/access", async (req, res) => {
         const businessId = Number(req.user.business_id);
         const [users, profiles] = await Promise.all([
             pool.query(`
-                SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.created_at,
+                SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.is_blocked,
+                       u.blocked_at, u.block_reason, u.failed_login_attempts, u.created_at,
                        p.name AS profile_name
                 FROM app_users u
                 LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
@@ -8694,7 +8741,8 @@ app.get("/api/access/users", async (req, res) => {
     try {
         const businessId = Number(req.user.business_id);
         const result = await pool.query(`
-            SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.created_at,
+            SELECT u.id, u.display_name, u.username, u.profile_id, u.active, u.is_blocked,
+                   u.blocked_at, u.block_reason, u.failed_login_attempts, u.created_at,
                    p.name AS profile_name
             FROM app_users u
             LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
@@ -8704,6 +8752,50 @@ app.get("/api/access/users", async (req, res) => {
         res.json(result.rows);
     } catch (e) {
         res.status(500).json({ error: "Failed to load users" });
+    }
+});
+
+app.patch("/api/access/users/:id/block", async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        const businessId = Number(req.user.business_id);
+        const blocked = req.body?.blocked;
+        if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Invalid user ID" });
+        if (typeof blocked !== "boolean") return res.status(400).json({ error: "Choose whether to block or unblock this user" });
+        if (id === Number(req.user.id)) return res.status(403).json({ error: "You cannot block or unblock your own account" });
+
+        const current = (await pool.query(`
+            SELECT u.id,u.username,u.is_owner,p.name AS profile_name
+            FROM app_users u
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+            WHERE u.id=$1 AND u.business_id=$2
+        `, [id, businessId])).rows[0];
+        if (!current) return res.status(404).json({ error: "User not found" });
+        if (!canManageAssignedRole(req, current.profile_name)) {
+            return res.status(403).json({ error: "Only a user above this account's role can block or unblock it" });
+        }
+        if (current.is_owner && !isSlashOps(req)) {
+            return res.status(403).json({ error: "The business owner account cannot be blocked from Access management" });
+        }
+
+        const updated = (await pool.query(`
+            UPDATE app_users
+            SET is_blocked=$1::boolean,
+                failed_login_attempts=CASE WHEN $1::boolean THEN failed_login_attempts ELSE 0 END,
+                blocked_at=CASE WHEN $1::boolean THEN COALESCE(blocked_at,CURRENT_TIMESTAMP) ELSE NULL END,
+                blocked_by_user_id=CASE WHEN $1::boolean THEN $2::integer ELSE NULL::integer END,
+                blocked_by_support_user_id=NULL::integer,
+                block_reason=CASE WHEN $1::boolean THEN 'manual'::varchar(32) ELSE NULL::varchar(32) END,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=$3::integer AND business_id=$4::integer
+            RETURNING id,username,is_blocked,blocked_at,block_reason,failed_login_attempts
+        `, [blocked, Number(req.user.id), id, businessId])).rows[0];
+        if (blocked) await pool.query("DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2", [id, businessId]);
+        else await clearLoginFailures(loginIdentityKey("business", businessId, updated.username));
+        res.json({ success: true, user: updated });
+    } catch (e) {
+        console.error("Access user block update failed:", e);
+        res.status(500).json({ error: "Failed to update the user's sign-in block" });
     }
 });
 
@@ -10184,7 +10276,7 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
                    b.business_type,b.owner_name,b.phone,b.email,b.address,b.city,b.state,b.active,b.created_at,
                    l.id AS license_id,l.plan,l.license_type,l.add_on,l.duration_months,l.status AS license_status,l.starts_at,l.expires_at,l.max_devices,
                    (SELECT COUNT(*)::int FROM registered_devices d WHERE d.business_id=b.id AND d.status='active') AS active_devices,
-                   (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE) AS active_users,
+                   (SELECT COUNT(*)::int FROM app_users u WHERE u.business_id=b.id AND u.active=TRUE AND u.is_blocked=FALSE) AS active_users,
                    COALESCE(brand.show_powered_by_cafe_pilot,TRUE) AS show_powered_by_cafe_pilot
             FROM businesses b
             LEFT JOIN LATERAL (
@@ -10234,7 +10326,8 @@ app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
         const result=await runSystemContext(async()=>{
             const users=await pool.query(`
-                SELECT u.id,u.display_name,u.username,u.profile_id,u.active,u.created_at,
+                SELECT u.id,u.display_name,u.username,u.profile_id,u.active,u.is_blocked,
+                       u.blocked_at,u.block_reason,u.failed_login_attempts,u.created_at,
                        p.name AS profile_name,
                        u.permissions_override,
                        COALESCE(u.permissions_override,p.permissions,'{}'::jsonb) AS permissions
@@ -10253,6 +10346,35 @@ app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
         });
         res.json(result);
     }catch(e){console.error('Support user list error:',e);res.status(500).json({error:'Failed to load business users'});}
+});
+
+app.patch('/api/support/businesses/:businessId/users/:userId/block', supportAuth, async(req,res)=>{
+    try {
+        const businessId=Number(req.params.businessId),userId=Number(req.params.userId),blocked=req.body?.blocked;
+        if(!Number.isInteger(businessId)||businessId<=0||!Number.isInteger(userId)||userId<=0)return res.status(400).json({error:'Invalid business or user ID'});
+        if(typeof blocked!=='boolean')return res.status(400).json({error:'Choose whether to block or unblock this user'});
+        const updated=await runSystemContext(async()=>{
+            const user=(await pool.query('SELECT id FROM app_users WHERE id=$1 AND business_id=$2',[userId,businessId])).rows[0];
+            if(!user)return null;
+            const row=(await pool.query(`
+                UPDATE app_users
+                SET is_blocked=$1::boolean,
+                    failed_login_attempts=CASE WHEN $1::boolean THEN failed_login_attempts ELSE 0 END,
+                    blocked_at=CASE WHEN $1::boolean THEN COALESCE(blocked_at,CURRENT_TIMESTAMP) ELSE NULL END,
+                    blocked_by_user_id=NULL::integer,
+                    blocked_by_support_user_id=CASE WHEN $1::boolean THEN $2::integer ELSE NULL::integer END,
+                    block_reason=CASE WHEN $1::boolean THEN 'support'::varchar(32) ELSE NULL::varchar(32) END,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=$3::integer AND business_id=$4::integer
+                RETURNING id,username,is_blocked,blocked_at,block_reason,failed_login_attempts
+            `,[blocked,Number(req.supportUser.support_user_id),userId,businessId])).rows[0];
+            if(blocked)await pool.query('DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2',[userId,businessId]);
+            return row;
+        });
+        if(!updated)return res.status(404).json({error:'User not found in this business'});
+        if(!blocked)await clearLoginFailures(loginIdentityKey('business',businessId,updated.username));
+        res.json({success:true,user:updated});
+    }catch(e){console.error('Support user block update failed:',e);res.status(500).json({error:'Failed to update the user sign-in block'});}
 });
 
 app.post('/api/support/businesses/:id/slash-ops/reset-password', supportAuth, async(req,res)=>{

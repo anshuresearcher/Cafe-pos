@@ -1257,6 +1257,7 @@ button { font-family: inherit; }
 .access-status { display:inline-block; padding:4px 9px; border-radius:999px; font-size:12px; }
 .access-status.active { background:#e8f7ed; color:#1e7a3e; }
 .access-status.inactive { background:#f3f3f3; color:#777; }
+.access-status.blocked { margin-top:4px; background:#fff0e8; color:#a34119; }
 .access-modal-content { max-width:900px; width:95%; }
 .access-profile-modal { max-height:90vh; overflow:auto; }
 .access-permission-head, .access-permission-row { display:grid; grid-template-columns:minmax(160px,1fr) repeat(6,55px); gap:7px; align-items:center; }
@@ -2905,6 +2906,9 @@ body.desktop-mode:has(#new-order.active-page) .main{height:calc(100vh - 38px);pa
 body.desktop-mode:has(#new-order.active-page) .main>.page.billing-page.active-page{height:calc(100vh - 132px)}
 body.desktop-mode:has(#new-order.active-page) .app-module-nav{top:38px}
 body.desktop-mode:not(:has(#new-order.active-page)) .app-module-nav{top:38px}
+body.desktop-mode:has(#orders.active-page){overflow:hidden}
+body.desktop-mode:has(#orders.active-page) .main{height:calc(100vh - 38px);padding-top:94px}
+body.desktop-mode:has(#orders.active-page) #orders.active-page{height:calc(100vh - 132px)}
 body.desktop-mode:has(#table-view.active-page){overflow:hidden}
 body.desktop-mode:has(#table-view.active-page) .main{height:calc(100vh - 38px);padding-top:94px}
 body.desktop-mode:has(#table-view.active-page) .main>.billing-table-view-page.active-page{height:calc(100vh - 132px)}
