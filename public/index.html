@@ -297,10 +297,11 @@
                 use the normal Slash POS username and password to log in.
             </div>
 
+            <div class="login-common-actions">
+                <button type="button" class="register-business-link" onclick="showRegisterBusiness()">＋ Register New Business</button>
+            </div>
         </div>
-        <div class="login-common-actions">
-            <button type="button" class="register-business-link" onclick="showRegisterBusiness()">＋ Register New Business</button>
-        </div>
+
     </div>
 </div>
 
@@ -1113,6 +1114,7 @@
                     <h3>
                         Customer Management
                     </h3>
+                    <label class="customer-list-search"><span>Search customers</span><input id="customerSearch" type="search" placeholder="Search by customer name or ID…" autocomplete="off" oninput="filterCustomers(this.value)" aria-label="Search customers by name or ID"></label>
 
 
                     <button
@@ -3173,7 +3175,7 @@ Visit Again 😊</p>
 
 <div id="customerOrderActivityModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="customerOrderActivityTitle">
     <div class="modal-content customer-order-activity-dialog">
-        <div class="modal-header"><div><span class="menu-eyebrow">CUSTOMER HISTORY</span><h2 id="customerOrderActivityTitle">Order activity</h2></div><button class="close-btn" type="button" onclick="closeCustomerOrderActivity()" aria-label="Close customer order activity">✕</button></div>
+        <div class="modal-header"><div><span class="menu-eyebrow">CUSTOMER HISTORY</span><h2 id="customerOrderActivityTitle">Customer orders</h2></div><button class="close-btn" type="button" onclick="closeCustomerOrderActivity()" aria-label="Close customer order activity">✕</button></div>
         <div id="customerOrderActivityList" class="order-activity-list customer-order-history-list" aria-live="polite"><p class="access-muted">Loading orders…</p></div>
     </div>
 </div>
