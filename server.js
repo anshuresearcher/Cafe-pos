@@ -4457,12 +4457,13 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     const order = orderResult.rows[0];
     if (!order) throw new Error("Order not found");
     const isQrOnlineOrder = Boolean(order.public_tracking_token) || /^QR-/i.test(String(order.order_number || ""));
-    if (isQrOnlineOrder && String(order.status || "").trim().toLowerCase() !== "ready") {
-        throw Object.assign(new Error("QR orders must be accepted and marked ready before checkout."), { status: 409 });
-    }
     const collectedBefore = Number(order.collected_before || 0);
     const billTotal = Math.max(0, Number(order.total || 0));
     const remaining = Math.max(0, Math.round((billTotal - collectedBefore) * 100) / 100);
+    const qrOrderStatus = String(order.status || "").trim().toLowerCase();
+    if (isQrOnlineOrder && qrOrderStatus !== "ready" && !(qrOrderStatus === "completed" && remaining > 0.009)) {
+        throw Object.assign(new Error("QR orders must be accepted and marked ready before checkout."), { status: 409 });
+    }
     const nonChargeable = body.nonChargeable === true;
     const checkoutSettings = order.checkout_settings || {};
     const allowedReasons = Array.isArray(checkoutSettings.nonChargeableReasons)
@@ -4472,7 +4473,9 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     if (nonChargeable && (!nonChargeableReason || !allowedReasons.includes(nonChargeableReason))) {
         throw Object.assign(new Error(allowedReasons.length ? "Choose a valid non-chargeable reason." : "Add non-chargeable reasons in Settings before completing this bill."), { status: 400 });
     }
-    const keepOpen = body.keepOpen === true && !nonChargeable;
+    const paymentMode = String(body.paymentMode || "").trim().toLowerCase();
+    const isPartialPayment = !nonChargeable && paymentMode === "partial";
+    const keepOpen = body.keepOpen === true && !nonChargeable && !isPartialPayment;
     const methodLabel = String(body.paymentMethod || "").trim().slice(0, 50) || (nonChargeable ? "Non-chargeable" : "Payment");
     const payments = nonChargeable ? [{ method: "Non-chargeable", amount: 0 }] : (Array.isArray(body.payments) ? body.payments : []);
     const normalizedPayments = payments.map(payment => ({
@@ -4485,14 +4488,14 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     // A full-payment checkout is an intent to settle the current server-side balance.
     // Reuse the server's freshly recalculated due amount to avoid stale client totals
     // after an order edit; split and partial payments still require exact amounts.
-    if (!nonChargeable && !keepOpen && String(body.paymentMode || "").toLowerCase() === "full" && normalizedPayments.length === 1) {
+    if (!nonChargeable && !keepOpen && paymentMode === "full" && normalizedPayments.length === 1) {
         normalizedPayments[0].amount = remaining;
     }
     const currentAmount = Math.round(normalizedPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
-    if (!nonChargeable && keepOpen && (currentAmount <= 0 || currentAmount >= remaining)) {
+    if (!nonChargeable && (keepOpen || isPartialPayment) && (currentAmount <= 0 || currentAmount >= remaining)) {
         throw new Error("A partial payment must be greater than zero and less than the remaining balance.");
     }
-    if (!nonChargeable && !keepOpen && Math.abs(currentAmount - remaining) > 0.01) {
+    if (!nonChargeable && !keepOpen && !isPartialPayment && Math.abs(currentAmount - remaining) > 0.01) {
         throw new Error(`Payments total ${currentAmount.toFixed(2)}, but the remaining balance is ${remaining.toFixed(2)}. Refresh the payment details or correct the split amounts.`);
     }
 
@@ -4529,7 +4532,7 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         await client.query(`UPDATE restaurant_tables SET status='Available' WHERE table_number=$1 AND business_id=$2`, [savedOrder.table_number, businessId]);
     }
 
-    const status = nonChargeable ? "Non-chargeable" : keepOpen ? "Partially Paid" : "Paid";
+    const status = nonChargeable ? "Non-chargeable" : (keepOpen || isPartialPayment) ? "Partially Paid" : "Paid";
     const invoiceMethod = methodLabel;
     const invoiceResult = await client.query(`SELECT * FROM invoices WHERE order_id=$1 FOR UPDATE`, [normalizedOrderId]);
     let invoice = invoiceResult.rows[0] || null;
@@ -6054,7 +6057,7 @@ app.get(
                        p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
                        p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
                        p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
-                       o.order_number,o.order_type,o.table_number,o.pax,o.status AS order_status
+                       o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,o.status AS order_status
                 FROM kot k JOIN orders o ON k.order_id=o.id
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=o.business_id
                 LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=o.business_id
@@ -6369,33 +6372,24 @@ app.get("/api/customers/:id/order-activity", async (req, res) => {
     if (!Number.isInteger(customerId) || customerId <= 0) return res.status(400).json({ error: "Invalid customer" });
     try {
         const customer = await pool.query(
-            `SELECT c.id,c.name,c.phone,c.email
-             FROM customers c
-             WHERE c.id=$1 AND c.business_id=$2
-             LIMIT 1`,
+            "SELECT c.id, c.name FROM customers c WHERE c.id=$1 AND c.business_id=$2 LIMIT 1",
             [customerId, businessId]
         );
         if (!customer.rows.length) return res.status(404).json({ error: "Customer not found" });
-        const activity = await pool.query(`
-            SELECT o.id AS order_id,o.order_number,o.order_type,o.table_number,o.status AS order_status,
-                   o.total AS order_total,o.created_at AS order_created_at,
-                   COALESCE(a.event_type,'Order placed') AS event_type,
-                   COALESCE(NULLIF(a.description,''),'Order created.') AS description,
-                   COALESCE(a.actor,'Staff') AS actor,
-                   COALESCE(a.created_at,o.created_at) AS created_at
-            FROM orders o
-            LEFT JOIN order_activity a ON a.order_id=o.id AND a.business_id=o.business_id
-            WHERE o.customer_id=$1 AND o.business_id=$2
-            ORDER BY COALESCE(a.created_at,o.created_at) DESC,o.id DESC,a.id DESC
-            LIMIT 1000
-        `, [customerId, businessId]);
-        res.json({ customer: customer.rows[0], activity: activity.rows });
+        const count = await pool.query(
+            "SELECT COUNT(*)::int AS total_orders FROM orders WHERE customer_id=$1 AND business_id=$2",
+            [customerId, businessId]
+        );
+        const orders = await pool.query(
+            "SELECT o.id, o.order_number, o.total AS order_total FROM orders o WHERE o.customer_id=$1 AND o.business_id=$2 ORDER BY o.created_at DESC, o.id DESC",
+            [customerId, businessId]
+        );
+        res.json({ customer: customer.rows[0], totalOrders: Number(count.rows[0]?.total_orders || 0), orders: orders.rows });
     } catch (error) {
-        console.error("Customer order activity lookup failed:", error);
-        res.status(500).json({ error: "Could not load customer order activity" });
+        console.error("Customer order lookup failed:", error);
+        res.status(500).json({ error: "Could not load customer orders" });
     }
 });
-
 
 app.put(
     "/api/customers/:id",

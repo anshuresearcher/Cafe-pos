@@ -2633,7 +2633,8 @@ let previousPaymentAllocations = [];
 function getCurrentCheckoutBreakdown() {
     const calculated = getBillingBreakdown();
     const order = currentOpenOrderData?.order;
-    if (!currentOpenOrderId || !isQrTrackedOrder(order)) return calculated;
+    const isCompletedOrder = String(order?.status || "").trim().toLowerCase() === "completed";
+    if (!currentOpenOrderId || (!isQrTrackedOrder(order) && !isCompletedOrder)) return calculated;
     return {
         ...calculated,
         subtotal: Number(order.subtotal || 0),
@@ -2815,7 +2816,7 @@ async function confirmPOSPayment() {
         const amount = Math.round(Number(document.getElementById("cashReceived")?.value || 0) * 100) / 100;
         if (!Number.isFinite(amount) || amount <= 0 || amount >= due) return alert("Enter an amount greater than zero and less than the remaining balance. Use Full Payment to settle the full balance.");
         if (isCashPaymentMethod(selectedPaymentMethod) && Number(document.getElementById("cashReceived")?.value || 0) < amount) return alert("Cash received is less than the payment amount.");
-        return completeOrder(selectedPaymentMethod, { paymentMode: "partial", payments: [{ method: selectedPaymentMethod, amount }], amountDue: due, keepOpen: true });
+        return completeOrder(selectedPaymentMethod, { paymentMode: "partial", payments: [{ method: selectedPaymentMethod, amount }], amountDue: due, keepOpen: false });
     }
     if (paymentCategory === "split") {
         const amount = Math.round(splitPayments.reduce((sum, payment) => sum + payment.amount, 0) * 100) / 100;
@@ -2834,13 +2835,18 @@ let clearNewOrderDraftAfterPayment = false;
 async function completeOrder(paymentMethod, paymentOptions = {}) {
     if (completingOrder) return;
     if (!cart.length) return alert("There are no items in the order.");
-    if (!validateBillingCustomerInfo()) return;
+    const priorOrder = currentOpenOrderData?.order || {};
+    const isCompletedDueCollection = Boolean(
+        currentOpenOrderId &&
+        String(priorOrder.status || "").toLowerCase() === "completed" &&
+        Number(currentOpenOrderData?.paymentSummary?.amountDue || 0) > 0
+    );
+    if (!isCompletedDueCollection && !validateBillingCustomerInfo()) return;
     completingOrder = true;
     const b = getCurrentCheckoutBreakdown();
     const subtotal = b.subtotal;
     const gst = b.gst;
     const total = b.total;
-    const priorOrder = currentOpenOrderData?.order || {};
     const isQrExistingOrder = Boolean(currentOpenOrderId && isQrTrackedOrder(priorOrder));
     const paymentsToRecord = Array.isArray(paymentOptions.payments) ? paymentOptions.payments : [{ method: paymentMethod, amount: total }];
 
@@ -2854,7 +2860,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             if (!customerName || !customerPhone) throw new Error("Please enter both customer name and phone number, or leave customer details blank.");
         }
         let billingCustomer = null;
-        if (customerName && customerPhone && !isQrExistingOrder) {
+        if (customerName && customerPhone && !isQrExistingOrder && !isCompletedDueCollection) {
             const customerResult = await api("/customers/save-for-billing", { method: "POST", body: JSON.stringify(customerDetails) });
             billingCustomer = customerResult.customer || null;
             cacheBillingCustomer(billingCustomer);
@@ -2883,14 +2889,16 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             keepOpen: Boolean(paymentOptions.keepOpen),
             nonChargeable: Boolean(paymentOptions.nonChargeable),
             nonChargeableReason: String(paymentOptions.nonChargeableReason || ""),
-            createKot: !isNewOrder && kotEnabled && !isQrExistingOrder,
+            createKot: !isNewOrder && !isCompletedDueCollection && kotEnabled && !isQrExistingOrder,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null
         };
         let settlement;
         if (currentOpenOrderId) {
             const existing = currentOpenOrderData || await api(`/orders/${currentOpenOrderId}`);
             const orderId = existing.order?.id || currentOpenOrderId;
-            const updated = await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
+            const updated = isCompletedDueCollection
+                ? await api(`/orders/${orderId}/settle`, { method: "POST", body: JSON.stringify(checkoutPayload) })
+                : await api(`/orders/${orderId}`, { method: "PUT", body: JSON.stringify({ ...orderPayload, checkout: checkoutPayload }) });
             order = updated.order;
             orderNumber = order.order_number;
             settlement = updated;
@@ -2953,7 +2961,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             items: billItems
         };
         showPage("new-order");
-        showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : "Sale completed");
+        showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : paymentOptions.paymentMode === "partial" ? "Order closed · balance due" : "Sale completed");
         if (!paymentOptions.keepOpen && appSettings.autoPrint === true) Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
         if (hasPermission("dashboard")) updateDashboard().catch(error=>console.warn("Dashboard refresh failed:",error.message));
     } catch (error) {
@@ -4134,11 +4142,15 @@ async function viewOrder(orderId) {
             const toolbar = document.getElementById("orderDetailsToolbar");
             const orderIdValue = Number(order.id);
             const isQrOrder = isQrTrackedOrder(order);
-            const canTakePayment = !closed && !cancelled && (!isQrOrder || status === "ready");
+            const hasOutstandingBalance = amountDue > 0.009;
+            const canTakePayment = !cancelled && (
+                (closed && hasOutstandingBalance) ||
+                (!closed && (!isQrOrder || status === "ready"))
+            );
             const menuItems = [
                 `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();viewOrderBill(${orderIdValue})">🧾 View bill</button>`,
                 `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();viewOrderActivity(${orderIdValue})">◷ Activity</button>`,
-                canTakePayment && !isQrOrder ? `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();payOpenOrder(${orderIdValue})">💳 Take payment</button>` : "",
+                canTakePayment && (!isQrOrder || closed) ? `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();payOpenOrder(${orderIdValue})">💳 Take payment</button>` : "",
                 canEdit ? `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();editOpenOrder(${orderIdValue})">✎ Edit order</button>` : "",
                 canCancel ? `<button type="button" role="menuitem" class="danger" onclick="closeOrderDetailsMenu();cancelOrder(${orderIdValue})">Cancel order</button>` : "",
                 `<button type="button" role="menuitem" onclick="closeOrderDetailsMenu();printCurrentOrder()">🖨️ Print bill</button>`
@@ -5505,7 +5517,7 @@ function renderKOT(){
     const items=Array.isArray(kotState.items)?kotState.items:[],groups={};
     items.forEach(item=>{
         const ticketNumber=Number(item.ticket_number||1),key=`${item.order_id}:${ticketNumber}`;
-        if(!groups[key])groups[key]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,pax:item.pax,orderStatus:item.order_status,ticketNumber,status:item.status,createdAt:item.created_at,items:[]};
+        if(!groups[key])groups[key]={orderId:item.order_id,orderNumber:item.order_number,orderType:item.order_type,tableNumber:item.table_number,pax:item.pax,orderStatus:item.order_status,ticketNumber,status:item.status,createdAt:item.created_at,orderNote:item.order_notes,items:[]};
         groups[key].items.push(item);
         const ss=groups[key].items.map(i=>i.status);
         groups[key].status=String(groups[key].orderStatus||"").toLowerCase()==="cancelled"?"Cancelled":ss.every(s=>s==="Completed")?"Completed":ss.some(s=>s==="Ready")?"Ready":ss.some(s=>s==="Preparing")?"Preparing":"Pending";
@@ -5526,6 +5538,8 @@ function renderKOT(){
         const actions=order.status==="Cancelled"?'<span class="kot-cancelled-label">✕ Cancelled order · items are crossed out</span>':(appSettings.kotEnabled===false)?'<span class="access-muted">KOT workflow disabled in Settings</span>':(next?`<button class="big-btn" onclick="updateKOTOrder(${order.orderId}, '${next}', ${order.ticketNumber})">${next==="Preparing"?"👨‍🍳 Start Preparing":next==="Ready"?"✅ Mark Ready":"✅ Complete"}</button>`:`<span>✅ Completed</span>`);
         const receivedAt=order.createdAt?formatPOSTime(order.createdAt):"";
         card.innerHTML=`<div class="kot-header"><strong>${esc(order.orderNumber)} · Ticket #${order.ticketNumber}</strong><span>${esc(order.orderType)}</span></div><div class="kot-table">Table: ${esc(order.tableNumber||"-")}${Number(order.pax)>0?` · ${Number(order.pax)} PAX`:""}</div><div class="kot-age-label" title="Ticket arrival time">Received ${esc(formatKOTAge(order.createdAt))}${receivedAt?` · ${esc(receivedAt)}`:""}</div><div class="kot-items">${groupedHtml}</div><div class="kot-status">Status: <strong>${esc(order.status)}</strong></div><div class="kot-actions">${actions}${appSettings.kotEnabled!==false?`<button class="big-btn" onclick="printKOT(${order.orderId},undefined,${order.ticketNumber})">🖨️ Print Ticket #${order.ticketNumber}</button>`:""}</div>`;
+        const orderNote=String(order.orderNote||"").trim();
+        if(orderNote){const note=document.createElement("div");note.className="kot-order-note";note.innerHTML="<strong>Order note:</strong> "+esc(orderNote);card.insertBefore(note,card.querySelector(".kot-items"));}
         container.appendChild(card);
     });
 }
@@ -5682,6 +5696,8 @@ async function openOrderKOTView(orderId = window.selectedOrderId){
                 return `<section class="order-kot-ticket-batch"><h3>Kitchen ticket #${ticketNumber} · ${esc(order?.order_number || `Order #${id}`)}</h3><p class="order-kot-received-time">Received ${esc(ticketAge)} · ${esc(batchTickets[0]?.created_at ? formatPOSDateTime(batchTickets[0].created_at) : "Time unavailable")}</p>${cards}</section>`;
             }).join("");
         }
+        const orderNote=String(tickets?.[0]?.order_notes||"").trim();
+        if(orderNote){body.querySelectorAll(".order-kot-ticket-batch").forEach(section=>{const note=document.createElement("p");note.className="kot-order-note";note.innerHTML="<strong>Order note:</strong> "+esc(orderNote);const received=section.querySelector(".order-kot-received-time");if(received)section.insertBefore(note,received);else section.appendChild(note);});}
         if (printAll) printAll.disabled = !tickets?.length || !canPrintKOT;
     } catch (error) {
         body.innerHTML = `<p class="order-kot-error">Unable to load KOT tickets: ${esc(error.message || "Please try again.")}</p>`;
@@ -5712,7 +5728,10 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
         for(const [groupId,groupTickets] of buckets){
             const first=groupTickets[0],groupName=first.kot_group_name||"Kitchen";
             const ticketTime = parsePOSDate(first.created_at || Date.now());
-            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Ticket: #${Number(first.ticket_number||1)}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Received: ${formatKOTAge(ticketTime)} · ${formatPOSDateTime(ticketTime)}`,"--------------------------------"];
+            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Ticket: #${Number(first.ticket_number||1)}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Received: ${formatKOTAge(ticketTime)} · ${formatPOSDateTime(ticketTime)}`];
+            const orderNote=String(first.order_notes||"").trim();
+            if(orderNote)receipt.push("Order note: "+orderNote);
+            receipt.push("--------------------------------");
             groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0);receipt.push(`${quantity<=0&&cancelled>0?"CANCELLED: ":""}${item.item_name||"Item"} x${quantity}${cancelled>0?` (cancelled x${cancelled})`:""}`);if(options)receipt.push(`  + ${options}`);});
             receipt.push("--------------------------------", "KITCHEN COPY", "", "");
             const text=receipt.join("\n");
@@ -5727,8 +5746,8 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
             }else{
                 const win=window.open("","_blank","width=420,height=700");
                 if(!win)return alert("Please allow pop-ups to print KOT.");
-                const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="item ${fullyCancelled?"cancelled":""}"><span>${fullyCancelled?`<del>${esc(item.item_name||"Item")}</del>`:esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("");
-                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)} · Ticket ${Number(first.ticket_number||1)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.item.cancelled{color:#777}.item del{color:#777}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Ticket: <b>#${Number(first.ticket_number||1)}</b><br>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>Received: <b>${esc(formatKOTAge(ticketTime))}</b><br>${esc(formatPOSDateTime(ticketTime))}</p><div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+                const noteHtml=first.order_notes?'<p class="order-note"><strong>Order note:</strong> '+esc(first.order_notes)+'</p>':'';const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="item ${fullyCancelled?"cancelled":""}"><span>${fullyCancelled?`<del>${esc(item.item_name||"Item")}</del>`:esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("");
+                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)} · Ticket ${Number(first.ticket_number||1)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.order-note{padding:8px;border:1px dashed #777;font-weight:bold}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.item.cancelled{color:#777}.item del{color:#777}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Ticket: <b>#${Number(first.ticket_number||1)}</b><br>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>Received: <b>${esc(formatKOTAge(ticketTime))}</b><br>${esc(formatPOSDateTime(ticketTime))}</p>${noteHtml}<div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
                 win.document.close();
             }
         }
@@ -7624,99 +7643,40 @@ function resetSettings() {
 // ==========================================
 
 async function loadCustomers() {
-
     try {
-
-        currentCustomers =
-            await api("/customers");
-
-
-        const tbody =
-            document.getElementById(
-                "customersTableBody"
-            );
-
-
-        if (!tbody) {
-
-            return;
-
-        }
-
-
-        tbody.innerHTML = "";
-
-
-        currentCustomers.forEach(
-            function(customer) {
-
-                const tr =
-                    document.createElement(
-                        "tr"
-                    );
-
-
-                tr.innerHTML = `
-
-                    <td>
-                        ${customer.id}
-                    </td>
-
-                    <td>
-                        ${esc(customer.name)}
-                    </td>
-
-                    <td>
-                        ${esc(customer.phone)}
-                    </td>
-
-                    <td>
-                        ${esc(
-                            customer.email || "-"
-                        )}
-                    </td>
-
-                    <td>
-                        ${formatPOSDateTime(
-                            customer.created_at
-                        )}
-                    </td>
-
-                    <td>
-                        <button type="button" class="customer-order-activity-btn" onclick="viewCustomerOrderActivity(${Number(customer.id)})" title="View this customer’s orders and order activity">Order activity</button>
-
-                        <button
-                            onclick="editCustomer(${customer.id})"
-                        >
-                            ✏️ Edit
-                        </button>
-
-                        <button
-                            onclick="deleteCustomer(${customer.id})"
-                        >
-                            🗑️ Delete
-                        </button>
-
-                    </td>
-
-                `;
-
-
-                tbody.appendChild(tr);
-
-            }
-        );
-
-
+        currentCustomers = await api("/customers");
+        filterCustomers(document.getElementById("customerSearch")?.value || "");
     } catch (error) {
-
-        console.error(
-            "Customers failed:",
-            error
-        );
-
+        console.error("Customers failed:", error);
     }
+}
 
+function filterCustomers(query) {
+    const tbody = document.getElementById("customersTableBody");
+    if (!tbody) return;
+    const term = String(query || "").trim().toLocaleLowerCase();
+    const customers = Array.isArray(currentCustomers) ? currentCustomers : [];
+    const matches = customers.filter(customer =>
+        !term || String(customer.id || "").toLocaleLowerCase().includes(term) || String(customer.name || "").toLocaleLowerCase().includes(term)
+    );
+    if (!matches.length) {
+        tbody.innerHTML = '<tr><td colspan="6" class="customer-search-empty">' +
+            (term ? "No customers match that name or ID." : "No customers found.") + '</td></tr>';
+        return;
+    }
+    tbody.innerHTML = matches.map(customer => {
+        const customerId = Number(customer.id);
+        return "<tr>" +
+            "<td>" + esc(customer.id) + "</td>" +
+            "<td>" + esc(customer.name || "-") + "</td>" +
+            "<td>" + esc(customer.phone || "-") + "</td>" +
+            "<td>" + esc(customer.email || "-") + "</td>" +
+            "<td>" + esc(formatPOSDateTime(customer.created_at)) + "</td>" +
+            '<td><button type="button" class="customer-order-activity-btn" onclick="viewCustomerOrderActivity(' + customerId + ')">Customer activity</button> ' +
+            '<button type="button" onclick="editCustomer(' + customerId + ')">✏️ Edit</button> ' +
+            '<button type="button" onclick="deleteCustomer(' + customerId + ')">🗑️ Delete</button></td>' +
+            "</tr>";
+    }).join("");
 }
 
 async function viewCustomerOrderActivity(customerId) {
@@ -7726,45 +7686,25 @@ async function viewCustomerOrderActivity(customerId) {
     const title = document.getElementById("customerOrderActivityTitle");
     if (!modal || !list) return;
     modal.style.display = "flex";
-    if (title) title.textContent = "Order activity";
+    if (title) title.textContent = "Customer orders";
     list.innerHTML = '<p class="access-muted">Loading orders…</p>';
     try {
-        const result = await api(`/customers/${Number(customerId)}/order-activity`);
+        const result = await api("/customers/" + Number(customerId) + "/order-activity");
         const customer = result.customer || {};
-        const activity = Array.isArray(result.activity) ? result.activity : [];
-        if (title) title.textContent = customer.name ? `${customer.name} · Order activity` : "Order activity";
-        const orders = new Map();
-        activity.forEach(item => {
-            const key = String(item.order_id || item.order_number || "unknown");
-            if (!orders.has(key)) orders.set(key, { order: item, events: [] });
-            orders.get(key).events.push(item);
-        });
-        list.innerHTML = orders.size ? Array.from(orders.values()).map(({ order, events }) => `
-            <article class="customer-order-history-card">
-                <header class="customer-order-history-header">
-                    <div class="customer-order-history-main">
-                        <span class="customer-order-history-label">ORDER</span>
-                        <strong>${esc(order.order_number || `#${order.order_id}`)}</strong>
-                        <small>${esc(order.order_type || "Order")}${order.table_number ? ` · ${esc(order.table_number)}` : ""} · ${esc(formatPOSDateTime(order.order_created_at || order.created_at))}</small>
-                    </div>
-                    <div class="customer-order-history-total">
-                        <span class="customer-order-status-pill">${esc(order.order_status || "")}</span>
-                        <strong>${money(order.order_total || 0)}</strong>
-                    </div>
-                </header>
-                <div class="customer-order-history-events" aria-label="Activity for this order">
-                    ${events.map(item => `
-                        <div class="customer-order-history-event">
-                            <span class="customer-order-history-marker" aria-hidden="true"></span>
-                            <div><strong>${esc(item.event_type || "Order placed")}</strong>
-                                ${item.description ? `<p>${esc(item.description)}</p>` : ""}
-                                <small>${esc(item.actor || "Staff")} · ${esc(formatPOSDateTime(item.created_at))}</small>
-                            </div>
-                        </div>`).join("")}
-                </div>
-            </article>`).join("") : '<div class="orders-empty-state"><strong>No orders yet</strong><small>This customer has no orders on record.</small></div>';
+        const orders = Array.isArray(result.orders) ? result.orders : [];
+        const totalOrders = Number.isFinite(Number(result.totalOrders)) ? Number(result.totalOrders) : orders.length;
+        if (title) title.textContent = customer.name ? customer.name + " · Orders" : "Customer orders";
+        const orderRows = orders.map(order =>
+            '<article class="customer-order-simple-row"><span class="customer-order-simple-number">' +
+            esc(order.order_number || (order.id ? "#" + order.id : "Order")) +
+            '</span><strong class="customer-order-simple-amount">' + money(order.order_total || 0) + '</strong></article>'
+        ).join("");
+        list.innerHTML = '<div class="customer-order-summary"><span>Total orders</span><strong>' + totalOrders + '</strong></div>' +
+            (orders.length
+                ? '<div class="customer-order-simple-list" aria-label="Customer orders">' + orderRows + '</div>'
+                : '<div class="orders-empty-state"><strong>No orders yet</strong><small>This customer has no orders on record.</small></div>');
     } catch (error) {
-        list.innerHTML = `<p class="access-muted">Unable to load customer order activity: ${esc(error.message || "Please try again.")}</p>`;
+        list.innerHTML = '<p class="access-muted">Unable to load customer orders: ' + esc(error.message || "Please try again.") + '</p>';
     }
 }
 

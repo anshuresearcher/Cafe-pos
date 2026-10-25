@@ -3673,3 +3673,23 @@ body:has(#new-order.active-page) .billing-workspace{height:calc(100% - 60px)}
   #orders .orders-tabs>.orders-tab-btn{min-width:0;padding:9px 4px;font-size:11px;white-space:nowrap}
   #orders .orders-header-actions{grid-column:1/-1;margin-left:0}
 }
+
+#customers .customer-list-search{display:grid;gap:5px;flex:1 1 230px;max-width:360px;margin:0 4px 0 auto;color:#65717d;font-size:11px;font-weight:700}
+#customers .customer-list-search input{width:100%;min-height:40px;padding:9px 12px;border:1px solid #d9e0e7;border-radius:10px;background:#fff;color:#263442;font:inherit;font-size:13px;outline:none;transition:border-color .18s ease,box-shadow .18s ease}
+#customers .customer-list-search input:focus{border-color:#4a8b79;box-shadow:0 0 0 3px rgba(74,139,121,.13)}
+#customers .customer-search-empty{padding:24px 12px;text-align:center;color:#7a8791}
+.customer-order-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:2px 0 12px;padding:14px 16px;border:1px solid #dce6e7;border-radius:12px;background:#f5f9f9;color:#53636b}
+.customer-order-summary span{font-size:13px;font-weight:650}
+.customer-order-summary strong{color:#173d3e;font-size:19px}
+.customer-order-simple-list{display:grid;gap:8px}
+.customer-order-simple-row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 15px;border:1px solid #e2e8ec;border-radius:10px;background:#fff}
+.customer-order-simple-number{overflow-wrap:anywhere;color:#283740;font-size:13px;font-weight:700}
+.customer-order-simple-amount{flex:0 0 auto;color:#1c463c;font-size:14px;font-weight:750}
+@media(max-width:600px){#customers .customer-list-search{flex-basis:100%;max-width:none;margin:0}.customer-order-simple-row{padding:12px}}
+
+.kot-order-note{margin:8px 0;padding:9px 11px;border:1px solid #e5d7a8;border-left:3px solid #c49732;border-radius:7px;background:#fffaf0;color:#5c4b24;font-size:13px;line-height:1.45;overflow-wrap:anywhere}
+.kot-order-note strong{margin-right:4px;color:#473716}
+
+#billModal.bill-preview-sidecar .bill-preview-toolbar>div:last-child{display:flex;align-items:center;gap:8px}
+#billModal.bill-preview-sidecar .bill-preview-toolbar button{display:grid;place-items:center;flex:0 0 44px;width:44px;height:44px;min-width:44px;padding:0;border-radius:10px;font-size:21px;line-height:1}
+#billModal.bill-preview-sidecar .bill-preview-toolbar .bill-preview-close{font-size:27px}
