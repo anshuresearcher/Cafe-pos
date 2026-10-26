@@ -8834,12 +8834,13 @@ app.put("/api/access/users/:id", async (req, res) => {
         if (!canManageAssignedRole(req, currentProfile.rows[0]?.name)) return res.status(403).json({ error: "You can only edit users below your access level" });
         const displayName = req.body.displayName === undefined ? old.display_name : String(req.body.displayName).trim();
         const username = req.body.username === undefined ? old.username : String(req.body.username).trim().toLowerCase();
-        const profileId = req.body.profileId === undefined ? old.profile_id : (req.body.profileId === null || req.body.profileId === "" ? null : Number(req.body.profileId));
+        const profileId = req.body.profileId === undefined ? Number(old.profile_id) : (req.body.profileId === null || req.body.profileId === "" ? null : Number(req.body.profileId));
         const active = req.body.active === undefined ? old.active : Boolean(req.body.active);
         const password = String(req.body.password || "");
         if (!displayName || !username) return res.status(400).json({ error: "Display name and username are required" });
         if (password && password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
         if (profileId === null) return res.status(400).json({ error: "Choose an access profile for this user" });
+        if (!Number.isInteger(profileId) || profileId <= 0) return res.status(400).json({ error: "Choose a valid access profile for this user" });
         if (profileId !== null) {
             const profile = await pool.query(`SELECT id,name FROM access_profiles WHERE id=$1 AND business_id=$2`, [profileId, businessId]);
             if (!profile.rows.length) return res.status(400).json({ error: "Invalid access profile" });
@@ -8847,14 +8848,19 @@ app.put("/api/access/users/:id", async (req, res) => {
         }
         const result = await pool.query(
             password
-                ? `UPDATE app_users SET display_name=$1, username=$2, password_hash=$3, profile_id=$4, active=$5, permissions_override=NULL, is_owner=CASE WHEN $4 IS DISTINCT FROM $8 THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$6 AND business_id=$7 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
-                : `UPDATE app_users SET display_name=$1, username=$2, profile_id=$3, active=$4, permissions_override=NULL, is_owner=CASE WHEN $3 IS DISTINCT FROM $7 THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$5 AND business_id=$6 RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
+                ? `UPDATE app_users SET display_name=$1::varchar(150), username=$2::varchar(100), password_hash=$3::text, profile_id=$4::integer, active=$5::boolean, permissions_override=NULL, is_owner=CASE WHEN $4::integer IS DISTINCT FROM $8::integer THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$6::integer AND business_id=$7::integer RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`
+                : `UPDATE app_users SET display_name=$1::varchar(150), username=$2::varchar(100), profile_id=$3::integer, active=$4::boolean, permissions_override=NULL, is_owner=CASE WHEN $3::integer IS DISTINCT FROM $7::integer THEN FALSE ELSE is_owner END, updated_at=CURRENT_TIMESTAMP WHERE id=$5::integer AND business_id=$6::integer RETURNING id,display_name,username,profile_id,business_id,active,created_at,updated_at`,
             password ? [displayName,username,await hashPassword(password),profileId,active,id,businessId,old.profile_id] : [displayName,username,profileId,active,id,businessId,old.profile_id]
         );
-        if (password || !active) await pool.query(`DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2`, [id, businessId]);
+        if (password || !active || username !== old.username) await pool.query(`DELETE FROM app_sessions WHERE user_id=$1::integer AND business_id=$2::integer`, [id, businessId]);
+        if (password || username !== old.username) {
+            await clearLoginFailures(loginIdentityKey("business", businessId, old.username));
+            if (username !== old.username) await clearLoginFailures(loginIdentityKey("business", businessId, username));
+        }
         res.json({ success: true, user: result.rows[0] });
     } catch (e) {
         if (e.code === "23505") return res.status(409).json({ error: "A user with this username already exists in this business" });
+        console.error("Access user update failed:", e);
         res.status(500).json({ error: "Failed to update user" });
     }
 });
