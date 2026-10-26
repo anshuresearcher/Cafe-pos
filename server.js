@@ -2960,7 +2960,8 @@ async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppli
     }
     const settingsResult = await db.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [businessId]);
     const allSets = Array.isArray(settingsResult.rows[0]?.sets) ? settingsResult.rows[0].sets : [];
-    const configured = allSets.filter(set => assignedIds.includes(String(set.id)));
+    const configuredById = new Map(allSets.map(set => [String(set.id), set]));
+    const configured = assignedIds.map(id => configuredById.get(id)).filter(Boolean);
     const selectedBySet = new Map(submitted.map(set => [String(set.setId), set]));
     const options = [];
     let addOnPrice = 0;
@@ -3077,6 +3078,8 @@ app.post("/api/menu/import", async (req, res) => {
         await client.query(`SELECT set_config('app.business_id',$1,TRUE),set_config('app.system_mode','off',TRUE)`, [String(businessId)]);
         const channelSettingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
         const channelSettings = channelSettingsResult.rows[0]?.settings || {};
+        const configuredOptionSets = Array.isArray(channelSettings.menuOptionSets) ? channelSettings.menuOptionSets : [];
+        const validOptionSetIds = new Set(configuredOptionSets.map(set => String(set.id)));
         for (let index = 0; index < rows.length; index += 1) {
             const source = rows[index] && typeof rows[index] === "object" ? rows[index] : {};
             const name = String(source.name || "").trim();
@@ -3101,7 +3104,7 @@ app.post("/api/menu/import", async (req, res) => {
             seenNames.add(nameKey);
 
             const existing = await client.query(
-                `SELECT id,sku,description,tags,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,sales_channels
+                `SELECT id,sku,description,tags,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,sales_channels,option_set_ids
                  FROM menu WHERE business_id=$1 AND LOWER(name)=LOWER($2) LIMIT 1`,
                 [businessId, name]
             );
@@ -3130,6 +3133,41 @@ app.post("/api/menu/import", async (req, res) => {
                     continue;
                 }
                 seenSkus.add(skuKey);
+            }
+
+            let optionSetIds = Array.isArray(current?.option_set_ids) ? current.option_set_ids.map(String) : [];
+            if (source.optionSetIds !== undefined) {
+                if (!Array.isArray(source.optionSetIds)) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "Item Options must be a list of saved option set IDs." });
+                    continue;
+                }
+                optionSetIds = cleanMenuOptionSetIds(source.optionSetIds);
+                if (optionSetIds.length !== source.optionSetIds.length || optionSetIds.some(id => !validOptionSetIds.has(id))) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "One or more item option sets are invalid or no longer available." });
+                    continue;
+                }
+            }
+
+            let variants = null;
+            if (source.variants !== undefined) {
+                if (!Array.isArray(source.variants) || source.variants.length > 50 || source.variants.some(variant => !String(variant?.name || "").trim() || !Number.isFinite(Number(variant?.price)) || Number(variant.price) < 0)) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "Variants need a name and a non-negative price; use up to 50 variants per item." });
+                    continue;
+                }
+                const variantNames = source.variants.map(variant => String(variant.name).trim().toLocaleLowerCase());
+                if (new Set(variantNames).size !== variantNames.length) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: "Variant names must be unique for each item." });
+                    continue;
+                }
+                try {
+                    variants = cleanVariants(source.variants.map(variant => ({
+                        ...variant,
+                        sku: variant.sku ? cleanMenuSku(variant.sku) : null
+                    })));
+                } catch (error) {
+                    skipped.push({ row: Number(source.rowNumber) || index + 2, name, reason: error.message });
+                    continue;
+                }
             }
 
             const categoryResult = await client.query(
@@ -3167,15 +3205,18 @@ app.post("/api/menu/import", async (req, res) => {
             if (current) {
                 await client.query(`
                     UPDATE menu SET name=$1,price=$2,category=$3,available=$4,kot_group_id=$5,nature=$6,unit=$7,
-                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14,sku=$15,description=$16,sales_channels=$17,tags=$18::jsonb
-                    WHERE id=$19 AND business_id=$20
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), current.id, businessId]);
+                        tax_rate=$8,cgst_rate=$9,sgst_rate=$10,igst_rate=$11,tax_mode=$12,tax_label=$13,channel_prices=$14,sku=$15,description=$16,sales_channels=$17,option_set_ids=$18,tags=$19::jsonb
+                    WHERE id=$20 AND business_id=$21
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), sku, description, JSON.stringify(salesChannels), JSON.stringify(optionSetIds), JSON.stringify(tags), current.id, businessId]);
+                if (variants !== null) await replaceMenuVariants(client, current.id, variants);
                 updated += 1;
             } else {
-                await client.query(`
-                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id,sku,description,sales_channels,tags)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb)
-                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(tags)]);
+                const inserted = await client.query(`
+                    INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,business_id,sku,description,sales_channels,option_set_ids,tags)
+                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb)
+                    RETURNING id
+                `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(optionSetIds), JSON.stringify(tags)]);
+                if (variants !== null) await replaceMenuVariants(client, inserted.rows[0].id, variants);
                 imported += 1;
             }
         }

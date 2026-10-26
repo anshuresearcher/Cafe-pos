@@ -138,6 +138,7 @@ let editingMenuItemId = null;
 let menuOptionSets = [];
 let menuOptionSetsLoaded = false;
 let menuOptionSetsLoadPromise = null;
+let menuOptionSetSelectionOrder = [];
 let currentMenuImageData = null;
 let editingAccessUserId = null;
 let editingAccessProfileId = null;
@@ -2326,7 +2327,7 @@ function openVariantPicker(item){
 }
 function closeVariantPicker(){document.getElementById('variantPickerModal')?.style.setProperty('display','none');}
 function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;closeVariantPicker();openItemOptionPicker(item,v);}
-function itemOptionSets(item){const attached=new Set((Array.isArray(item?.option_set_ids)?item.option_set_ids:[]).map(String));return menuOptionSets.filter(set=>attached.has(String(set.id)));}
+function itemOptionSets(item){const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));return (Array.isArray(item?.option_set_ids)?item.option_set_ids:[]).map(id=>byId.get(String(id))).filter(Boolean);}
 function openItemOptionPicker(item,variant=null){
     const sets=itemOptionSets(item),basePrice=resolveMenuPrice(item,variant||null),modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
     if(!sets.length){addToCart(item.id,variant?`${item.name} — ${variant.name}`:item.name,basePrice,item,variant,[],basePrice);return;}
@@ -5949,8 +5950,34 @@ async function previewMenuItemImage(file){
     }catch(error){alert(error.message||'Unable to read this image.');}
 }
 function clearMenuItemImage(){currentMenuImageData=null;const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();}
-function renderMenuOptionSetPicker(selected=[]){const box=document.getElementById('menuOptionSetPicker');if(!box)return;const selectedIds=new Set((selected||[]).map(String));box.innerHTML=menuOptionSets.length?menuOptionSets.map(set=>`<label class="menu-option-set-choice"><input type="checkbox" value="${esc(set.id)}" ${selectedIds.has(String(set.id))?'checked':''} onchange="updateMenuOptionSetDisclosure()"><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<span class="access-muted">No option sets yet. Create one to attach it to this item.</span>';updateMenuOptionSetDisclosure();}
-function updateMenuOptionSetDisclosure(){const summary=document.getElementById('menuOptionSetSelectionSummary');if(!summary)return;const count=document.querySelectorAll('#menuOptionSetPicker input[type="checkbox"]:checked').length;summary.textContent=count?`${count} option set${count===1?'':'s'} selected`:menuOptionSets.length?'Choose from your saved option sets':'No saved option sets yet';}
+function renderMenuOptionSetPicker(selected=[]){
+    const box=document.getElementById('menuOptionSetPicker');if(!box)return;
+    const knownIds=new Set(menuOptionSets.map(set=>String(set.id)));
+    menuOptionSetSelectionOrder=[...new Set((selected||[]).map(String).filter(id=>knownIds.has(id)))];
+    const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));
+    const selectedMarkup=menuOptionSetSelectionOrder.map((id,index)=>{
+        const set=byId.get(id);if(!set)return '';
+        return `<div class="menu-option-set-selected-row"><label class="menu-option-set-choice"><input type="checkbox" value="${esc(id)}" checked aria-label="Remove ${esc(set.name)} from this item" onchange="toggleMenuOptionSetSelection('${esc(id)}',this.checked)"><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label><div class="menu-option-set-order-actions"><span>${index+1}</span><button type="button" aria-label="Move ${esc(set.name)} up" title="Move up" ${index===0?'disabled':''} onclick="moveMenuOptionSetSelection(${index},-1)">↑</button><button type="button" aria-label="Move ${esc(set.name)} down" title="Move down" ${index===menuOptionSetSelectionOrder.length-1?'disabled':''} onclick="moveMenuOptionSetSelection(${index},1)">↓</button></div></div>`;
+    }).join('');
+    const selectedIds=new Set(menuOptionSetSelectionOrder);
+    const availableSets=menuOptionSets.filter(set=>!selectedIds.has(String(set.id)));
+    const availableMarkup=availableSets.map(set=>`<label class="menu-option-set-choice"><input type="checkbox" value="${esc(set.id)}" aria-label="Add ${esc(set.name)} to this item" onchange="toggleMenuOptionSetSelection('${esc(set.id)}',this.checked)"><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join('');
+    box.innerHTML=menuOptionSets.length?`<section class="menu-option-set-order-section"><div class="menu-option-set-order-heading"><strong>Selected options</strong><small>Use the arrows to choose the order customers see.</small></div><div class="menu-option-set-selected-list">${selectedMarkup||'<p class="menu-option-set-order-empty">No option sets selected yet.</p>'}</div></section><section class="menu-option-set-available-section"><div class="menu-option-set-order-heading"><strong>Available option sets</strong><small>Select each set to attach it to this item.</small></div><div class="menu-option-set-available-list">${availableMarkup||'<p class="menu-option-set-order-empty">All saved option sets are already attached.</p>'}</div></section>`:'<span class="access-muted">No option sets yet. Create one to attach it to this item.</span>';
+    updateMenuOptionSetDisclosure();
+}
+function toggleMenuOptionSetSelection(id,selected){
+    const key=String(id);
+    if(selected&&!menuOptionSetSelectionOrder.includes(key))menuOptionSetSelectionOrder.push(key);
+    else if(!selected)menuOptionSetSelectionOrder=menuOptionSetSelectionOrder.filter(value=>value!==key);
+    renderMenuOptionSetPicker(menuOptionSetSelectionOrder);
+}
+function moveMenuOptionSetSelection(index,direction){
+    const target=index+direction;
+    if(index<0||target<0||index>=menuOptionSetSelectionOrder.length||target>=menuOptionSetSelectionOrder.length)return;
+    [menuOptionSetSelectionOrder[index],menuOptionSetSelectionOrder[target]]=[menuOptionSetSelectionOrder[target],menuOptionSetSelectionOrder[index]];
+    renderMenuOptionSetPicker(menuOptionSetSelectionOrder);
+}
+function updateMenuOptionSetDisclosure(){const summary=document.getElementById('menuOptionSetSelectionSummary');if(!summary)return;const count=menuOptionSetSelectionOrder.length;summary.textContent=count?`${count} option set${count===1?'':'s'} selected · order applied to billing and QR menu`:menuOptionSets.length?'Choose and arrange saved option sets':'No saved option sets yet';}
 async function saveMenuItemV2(){
     const wasEditing=Boolean(editingMenuItemId),name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();
     if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');
@@ -5961,7 +5988,7 @@ async function saveMenuItemV2(){
     for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
     const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
-    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:[...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value),available:existing?existing.available!==false:true};
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:menuOptionSetSelectionOrder.slice(),available:existing?existing.available!==false:true};
     try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();showProfileToast(wasEditing?'Menu item updated successfully.':'Menu item added successfully.',true);}catch(error){alert(error.message);}
 }
 
@@ -6029,7 +6056,7 @@ function openMenuImportModal() {
     const file = document.getElementById("menuImportFile");
     if (file) file.value = "";
     document.getElementById("menuImportFileName").textContent = "No file selected";
-    document.getElementById("menuImportStatus").textContent = "Required columns: Item Name, Category, Price. Optional columns include SKU, Description, channel prices, tax, unit and availability.";
+    document.getElementById("menuImportStatus").textContent = "Required: Item Name, Category and Price. Item Options uses saved option set names separated by semicolons. Item Tags uses semicolon-separated tags. Variants / Sizes uses Name|Price|Unit|SKU, with multiple variants separated by semicolons. Leave these cells blank to keep current values on matching items; enter CLEAR to remove them.";
     document.getElementById("menuImportPreview").innerHTML = "";
     document.getElementById("menuImportSubmit").disabled = true;
     document.getElementById("menuImportModal").style.display = "flex";
@@ -6040,8 +6067,8 @@ function closeMenuImportModal() {
 }
 
 function downloadMenuImportTemplate() {
-    const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode"];
-    const example = ["Masala Chai", "", "Freshly brewed spiced tea.", "Hot Drinks", "80", ...POS_CHANNELS.map(()=>"80"), POS_CHANNELS.map(channel=>channel.label).join("; "), "TRUE", "Goods", "cup", "5", "exclusive"];
+    const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "Item Options", "Item Tags", "Variants / Sizes"];
+    const example = ["Masala Chai", "", "Freshly brewed spiced tea.", "Hot Drinks", "80", ...POS_CHANNELS.map(()=>"80"), POS_CHANNELS.map(channel=>channel.label).join("; "), "TRUE", "Goods", "cup", "5", "exclusive", "", "Beverage; Veg", "Small|80|cup|; Large|120|cup|"];
     const csv = "\uFEFF" + [headers, example].map(row => row.map(value => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -6052,20 +6079,24 @@ function downloadMenuImportTemplate() {
 
 async function downloadExistingMenuSpreadsheet() {
     try {
-        const items = await api("/menu");
+        const [items] = await Promise.all([api("/menu"), loadMenuOptionSets()]);
         if (!Array.isArray(items) || !items.length) {
             alert("No existing menu items were found to export.");
             return;
         }
-        const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode"];
+        const headers = ["Item Name", "SKU", "Description", "Category", "Price", ...POS_CHANNELS.map(channel=>`${channel.label} Price`), "Sale Channels", "Available", "Nature", "Unit", "Tax Rate", "Tax Mode", "Item Options", "Item Tags", "Variants / Sizes"];
+        const optionSetsById=new Map(menuOptionSets.map(set=>[String(set.id),set]));
         const rows = items.map(item => {
             const channelPrices = item.channel_prices || {};
+            const options=(Array.isArray(item.option_set_ids)?item.option_set_ids:[]).map(id=>optionSetsById.get(String(id))?.name).filter(Boolean).join("; ");
+            const tags=(Array.isArray(item.tags)?item.tags:[]).join("; ");
+            const variants=(Array.isArray(item.variants)?item.variants:[]).map(variant=>[variant.name,variant.price,variant.unit||item.unit||"ea",variant.sku||""].join("|")).join("; ");
             return [
                 item.name || "", item.sku || "", item.description || "", item.category || "", item.price ?? "",
                 ...POS_CHANNELS.map(channel=>channelPrices[channel.key]??""),
                 (Array.isArray(item.sales_channels)?item.sales_channels:POS_CHANNELS.map(channel=>channel.key)).map(key=>getSaleChannel(key)?.label||key).join("; "),
                 item.available === false ? "FALSE" : "TRUE", item.nature || "Goods", item.unit || "ea",
-                item.tax_rate ?? "", item.tax_mode || "exclusive"
+                item.tax_rate ?? "", item.tax_mode || "exclusive", options, tags, variants
             ];
         });
         const csvCell = value => `"${String(value ?? "").replace(/"/g, '""')}"`;
@@ -6210,7 +6241,10 @@ function mapMenuImportRows(matrix) {
         nature: findColumn("Nature", "Item Nature"),
         unit: findColumn("Unit", "UOM"),
         taxRate: findColumn("Tax Rate", "GST Rate", "Tax"),
-        taxMode: findColumn("Tax Mode")
+        taxMode: findColumn("Tax Mode"),
+        options: findColumn("Item Options", "Options", "Option Sets", "Add-ons", "Addons"),
+        tags: findColumn("Item Tags", "Tags"),
+        variants: findColumn("Variants / Sizes", "Variants/Sizes", "Variants", "Sizes")
     };
     const channelPriceColumns=POS_CHANNELS.map(channel=>({key:channel.key,column:findColumn(`${channel.label} Price`,`${channel.key} Price`,channel.key==="online"?"Online Price":"")}));
     const salesChannelsColumn=findColumn("Sale Channels","Sales Channels","Available Channels");
@@ -6240,9 +6274,45 @@ function mapMenuImportRows(matrix) {
         const rawAvailable = valueAt(row, columns.available).toLocaleLowerCase();
         const rawNature = valueAt(row, columns.nature);
         const rawTaxMode = valueAt(row, columns.taxMode).toLocaleLowerCase();
+        const rawOptions=valueAt(row,columns.options),rawTags=valueAt(row,columns.tags),rawVariants=valueAt(row,columns.variants);
+        let optionSetIds, tags, variants;
+        if(rawOptions){
+            if(/^clear$/i.test(rawOptions))optionSetIds=[];
+            else{
+                const byName=new Map(menuOptionSets.map(set=>[String(set.name||"").trim().toLocaleLowerCase(),set]));
+                const names=rawOptions.split(";").map(value=>value.trim()).filter(Boolean);
+                const matched=names.map(name=>byName.get(name.toLocaleLowerCase()));
+                const unknown=names.filter((_,optionIndex)=>!matched[optionIndex]);
+                if(!reason&&unknown.length)reason=`Unknown saved option set${unknown.length===1?'':'s'}: ${unknown.join(", ")}.`;
+                else if(!reason&&new Set(names.map(name=>name.toLocaleLowerCase())).size!==names.length)reason="An item option set is listed more than once.";
+                else if(!reason)optionSetIds=matched.map(set=>String(set.id));
+            }
+        }
+        if(rawTags){
+            tags=/^clear$/i.test(rawTags)?[]:rawTags.split(";").map(value=>value.trim()).filter(Boolean);
+            if(!reason&&tags.length>12)reason="An item can have up to 12 tags.";
+        }
+        if(rawVariants){
+            if(/^clear$/i.test(rawVariants))variants=[];
+            else{
+                const entries=rawVariants.split(";").map(value=>value.trim()).filter(Boolean);
+                variants=[];
+                for(const entry of entries){
+                    const [variantName,rawPrice,variantUnit,variantSku,...extra]=entry.split("|").map(value=>value.trim());
+                    const variantPrice=rawPrice===""?NaN:Number(rawPrice);
+                    if(!variantName||!Number.isFinite(variantPrice)||variantPrice<0||extra.length|| (variantSku&&(!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,79}$/.test(variantSku)))){
+                        if(!reason)reason=`Invalid variant “${entry}”. Use Name|Price|Unit|SKU for each variant.`;
+                        break;
+                    }
+                    variants.push({name:variantName,price:variantPrice,unit:variantUnit||valueAt(row,columns.unit)||"ea",sku:variantSku||null});
+                }
+                if(!reason&&variants.length>50)reason="An item can have up to 50 variants in one import row.";
+                if(!reason&&new Set(variants.map(variant=>variant.name.toLocaleLowerCase())).size!==variants.length)reason="Variant names must be unique for each item.";
+            }
+        }
         return {
             rowNumber: index + 2, name, sku, description: valueAt(row, columns.description), category, price,
-            channelPrices, salesChannels,
+            channelPrices, salesChannels, optionSetIds, tags, variants,
             available: rawAvailable === "" ? null : !["false", "no", "0", "inactive", "disabled"].includes(rawAvailable),
             nature: ["goods", "service"].includes(rawNature.toLocaleLowerCase()) ? rawNature[0].toUpperCase() + rawNature.slice(1).toLowerCase() : null,
             unit: valueAt(row, columns.unit) || null,
@@ -6268,13 +6338,14 @@ async function readMenuImportFile(file) {
         const matrix = extension === "xlsx"
             ? await parseMenuXlsx(file)
             : parseMenuDelimited(await file.text(), extension === "tsv" ? "\t" : ",");
+        await loadMenuOptionSets();
         menuImportRows = mapMenuImportRows(matrix);
         const valid = menuImportRows.filter(row => !row.error);
         const invalid = menuImportRows.length - valid.length;
         const limited = menuImportRows.length > 500;
-        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Blank optional columns keep current values on matching items; blank SKU creates one for new items.`;
+        status.textContent = `${menuImportRows.length} item row${menuImportRows.length === 1 ? "" : "s"} found · ${valid.length} ready${invalid ? ` · ${invalid} with errors` : ""}${limited ? " · Split this file into batches of 500 or fewer" : ""}. Blank optional cells keep matching item values; use saved option set names, semicolon-separated tags, and variants as Name|Price|Unit|SKU (separate variants with semicolons). Enter CLEAR to remove options, tags or variants.`;
         const sample = menuImportRows.slice(0, 8);
-        preview.innerHTML = sample.length ? `<div class="table-container"><table><thead><tr><th>Item</th><th>SKU</th><th>Description</th><th>Category</th><th>Price</th><th>Check</th></tr></thead><tbody>${sample.map(row => `<tr><td>${esc(row.name || "-")}</td><td>${esc(row.sku || "Auto")}</td><td>${esc(row.description || "-")}</td><td>${esc(row.category || "-")}</td><td>${Number.isFinite(row.price) ? money(row.price) : "-"}</td><td>${row.error ? `<span class="menu-import-error">${esc(row.error)}</span>` : "Ready"}</td></tr>`).join("")}</tbody></table></div>${menuImportRows.length > sample.length ? `<small>Showing 8 of ${menuImportRows.length} rows.</small>` : ""}` : '<p class="access-muted">No menu rows found.</p>';
+        preview.innerHTML = sample.length ? `<div class="table-container"><table><thead><tr><th>Item</th><th>SKU</th><th>Category</th><th>Price</th><th>Options</th><th>Tags</th><th>Variants</th><th>Check</th></tr></thead><tbody>${sample.map(row => `<tr><td>${esc(row.name || "-")}</td><td>${esc(row.sku || "Auto")}</td><td>${esc(row.category || "-")}</td><td>${Number.isFinite(row.price) ? money(row.price) : "-"}</td><td>${esc((row.optionSetIds||[]).map(id=>menuOptionSets.find(set=>String(set.id)===String(id))?.name).filter(Boolean).join("; ")||"-")}</td><td>${esc((row.tags||[]).join("; ")||"-")}</td><td>${esc((row.variants||[]).map(variant=>variant.name).join("; ")||"-")}</td><td>${row.error ? `<span class="menu-import-error">${esc(row.error)}</span>` : "Ready"}</td></tr>`).join("")}</tbody></table></div>${menuImportRows.length > sample.length ? `<small>Showing 8 of ${menuImportRows.length} rows.</small>` : ""}` : '<p class="access-muted">No menu rows found.</p>';
         submit.disabled = !valid.length || limited;
     } catch (error) {
         menuImportRows = [];
@@ -10545,6 +10616,10 @@ let qrServiceSpeechActive=false;
 let qrServiceSpeechGeneration=0;
 let qrServiceSpeechRetryArmed=false;
 let qrServiceSpeechRetryHandler=null;
+function warmQrTableServiceSpeech(){
+    if(!window.speechSynthesis)return;
+    try{window.speechSynthesis.getVoices();}catch(error){console.warn("Could not initialize Hindi table-service speech:",error.message);}
+}
 function flushPendingQrServiceVoices(){
     if(!pendingQrServiceVoiceRequests.length)return;
     const pending=pendingQrServiceVoiceRequests.splice(0);
@@ -10610,7 +10685,7 @@ function queueQrTableServiceVoice(request){
         let settled=false;
         const finish=voice=>{if(settled)return;settled=true;clearTimeout(timer);window.speechSynthesis.removeEventListener?.("voiceschanged",onVoicesChanged);resolve(voice||null);};
         const onVoicesChanged=()=>{const voice=findHindiVoice();if(voice)finish(voice);};
-        const timer=setTimeout(()=>finish(findHindiVoice()),1000);
+        const timer=setTimeout(()=>finish(findHindiVoice()),5000);
         window.speechSynthesis.addEventListener?.("voiceschanged",onVoicesChanged);
     });
     const speakNext=async()=>{
@@ -10633,9 +10708,9 @@ function queueQrTableServiceVoice(request){
             setTimeout(speakNext,180);
         };
         utterance.onend=finishSpeech;
-        utterance.onerror=finishSpeech;
-        const watchdog=setTimeout(()=>finishSpeech({error:"timeout"}),12000);
-        try{window.speechSynthesis.speak(utterance);}catch(_){finishSpeech({error:"not-allowed"});}
+        utterance.onerror=event=>{if(window.cafePOSDesktop)console.warn("Desktop Hindi table-service speech failed:",event?.error||"unknown error");finishSpeech(event);};
+        const watchdog=setTimeout(()=>finishSpeech({error:"timeout"}),20000);
+        try{window.speechSynthesis.resume();window.speechSynthesis.speak(utterance);}catch(_){finishSpeech({error:"not-allowed"});}
     };
     speakNext();
 }
@@ -10686,6 +10761,7 @@ async function pollQrTableServiceAlerts(){
 function startQrTableServiceAlerts(){
     stopQrTableServiceAlerts();
     if(!currentUser)return;
+    warmQrTableServiceSpeech();
     // Treat login/reload as a fresh session: establish a baseline and don't replay
     // table-service requests that were already present before the POS reopened.
     posQrServiceRequestCursor=null;
