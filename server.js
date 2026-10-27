@@ -165,11 +165,13 @@ app.use((req, res, next) => {
 });
 const standardJsonParser = express.json({ limit: "100kb" });
 const menuImportJsonParser = express.json({ limit: "25mb" });
+const menuCategoryJsonParser = express.json({ limit: "300kb" });
 const businessLogoJsonParser = express.json({ limit: "300kb" });
 const settingsJsonParser = express.json({ limit: "4mb" });
 const publicMenuSettingsJsonParser = express.json({ limit: "4mb" });
 app.use((req, res, next) => {
     const parser = req.path === "/api/menu/import" ? menuImportJsonParser
+        : /^\/api\/menu\/categories(?:\/\d+)?$/.test(req.path) ? menuCategoryJsonParser
         : req.path === "/api/business/profile/logo" ? businessLogoJsonParser
         : req.path === "/api/settings" ? settingsJsonParser
         : req.path === "/api/menu/public-settings" ? publicMenuSettingsJsonParser
@@ -1156,6 +1158,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS address TEXT`);
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS city VARCHAR(100)`);
     await pool.query(`ALTER TABLE customers ADD COLUMN IF NOT EXISTS state VARCHAR(100)`);
+    await pool.query(`ALTER TABLE menu_categories ADD COLUMN IF NOT EXISTS image_url TEXT`);
 
     // Menu master enhancements: item nature, unit, item-level tax and channel pricing.
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS nature VARCHAR(20) NOT NULL DEFAULT 'Goods'`);
@@ -1946,7 +1949,7 @@ app.get("/public-menu/:token", async (req, res) => {
             const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult] = await Promise.all([
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
-                pool.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name", [businessId]),
+                pool.query("SELECT id, name, image_url FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name, id", [businessId]),
                 pool.query("SELECT id, name, description, tags, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
                 pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
                 pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId])
@@ -1954,9 +1957,9 @@ app.get("/public-menu/:token", async (req, res) => {
             const business = businessResult.rows[0] || {};
             const settings = settingsResult.rows[0]?.settings || {};
             const activeCategoryNames = categoryResult.rows.map(row => String(row.name || "")).filter(Boolean);
-            const activeCategoryByKey = new Map(activeCategoryNames.map(name => [name.toLocaleLowerCase(), name]));
+            const activeCategoryByKey = new Map(categoryResult.rows.map(row => [String(row.name || "").toLocaleLowerCase(), row]));
             const preferredCategoryNames = Array.isArray(publication.category_order) ? publication.category_order : [];
-            const orderedCategoryNames = preferredCategoryNames.map(name => activeCategoryByKey.get(String(name || "").trim().toLocaleLowerCase())).filter(Boolean);
+            const orderedCategoryNames = preferredCategoryNames.map(name => activeCategoryByKey.get(String(name || "").trim().toLocaleLowerCase())?.name).filter(Boolean);
             activeCategoryNames.forEach(name => {
                 if (!orderedCategoryNames.some(existing => existing.toLocaleLowerCase() === name.toLocaleLowerCase())) orderedCategoryNames.push(name);
             });
@@ -2016,7 +2019,10 @@ app.get("/public-menu/:token", async (req, res) => {
             priceChannelLabel: qrChannels.find(channel => channel.key === priceChannel)?.label || "Slash",
                 gstCalculationEnabled: settings.gstCalculationEnabled !== false,
                 onlinePromotions: publicOnlinePromotions(settings, priceChannel),
-                categories: orderedCategoryNames,
+                categories: orderedCategoryNames.map(name => {
+                    const category = activeCategoryByKey.get(name.toLocaleLowerCase());
+                    return { name, imageUrl: String(category?.image_url || "") };
+                }),
                 items,
                 tables: tableResult.rows.map(row => String(row.table_number))
             };
@@ -2646,6 +2652,7 @@ app.get("/api/menu/categories", async (req, res) => {
             SELECT
                 id,
                 name,
+                image_url,
                 sort_order,
                 active,
                 created_at,
@@ -2669,6 +2676,7 @@ app.post("/api/menu/categories", async (req, res) => {
         const name = String(req.body.name || "").trim();
         const sortOrder = Number(req.body.sortOrder || 0);
         const active = req.body.active !== false;
+        const imageUrl = cleanMenuImage(req.body?.imageUrl, null, "Category images");
 
         if (!name) {
             return res.status(400).json({ error: "Category name is required" });
@@ -2676,21 +2684,22 @@ app.post("/api/menu/categories", async (req, res) => {
 
         const result = await pool.query(`
             INSERT INTO menu_categories
-            (name, sort_order, active, business_id)
-            VALUES ($1, $2, $3, $4)
+            (name, sort_order, active, business_id, image_url)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING *
         `, [
             name,
             Number.isFinite(sortOrder) ? sortOrder : 0,
             active,
-            businessId
+            businessId,
+            imageUrl
         ]);
 
         res.status(201).json(result.rows[0]);
     } catch (e) {
         console.error("Create menu category error:", e);
         if (e.code === "23505") return res.status(409).json({ error: "Menu category already exists" });
-        res.status(500).json({ error: "Failed to create menu category" });
+        res.status(e.status || 500).json({ error: e.status ? e.message : "Failed to create menu category" });
     }
 });
 
@@ -2704,6 +2713,8 @@ app.put("/api/menu/categories/:id", async (req, res) => {
         const name = String(req.body.name || "").trim();
         const sortOrder = Number(req.body.sortOrder || 0);
         const active = req.body.active !== false;
+        const imageUrlProvided = Object.prototype.hasOwnProperty.call(req.body || {}, "imageUrl");
+        const imageUrl = imageUrlProvided ? cleanMenuImage(req.body.imageUrl, null, "Category images") : null;
         if (!name) return res.status(400).json({ error: "Category name is required" });
 
         const result = await pool.query(`
@@ -2711,6 +2722,7 @@ app.put("/api/menu/categories/:id", async (req, res) => {
             SET name = $1,
                 sort_order = $2,
                 active = $3,
+                image_url = CASE WHEN $6::boolean THEN $7::text ELSE image_url END,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = $4
               AND business_id = $5
@@ -2720,7 +2732,9 @@ app.put("/api/menu/categories/:id", async (req, res) => {
             Number.isFinite(sortOrder) ? sortOrder : 0,
             active,
             id,
-            businessId
+            businessId,
+            imageUrlProvided,
+            imageUrl
         ]);
 
         if (!result.rows.length) return res.status(404).json({ error: "Menu category not found" });
@@ -2728,7 +2742,7 @@ app.put("/api/menu/categories/:id", async (req, res) => {
     } catch (e) {
         console.error("Update menu category error:", e);
         if (e.code === "23505") return res.status(409).json({ error: "Menu category already exists" });
-        res.status(500).json({ error: "Failed to update menu category" });
+        res.status(e.status || 500).json({ error: e.status ? e.message : "Failed to update menu category" });
     }
 });
 
@@ -2887,14 +2901,14 @@ function menuSkuErrorResponse(error, fallback) {
     return { status: error?.status || 500, message: error?.status ? error.message : fallback };
 }
 
-function cleanMenuImage(value, existingValue = null) {
+function cleanMenuImage(value, existingValue = null, imageLabel = "Menu item images") {
     if (value === null || value === undefined || value === "") return null;
     const image = String(value);
     if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
         throw Object.assign(new Error("Choose a JPG, PNG or WebP image."), { status: 400 });
     }
     if (image !== existingValue && Buffer.from(image.slice(image.indexOf(",") + 1), "base64").length > 200 * 1024) {
-        throw Object.assign(new Error("Menu item images must be 200 KB or smaller after compression."), { status: 413 });
+        throw Object.assign(new Error(`${imageLabel} must be 200 KB or smaller after compression.`), { status: 413 });
     }
     return image;
 }

@@ -1436,8 +1436,28 @@ button { font-family: inherit; }
 .menu-category-master-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px 14px;background:#fff;border:1px solid #e7e9ec;border-radius:10px}
 .menu-category-master-row>div:first-child{display:flex;flex-direction:column;gap:3px}
 .menu-category-master-row small{color:#7a7f87}
+.menu-category-master-identity{display:flex!important;flex-direction:row!important;align-items:center;gap:11px!important;min-width:0}
+.menu-category-master-thumb{display:grid;flex:0 0 48px;width:48px;height:48px;place-items:center;overflow:hidden;border:1px solid #e7e9ec;border-radius:12px;background:#f5f6f8;color:#758093;font-size:20px}
+.menu-category-master-thumb img{width:100%;height:100%;object-fit:cover}
 .category-master-modal{max-width:760px}
+.menu-category-image-section{display:grid;gap:14px;margin-top:16px;padding:16px;border:1px solid #e3e8ef;border-radius:15px;background:linear-gradient(145deg,#fafcff,#f5f8fc)}
+.menu-category-image-section h3{margin:4px 0;font-size:16px;color:#1f2937}
+.menu-category-image-section p{margin:0;color:#738094;font-size:12px}
+.menu-category-image-controls{display:flex;align-items:center;gap:14px}
+.menu-category-image-preview{display:flex;align-items:center;gap:11px;min-width:0;min-height:92px;flex:1;padding:10px 12px;border:1px dashed #cbd5e1;border-radius:12px;background:#fff;color:#526174}
+.menu-category-image-preview.has-image{padding:0;overflow:hidden;border-style:solid}
+.menu-category-image-preview img{width:112px;height:90px;flex:0 0 112px;object-fit:cover;border-radius:10px}
+.menu-category-image-placeholder{display:grid;flex:0 0 46px;width:46px;height:46px;place-items:center;border-radius:12px;background:#eef2f7;color:#718096;font-size:21px}
+.menu-category-image-preview strong,.menu-category-image-preview small{display:block}
+.menu-category-image-preview small{margin-top:3px;color:#788598;font-size:11px}
+.menu-category-image-actions{display:grid;justify-items:start;gap:7px}
+.menu-category-image-upload{position:relative;display:inline-flex;min-height:38px;align-items:center;padding:9px 13px;border:1px solid #d4dbe5;border-radius:9px;background:#fff;color:#253248;font-size:12px;font-weight:700;cursor:pointer}
+.menu-category-image-upload:hover{border-color:#8ba5c8;background:#f8fbff}
+.menu-category-image-upload input{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
+.menu-category-image-actions .cancel-btn{min-height:34px;padding:7px 10px;font-size:11px}
+.menu-category-image-actions small{color:#788598;font-size:10px}
 @media(max-width:700px){.menu-category-master-row{flex-direction:column;align-items:flex-start}.menu-category-input-row{align-items:stretch}.menu-category-input-row .table-action-btn{white-space:nowrap}}
+@media(max-width:600px){.menu-category-image-controls{align-items:stretch;flex-direction:column}.menu-category-image-actions{grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.menu-category-image-actions small{grid-column:1/-1}.menu-category-image-upload{justify-content:center}.menu-category-image-actions .cancel-btn{width:100%}}
 
 /* ============================================================
    SLASH NAV + BILLING POLISH (SAFE OVERRIDES)

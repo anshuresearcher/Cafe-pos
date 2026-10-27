@@ -2449,6 +2449,7 @@ function fillBillingCustomerFields(customer = {}) {
 }
 
 let menuCategories=[];
+let currentMenuCategoryImageData=null;
 async function loadMenuCategories(){
     try{
         menuCategories=await api('/menu/categories');
@@ -2471,7 +2472,7 @@ function populateMenuCategorySelect(selected=''){
 function renderMenuCategoryMaster(){
     const grid=document.getElementById('menuCategoryMasterGrid');
     const list=document.getElementById('menuCategoryMasterList');
-    const html=(menuCategories||[]).length?menuCategories.map(c=>`<div class="menu-category-master-row"><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'<div class="empty">No menu categories created yet.</div>';
+    const html=(menuCategories||[]).length?menuCategories.map(c=>`<div class="menu-category-master-row"><div class="menu-category-master-identity"><span class="menu-category-master-thumb">${c.image_url?`<img src="${esc(c.image_url)}" alt="">`:'▦'}</span><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'<div class="empty">No menu categories created yet.</div>';
     if(grid)grid.innerHTML=html;
     if(list)list.innerHTML=html;
 }
@@ -2480,17 +2481,42 @@ function openMenuCategoryModal(category=null){
     document.getElementById('menuCategoryName').value=category?.name||'';
     document.getElementById('menuCategorySort').value=category?.sort_order??0;
     document.getElementById('menuCategoryActive').value=category?.active===false?'false':'true';
+    currentMenuCategoryImageData=category?.image_url||category?.imageUrl||null;
+    const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';
+    renderMenuCategoryImagePreview();
     document.getElementById('menuCategoryModalTitle').textContent=category?'Edit Menu Category':'Create Menu Category';
     document.getElementById('menuCategoryModal').style.display='flex';
     renderMenuCategoryMaster();
 }
 function closeMenuCategoryModal(){document.getElementById('menuCategoryModal')?.style.setProperty('display','none');}
 function editMenuCategory(id){const c=menuCategories.find(x=>Number(x.id)===Number(id));if(c)openMenuCategoryModal(c);}
+function renderMenuCategoryImagePreview(){const box=document.getElementById('menuCategoryImagePreview');if(!box)return;box.innerHTML=currentMenuCategoryImageData?`<img src="${esc(currentMenuCategoryImageData)}" alt="Category image preview">`:'<span class="menu-category-image-placeholder">▦</span><span><strong>No category image</strong><small>Add an image to feature this category on the guest QR menu.</small></span>';box.classList.toggle('has-image',Boolean(currentMenuCategoryImageData));}
+async function previewMenuCategoryImage(file){
+    if(!file)return;
+    if(!['image/jpeg','image/png','image/webp'].includes(file.type))return alert('Choose a JPG, PNG or WebP image.');
+    if(file.size>8*1024*1024)return alert('Choose an image smaller than 8 MB before compression.');
+    try{
+        const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),limit=200*1024;
+        let longest=Math.min(1200,Math.max(bitmap.width,bitmap.height)),quality=0.86,encoded='';
+        for(let attempt=0;attempt<24;attempt++){
+            const scale=Math.min(1,longest/Math.max(bitmap.width,bitmap.height));
+            canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+            const context=canvas.getContext('2d',{alpha:false});context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);
+            encoded=canvas.toDataURL('image/jpeg',quality);
+            if(atob(encoded.split(',')[1]).length<=limit)break;
+            if(quality>0.52)quality=Math.max(0.5,quality-0.08);else longest=Math.max(240,Math.floor(longest*0.84));
+        }
+        bitmap.close?.();
+        if(atob(encoded.split(',')[1]).length>limit)throw new Error('Could not compress this image below 200 KB. Choose a smaller image.');
+        currentMenuCategoryImageData=encoded;renderMenuCategoryImagePreview();
+    }catch(error){alert(error.message||'Unable to read this image.');}
+}
+function clearMenuCategoryImage(){currentMenuCategoryImageData=null;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';renderMenuCategoryImagePreview();}
 async function saveMenuCategory(){
     const id=document.getElementById('menuCategoryEditingId')?.value||'';
-    const payload={name:document.getElementById('menuCategoryName')?.value.trim(),sortOrder:Number(document.getElementById('menuCategorySort')?.value||0),active:document.getElementById('menuCategoryActive')?.value!=='false'};
+    const payload={name:document.getElementById('menuCategoryName')?.value.trim(),sortOrder:Number(document.getElementById('menuCategorySort')?.value||0),active:document.getElementById('menuCategoryActive')?.value!=='false',imageUrl:currentMenuCategoryImageData};
     if(!payload.name)return alert('Enter a category name.');
-    try{await api(id?`/menu/categories/${id}`:'/menu/categories',{method:id?'PUT':'POST',body:JSON.stringify(payload)});document.getElementById('menuCategoryName').value='';await loadMenuCategories();await loadMenu();alert(id?'Category updated successfully.':'Category created successfully.');if(!id)document.getElementById('menuCategoryModalTitle').textContent='Create Menu Category';}catch(e){alert(e.message);}
+    try{const saved=await api(id?`/menu/categories/${id}`:'/menu/categories',{method:id?'PUT':'POST',body:JSON.stringify(payload)});await loadMenuCategories();await loadMenu();if(!id){document.getElementById('menuCategoryName').value='';currentMenuCategoryImageData=null;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';renderMenuCategoryImagePreview();document.getElementById('menuCategoryModalTitle').textContent='Create Menu Category';const menuSelect=document.getElementById('menuCategory');if(menuSelect&&payload.active)menuSelect.value=payload.name;}else{currentMenuCategoryImageData=saved?.image_url||payload.imageUrl;renderMenuCategoryImagePreview();}alert(id?'Category updated successfully.':'Category created successfully.');}catch(e){alert(e.message);}
 }
 async function toggleMenuCategory(id){const c=menuCategories.find(x=>Number(x.id)===Number(id));if(!c)return;try{await api(`/menu/categories/${id}`,{method:'PUT',body:JSON.stringify({name:c.name,sortOrder:c.sort_order,active:!c.active})});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
 async function deleteMenuCategory(id){if(!confirm('Delete this menu category?'))return;try{await api(`/menu/categories/${id}`,{method:'DELETE'});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
