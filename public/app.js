@@ -2327,9 +2327,9 @@ function openVariantPicker(item){
 }
 function closeVariantPicker(){document.getElementById('variantPickerModal')?.style.setProperty('display','none');}
 function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;closeVariantPicker();openItemOptionPicker(item,v);}
-function itemOptionSets(item){const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));return (Array.isArray(item?.option_set_ids)?item.option_set_ids:[]).map(id=>byId.get(String(id))).filter(Boolean);}
+function itemOptionSets(item,variant=null){const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));const ids=[...(Array.isArray(item?.option_set_ids)?item.option_set_ids:[]),...(Array.isArray(variant?.option_set_ids)?variant.option_set_ids:[])];return [...new Set(ids.map(String))].map(id=>byId.get(id)).filter(Boolean);}
 function openItemOptionPicker(item,variant=null){
-    const sets=itemOptionSets(item),basePrice=resolveMenuPrice(item,variant||null),modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
+    const sets=itemOptionSets(item,variant),basePrice=resolveMenuPrice(item,variant||null),modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
     if(!sets.length){addToCart(item.id,variant?`${item.name} — ${variant.name}`:item.name,basePrice,item,variant,[],basePrice);return;}
     if(!modal||!body)return;
     modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(variant?.id||'');
@@ -2343,7 +2343,7 @@ function openItemOptionPicker(item,variant=null){
 }
 function closeItemOptions(){document.getElementById('itemOptionsModal')?.style.setProperty('display','none');}
 function confirmItemOptions(){
-    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked')],sets=itemOptionSets(item),selections=[];
+    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked')],sets=itemOptionSets(item,variant),selections=[];
     for(const set of sets){const chosen=selected.filter(input=>String(input.dataset.setId)===String(set.id)),min=Number(set.minSelections||0),max=Number(set.maxSelections||1);if(chosen.length<min||chosen.length>max)return alert(`Choose ${min===max?min:`${min} to ${max}`} option${max===1?'':'s'} for ${set.name}.`);if(chosen.length)selections.push({setId:String(set.id),setName:set.name,options:chosen.map(input=>{const option=(set.options||[]).find(value=>String(value.id)===input.dataset.optionId);return {id:String(option.id),name:option.name,price:Number(option.price||0)};})});}
     const basePrice=Number(modal.dataset.basePrice||0),extra=selections.flatMap(set=>set.options).reduce((sum,option)=>sum+Number(option.price||0),0);
     addToCart(menuId,modal.dataset.itemName,basePrice+extra,item,variant,selections,basePrice);closeItemOptions();
@@ -2614,6 +2614,17 @@ async function loadMenu() {
 
 function menuIcon() { return ""; }
 
+function setBillingMenuView(view){
+    const mode=["grid","list","tile"].includes(String(view))?String(view):"grid";
+    const grid=document.getElementById("billingMenuGrid");
+    if(!grid)return;
+    grid.dataset.view=mode;
+    document.querySelectorAll("[data-billing-menu-view]").forEach(button=>{
+        const active=button.dataset.billingMenuView===mode;
+        button.classList.toggle("is-active",active);
+        button.setAttribute("aria-pressed",active?"true":"false");
+    });
+}
 
 function filterCategory(category, button) {
     const selectedCategory = String(category || "")
@@ -5884,7 +5895,7 @@ function openMenuPriceEditor(id){
     document.getElementById('menuPriceModalTitle').textContent=`Manage prices · ${item.name}`;
     document.getElementById('managedMenuBasePrice').value=item.price??0;
     document.getElementById('managedMenuChannelPrices').innerHTML=POS_CHANNELS.map(channel=>`<div class="form-group"><label for="managedMenuPrice_${channel.key}">${esc(channel.label)} price</label><input id="managedMenuPrice_${channel.key}" type="number" min="0" step="0.01" value="${Number(prices[channel.key]??item.price??0)}"></div>`).join('');
-    document.getElementById('menuVariantPriceEditor').innerHTML=(item.variants||[]).map(variant=>`<label class="menu-price-variant-row"><span>${esc(variant.name)}${variant.unit?' · '+esc(variant.unit):''}</span><input class="managed-menu-variant-price" type="number" min="0" step="0.01" data-id="${Number(variant.id)}" value="${Number(variant.price||0)}" aria-label="${esc(variant.name)} price"></label>`).join('')||'<p class="access-muted">This item has no size variants.</p>';
+    document.getElementById('menuVariantPriceEditor').innerHTML=(item.variants||[]).map(variant=>`<div class="menu-price-variant-row" data-id="${Number(variant.id)}"><strong>${esc(variant.name)}${variant.unit?' · '+esc(variant.unit):''}</strong><div class="menu-price-variant-channels"><label>Base price<input class="managed-menu-variant-price" type="number" min="0" step="0.01" data-id="${Number(variant.id)}" value="${Number(variant.price||0)}" aria-label="${esc(variant.name)} base price"></label>${POS_CHANNELS.map(channel=>`<label>${esc(channel.label)}<input class="managed-menu-variant-channel-price" type="number" min="0" step="0.01" data-channel="${esc(channel.key)}" value="${variant.channel_prices?.[channel.key]??''}" placeholder="Use base price" aria-label="${esc(variant.name)} ${esc(channel.label)} price"></label>`).join('')}</div></div>`).join('')||'<p class="access-muted">This item has no size variants.</p>';
     document.getElementById('menuPriceModal').style.display='flex';
 }
 function closeMenuPriceEditor(){document.getElementById('menuPriceModal').style.display='none';menuPriceEditingId=null;}
@@ -5894,9 +5905,11 @@ async function saveMenuPriceEditor(){
     const channelPrices={};
     for(const channel of POS_CHANNELS){const value=document.getElementById('managedMenuPrice_'+channel.key)?.value;if(value===''||!Number.isFinite(Number(value))||Number(value)<0)return alert(`Enter a valid ${channel.label} price.`);channelPrices[channel.key]=Number(value);}
     if(Object.values(fields).some(value=>value===''||!Number.isFinite(Number(value))||Number(value)<0))return alert('Enter a valid price in every field.');
-    const variantInputs=[...document.querySelectorAll('.managed-menu-variant-price')];
-    if(variantInputs.some(input=>input.value===''||!Number.isFinite(Number(input.value))||Number(input.value)<0))return alert('Enter a valid price for every size variant.');
-    const payload={price:Number(fields.price),channelPrices,variants:variantInputs.map(input=>({id:Number(input.dataset.id),price:Number(input.value)}))};
+    const variantRows=[...document.querySelectorAll('#menuVariantPriceEditor .menu-price-variant-row')];
+    const variantInputs=variantRows.map(row=>row.querySelector('.managed-menu-variant-price'));
+    const channelInputs=[...document.querySelectorAll('#menuVariantPriceEditor .managed-menu-variant-channel-price')];
+    if(variantInputs.some(input=>input.value===''||!Number.isFinite(Number(input.value))||Number(input.value)<0)||channelInputs.some(input=>input.value!==''&&(!Number.isFinite(Number(input.value))||Number(input.value)<0)))return alert('Enter a valid base price and any channel-specific prices.');
+    const payload={price:Number(fields.price),channelPrices,variants:variantRows.map(row=>({id:Number(row.dataset.id),price:Number(row.querySelector('.managed-menu-variant-price').value),channelPrices:Object.fromEntries([...row.querySelectorAll('.managed-menu-variant-channel-price')].filter(input=>input.value!=='').map(input=>[input.dataset.channel,Number(input.value)]))}))};
     try{await api(`/menu/${menuPriceEditingId}/prices`,{method:'PATCH',body:JSON.stringify(payload)});closeMenuPriceEditor();await loadMenuManagement();await loadMenu();showProfileToast('Menu prices updated.');}
     catch(error){alert(error.message||'Could not update menu prices.');}
 }
@@ -5951,7 +5964,7 @@ function openAddMenuModal(item=null){
     document.getElementById('addMenuModal').style.display='flex';
 }
 function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';document.getElementById('menuTagPicker')?.removeAttribute('open');editingMenuItemId=null;currentMenuImageData=null;}
-function menuVariantEditorRow(variant={}){return `<div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn" onclick="this.parentElement.remove()">✕</button></div>`;}
+function menuVariantEditorRow(variant={}){const selected=new Set((variant.option_set_ids||variant.optionSetIds||[]).map(String));const options=menuOptionSets.length?menuOptionSets.map(set=>`<label class="variant-option-set-choice"><input class="variant-option-set" type="checkbox" value="${esc(set.id)}" ${selected.has(String(set.id))?'checked':''}><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<div class="variant-option-set-empty">Create option sets first. Item-wide options are inherited by every variant.</div>';return `<div class="variant-editor-card"><div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Base price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn variant-remove" onclick="this.closest('.variant-editor-card').remove()">✕</button></div><details class="variant-editor-details"><summary>Channel prices &amp; add-ons for this size</summary><div class="variant-editor-panel"><div class="variant-channel-price-grid">${POS_CHANNELS.map(channel=>`<label>${esc(channel.label)} price<input class="variant-channel-price" type="number" min="0" step="0.01" data-channel="${esc(channel.key)}" value="${variant.channel_prices?.[channel.key]??variant.channelPrices?.[channel.key]??''}" placeholder="Use base price"></label>`).join('')}</div><div><span class="menu-eyebrow">VARIANT ADD-ONS</span><p class="access-muted">Item-wide add-ons still apply. Select extra option sets for this variant only.</p><div class="variant-option-set-list">${options}</div></div></div></details></div>`;}
 function renderMenuVariantsEditor(variants=[]){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(variants||[]).map(menuVariantEditorRow).join('');}
 function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
 function renderMenuItemImagePreview(){const box=document.getElementById('menuImagePreview');if(!box)return;box.innerHTML=currentMenuImageData?`<img src="${esc(currentMenuImageData)}" alt="Menu item preview">`:'<span>No image selected</span>';}
@@ -6012,7 +6025,13 @@ async function saveMenuItemV2(){
     const salesChannels=[...document.querySelectorAll('#menuChannelAvailability input:checked')].map(input=>input.value);
     if(!salesChannels.length)return alert('Choose at least one sale channel for this item.');
     for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
-    const variants=[...document.querySelectorAll('#menuVariantsEditor .variant-editor-row')].map(row=>({name:row.querySelector('.variant-name')?.value.trim(),sku:row.querySelector('.variant-sku')?.value.trim(),price:Number(row.querySelector('.variant-price')?.value),unit:row.querySelector('.variant-unit')?.value||'ea'})).filter(v=>v.name&&Number.isFinite(v.price)&&v.price>=0);
+    const variants=[];
+    for(const row of document.querySelectorAll('#menuVariantsEditor .variant-editor-card')){
+        const variantName=row.querySelector('.variant-name')?.value.trim(),variantPrice=Number(row.querySelector('.variant-price')?.value),channelPrices={};
+        for(const input of row.querySelectorAll('.variant-channel-price')){const raw=String(input.value||'').trim();if(raw==='')continue;const value=Number(raw);if(!Number.isFinite(value)||value<0)return alert(`Enter a valid ${input.dataset.channel} price for ${variantName||'the variant'}.`);channelPrices[input.dataset.channel]=value;}
+        if(variantName&&(!Number.isFinite(variantPrice)||variantPrice<0))return alert(`Enter a valid base price for ${variantName}.`);
+        if(variantName)variants.push({name:variantName,sku:row.querySelector('.variant-sku')?.value.trim(),price:variantPrice,unit:row.querySelector('.variant-unit')?.value||'ea',channelPrices,optionSetIds:[...row.querySelectorAll('.variant-option-set:checked')].map(input=>input.value)});
+    }
     const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
     const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:menuOptionSetSelectionOrder.slice(),available:existing?existing.available!==false:true};
     try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();showProfileToast(wasEditing?'Menu item updated successfully.':'Menu item added successfully.',true);}catch(error){alert(error.message);}
@@ -9861,7 +9880,7 @@ function printerReceiptText(data,paperWidth="80"){
         else lines.push(...pair(data.paymentMethod||"Payment",moneyValue(amountCollected)));
         lines.push(...pair("Balance",moneyValue(amountDue)));
     }
-    lines.push(divider,...center("RCM applicable: NO"));
+    lines.push(divider);
     const footer=String(appSettings.footer||appSettings.customerMessage||"Visit Again!\nThank you.").replace("Thank You!\nVisit Again 😊","Visit Again!\nThank you.");
     footer.split(/\r?\n/).map(value=>value.trim()).filter(Boolean).forEach(value=>center(value).forEach(line=>lines.push(line)));
     return lines.filter(Boolean).join("\n")+"\n\n\n";
@@ -10426,16 +10445,21 @@ async function loadTableQrMenuModule(){
         qrMenuCategoryNames.forEach(name=>{if(!qrCategoryOrder.some(entry=>entry.toLocaleLowerCase()===name.toLocaleLowerCase()))qrCategoryOrder.push(name);});
         renderQrCategoryOrder();
         const enabled=document.getElementById("publicMenuEnabled"),channel=document.getElementById("publicMenuPriceChannel"),url=document.getElementById("publicMenuUrl"),baseField=document.getElementById("publicMenuBaseUrl"),status=document.getElementById("publicMenuStatus");
+        const outletOpen=document.getElementById("publicMenuOutletOpen"),hoursEnabled=document.getElementById("publicMenuHoursEnabled"),openTime=document.getElementById("publicMenuOpenTime"),closeTime=document.getElementById("publicMenuCloseTime");
         tableQrMenuHeroImages=Array.isArray(publication.heroImages)?publication.heroImages.slice(0,6):[];
         renderQrHeroImages();
         if(enabled)enabled.checked=publication.enabled===true;
+        if(outletOpen)outletOpen.checked=publication.outletOpen!==false;
+        if(hoursEnabled)hoursEnabled.checked=publication.hoursEnabled===true;
+        if(openTime)openTime.value=publication.openTime||"09:00";
+        if(closeTime)closeTime.value=publication.closeTime||"22:00";
         if(channel){const choices=Array.isArray(publication.qrMenuChannels)?publication.qrMenuChannels:POS_CHANNELS.filter(entry=>entry.qrMenu);channel.innerHTML=choices.map(entry=>`<option value="${esc(entry.key)}">${esc(entry.label)}</option>`).join("");channel.value=choices.some(entry=>entry.key===publication.priceChannel)?publication.priceChannel:choices[0]?.key||"online";}
         const isLoopback=["localhost","127.0.0.1","::1"].includes(window.location.hostname.toLowerCase());
         const suggestedBase=publication.publicBaseUrl||(isLoopback&&publication.localNetworkUrl)||window.location.origin;
         if(baseField)baseField.value=suggestedBase;
         if(url)url.value=parseQrMenuBaseUrl(suggestedBase)+"/restaurant/"+publication.token;
         updateRestaurantMenuLinkPreview();
-        if(status)status.textContent=publication.enabled?"Your QR menu is live. Guests enter their details, then open the published menu.":"Your QR menu is private until you turn publishing on.";
+        if(status)status.textContent=!publication.enabled?"Your QR menu is private until you turn publishing on.":publication.outletOpen===false?"The menu is live, but QR ordering is switched off. Guests can browse and see the closed message.":publication.hoursEnabled?"QR ordering is live during "+(publication.openTime||"09:00")+"–"+(publication.closeTime||"22:00")+" IST.":"Your QR menu is live and accepting orders.";
         renderQrStockItems();
         await renderTableQrCards();
     }catch(error){
@@ -10518,19 +10542,43 @@ async function saveQrCategoryOrder(){
     }
 }
 
-async function saveRestaurantMenuSettings(){
+let qrMenuSettingsSaving=false;
+async function saveRestaurantMenuSettings(section="all"){
+    if(qrMenuSettingsSaving)return;
     const enabled=document.getElementById("publicMenuEnabled")?.checked===true;
+    const outletOpen=document.getElementById("publicMenuOutletOpen")?.checked===true;
+    const hoursEnabled=document.getElementById("publicMenuHoursEnabled")?.checked===true;
+    const openTime=document.getElementById("publicMenuOpenTime")?.value||"09:00";
+    const closeTime=document.getElementById("publicMenuCloseTime")?.value||"22:00";
     const priceChannel=document.getElementById("publicMenuPriceChannel")?.value||"online";
     const status=document.getElementById("publicMenuStatus");
     let publicBaseUrl;
-    try{publicBaseUrl=parseQrMenuBaseUrl(document.getElementById("publicMenuBaseUrl")?.value||getQrMenuBaseUrl());}
-    catch(error){if(status)status.textContent=error.message||"Enter a valid QR website address.";return;}
+    const availabilityStatus=document.getElementById("qrAvailabilityStatus"),saveButton=section==="availability"?document.querySelector(".qr-availability-save"):null;
+    if(section!=="availability"){
+        try{publicBaseUrl=parseQrMenuBaseUrl(document.getElementById("publicMenuBaseUrl")?.value||getQrMenuBaseUrl());}
+        catch(error){const message=error.message||"Enter a valid QR website address.";if(status)status.textContent=message;if(section==="availability"&&availabilityStatus)availabilityStatus.textContent=message;showProfileToast(message,true);return;}
+    }
+    qrMenuSettingsSaving=true;
+    if(saveButton){saveButton.disabled=true;saveButton.dataset.originalText=saveButton.textContent;saveButton.textContent="Saving…";}
+    if(section==="availability"&&availabilityStatus){availabilityStatus.classList.remove("is-error");availabilityStatus.textContent="Saving QR ordering hours…";}
     try{
-        await api("/menu/public-settings",{method:"PUT",body:JSON.stringify({enabled,priceChannel,publicBaseUrl,heroImages:tableQrMenuHeroImages})});
+        const payload={enabled,outletOpen,hoursEnabled,openTime,closeTime,priceChannel,heroImages:tableQrMenuHeroImages};
+        if(publicBaseUrl!==undefined)payload.publicBaseUrl=publicBaseUrl;
+        const saved=await api("/menu/public-settings",{method:"PUT",body:JSON.stringify(payload)});
+        restaurantMenuPublication={...(restaurantMenuPublication||{}),...saved};
+        const successMessage=section==="availability"?"QR ordering availability saved successfully.":section==="hero"?"QR menu settings and hero images saved successfully.":section==="address"?"QR menu address saved successfully.":"QR menu settings saved successfully.";
+        if(status)status.textContent=successMessage;
+        if(availabilityStatus){availabilityStatus.classList.remove("is-error");availabilityStatus.textContent=section==="availability"?successMessage:"";}
+        showProfileToast(successMessage,true);
         await loadTableQrMenuModule();
-        showProfileToast("QR menu settings and hero images saved.");
     }catch(error){
-        if(status)status.textContent=error.message||"Could not save the QR menu settings.";
+        const message=error.message||"Could not save the QR menu settings.";
+        if(status)status.textContent=message;
+        if(section==="availability"&&availabilityStatus){availabilityStatus.classList.add("is-error");availabilityStatus.textContent=message;}
+        showProfileToast(message,true);
+    }finally{
+        qrMenuSettingsSaving=false;
+        if(saveButton){saveButton.disabled=false;saveButton.textContent=saveButton.dataset.originalText||"Save availability";delete saveButton.dataset.originalText;}
     }
 }
 async function setQrMenuStock(id,inStock){
@@ -10642,11 +10690,26 @@ let qrServiceSpeechActive=false;
 let qrServiceSpeechGeneration=0;
 let qrServiceSpeechRetryArmed=false;
 let qrServiceSpeechRetryHandler=null;
+let qrServiceVoiceOperational=true;
+function setQrServiceVoiceOperational(operational){
+    const next=operational!==false;
+    if(qrServiceVoiceOperational===next)return;
+    qrServiceVoiceOperational=next;
+    if(next)return;
+    qrServiceSpeechQueue=[];
+    pendingQrServiceVoiceRequests=[];
+    qrServiceSpeechGeneration++;
+    qrServiceSpeechActive=false;
+    if(qrServiceSpeechRetryHandler){document.removeEventListener("pointerdown",qrServiceSpeechRetryHandler,true);document.removeEventListener("keydown",qrServiceSpeechRetryHandler,true);qrServiceSpeechRetryHandler=null;}
+    qrServiceSpeechRetryArmed=false;
+    try{window.speechSynthesis?.cancel();}catch(_){}
+}
 function warmQrTableServiceSpeech(){
     if(!window.speechSynthesis)return;
     try{window.speechSynthesis.getVoices();}catch(error){console.warn("Could not initialize Hindi table-service speech:",error.message);}
 }
 function flushPendingQrServiceVoices(){
+    if(!qrServiceVoiceOperational){pendingQrServiceVoiceRequests=[];return;}
     if(!pendingQrServiceVoiceRequests.length)return;
     const pending=pendingQrServiceVoiceRequests.splice(0);
     pending.forEach(queueQrTableServiceVoice);
@@ -10683,6 +10746,7 @@ function showQrTableServiceRequestToast(request){
     toast._hideTimer=setTimeout(()=>{toast.classList.remove("show");setTimeout(()=>toast.remove(),220);},18000);
 }
 function queueQrTableServiceVoice(request){
+    if(!qrServiceVoiceOperational)return;
     if(!window.speechSynthesis||typeof SpeechSynthesisUtterance!=="function")return;
     const table=String(request.table_number||"").trim()||"—";
     const cafeName=String(appSettings.restaurantName||currentUser?.business_name||"रेस्टोरेंट").trim();
@@ -10749,6 +10813,7 @@ async function pollQrTableServiceAlerts(){
         const query=posQrServiceRequestCursor===null?"":"?afterId="+encodeURIComponent(String(posQrServiceRequestCursor));
         const result=await api("/qr-service-requests"+query);
         if(generation!==posQrServiceRequestGeneration||businessId!==String(currentUser?.business_id||""))return;
+        setQrServiceVoiceOperational(result.orderingOpen!==false);
         const latestId=Math.max(0,Number(result.latestId)||0);
         if(posQrServiceRequestCursor===null){
             posQrServiceRequestCursor=latestId;
@@ -10767,7 +10832,7 @@ async function pollQrTableServiceAlerts(){
                 const voiceAndBuzzerEnabled=appSettings[clean?"qrCleanTableSound":"qrCallWaiterSound"]!==false;
                 const buzzerOnlyEnabled=appSettings[clean?"qrCleanTableBuzzer":"qrCallWaiterBuzzer"]===true;
                 if(notificationEnabled)showQrTableServiceRequestToast(request);
-                if(voiceAndBuzzerEnabled)voiceRequests.push(request);
+                if(voiceAndBuzzerEnabled&&qrServiceVoiceOperational)voiceRequests.push(request);
                 if(voiceAndBuzzerEnabled||buzzerOnlyEnabled)buzzerCount++;
             }
             voiceRequests.forEach(queueQrTableServiceVoice);

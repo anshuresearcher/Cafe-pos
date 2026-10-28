@@ -548,6 +548,17 @@
                         <div class="billing-search-wrap">
                             <span>🔎</span><input id="billingMenuSearch" type="search" placeholder="Search menu items…" oninput="filterBillingMenu(this.value)">
                         </div>
+                        <div class="billing-menu-view-switcher" role="group" aria-label="Menu display mode">
+                            <button type="button" class="billing-menu-view-btn is-active" data-billing-menu-view="grid" aria-pressed="true" title="Grid view" onclick="setBillingMenuView('grid')">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>Grid</span>
+                            </button>
+                            <button type="button" class="billing-menu-view-btn" data-billing-menu-view="list" aria-pressed="false" title="List view" onclick="setBillingMenuView('list')">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 5h12M9 12h12M9 19h12"/><circle cx="4" cy="5" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="19" r="1"/></svg><span>List</span>
+                            </button>
+                            <button type="button" class="billing-menu-view-btn" data-billing-menu-view="tile" aria-pressed="false" title="Tile view" onclick="setBillingMenuView('tile')">
+                                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="5" height="5" rx="1"/><rect x="9.5" y="3" width="5" height="5" rx="1"/><rect x="16" y="3" width="5" height="5" rx="1"/><rect x="3" y="9.5" width="5" height="5" rx="1"/><rect x="9.5" y="9.5" width="5" height="5" rx="1"/><rect x="16" y="9.5" width="5" height="5" rx="1"/><rect x="3" y="16" width="5" height="5" rx="1"/><rect x="9.5" y="16" width="5" height="5" rx="1"/><rect x="16" y="16" width="5" height="5" rx="1"/></svg><span>Tile</span>
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -567,7 +578,7 @@
 
                         <div id="takeawayMenuHint" class="billing-inline-hint">Choose a sale channel to see its available items.</div>
 
-                        <div id="billingMenuGrid" class="menu-grid"></div>
+                        <div id="billingMenuGrid" class="menu-grid" data-view="grid"></div>
                     </section>
 
                     <aside class="billing-cart-panel">
@@ -1059,6 +1070,19 @@
               <label for="publicMenuPriceChannel">Guest price list</label>
               <select id="publicMenuPriceChannel"></select>
               <button type="button" class="big-btn" onclick="saveRestaurantMenuSettings()">Save menu settings</button>
+            </div>
+            <div class="qr-outlet-settings">
+              <section class="qr-outlet-setting-card">
+                <div class="qr-outlet-setting-copy"><span class="menu-eyebrow">ORDER AVAILABILITY</span><h4>QR order outlet</h4><p>Guests can still browse the menu when ordering is switched off.</p></div>
+                <label class="qr-setting-toggle"><input id="publicMenuOutletOpen" type="checkbox"><span class="qr-toggle-track" aria-hidden="true"></span><span class="qr-setting-toggle-label">Accept QR orders</span></label>
+              </section>
+              <section class="qr-outlet-setting-card qr-hours-setting-card">
+                <div class="qr-outlet-setting-copy"><span class="menu-eyebrow">OPERATING HOURS · IST</span><h4>Set QR ordering hours</h4><p>Orders are accepted only during this daily window. Overnight hours are supported.</p></div>
+                <label class="qr-setting-toggle"><input id="publicMenuHoursEnabled" type="checkbox"><span class="qr-toggle-track" aria-hidden="true"></span><span class="qr-setting-toggle-label">Use operating hours</span></label>
+                <div class="qr-hours-fields"><label for="publicMenuOpenTime">Opens at<input id="publicMenuOpenTime" type="time" value="09:00"></label><span class="qr-hours-separator">to</span><label for="publicMenuCloseTime">Closes at<input id="publicMenuCloseTime" type="time" value="22:00"></label></div>
+              </section>
+              <button type="button" class="big-btn qr-availability-save" onclick="saveRestaurantMenuSettings('availability')">Save availability</button>
+              <p id="qrAvailabilityStatus" class="qr-availability-status" role="status" aria-live="polite"></p>
             </div>
             <div class="restaurant-menu-publisher-controls restaurant-menu-host-controls"><label for="publicMenuBaseUrl">QR address for phones</label><input id="publicMenuBaseUrl" type="url" placeholder="https://your-cafe-domain.com" oninput="updateRestaurantMenuLinkPreview()"><button type="button" class="table-action-btn" onclick="saveRestaurantMenuSettings()">Save QR address</button></div><div class="restaurant-menu-publisher-controls restaurant-menu-url"><input id="publicMenuUrl" type="url" readonly placeholder="Your guest menu link will appear here"><button type="button" class="table-action-btn" onclick="copyRestaurantMenuUrl()">Copy base link</button></div>
             <section class="qr-hero-manager" aria-labelledby="qrHeroImagesHeading">
@@ -1721,15 +1745,15 @@
             <div id="salesChannelsList" class="sales-channels-list"></div>
         </div>
 <div class="settings-grid advanced-settings-grid">
-            <div class="settings-card" data-settings-feature="non-chargeable" hidden>
-                <h3>Non-chargeable Reasons</h3>
-                <p class="access-muted">Add one reason per line. Staff must choose a saved reason before a no-charge bill can be completed.</p>
-                <div class="form-group"><label for="settingNonChargeableReasons">Available reasons</label><textarea id="settingNonChargeableReasons" rows="6" maxlength="3200" placeholder="Complimentary&#10;Staff meal&#10;Customer recovery&#10;Promotion"></textarea></div>
+            <div class="settings-card reason-settings-card non-chargeable-reasons-card" data-settings-feature="non-chargeable" hidden>
+                <div class="reason-settings-heading"><span class="reason-settings-icon" aria-hidden="true">₹</span><div><span class="reason-settings-kicker">PAYMENT RULES</span><h3>Non-chargeable Reasons</h3></div></div>
+                <p id="nonChargeableReasonsHelp" class="access-muted reason-settings-description">Add one reason per line. Staff must choose a saved reason before a no-charge bill can be completed.</p>
+                <div class="form-group reason-settings-field"><label for="settingNonChargeableReasons">Available reasons</label><textarea id="settingNonChargeableReasons" class="reason-settings-input" aria-describedby="nonChargeableReasonsHelp" rows="6" maxlength="3200" placeholder="Complimentary&#10;Staff meal&#10;Customer recovery&#10;Promotion"></textarea><small class="reason-settings-hint">One reason per line · Keep names short so staff can choose quickly.</small></div>
             </div>
-            <div class="settings-card" data-settings-feature="cancellation-reasons" hidden>
-                <h3>Cancellation Reasons</h3>
-                <p class="access-muted">Add one reason per line. Staff choose one of these reasons whenever an order is cancelled.</p>
-                <div class="form-group"><label for="settingCancellationReasons">Available reasons</label><textarea id="settingCancellationReasons" rows="6" maxlength="3600" placeholder="Customer request&#10;Duplicate order&#10;Item unavailable&#10;Other"></textarea></div>
+            <div class="settings-card reason-settings-card cancellation-reasons-card" data-settings-feature="cancellation-reasons" hidden>
+                <div class="reason-settings-heading"><span class="reason-settings-icon" aria-hidden="true">↶</span><div><span class="reason-settings-kicker">ORDER CONTROLS</span><h3>Cancellation Reasons</h3></div></div>
+                <p id="cancellationReasonsHelp" class="access-muted reason-settings-description">Add one reason per line. Staff choose one of these reasons whenever an order is cancelled.</p>
+                <div class="form-group reason-settings-field"><label for="settingCancellationReasons">Available reasons</label><textarea id="settingCancellationReasons" class="reason-settings-input" aria-describedby="cancellationReasonsHelp" rows="6" maxlength="3600" placeholder="Customer request&#10;Duplicate order&#10;Item unavailable&#10;Other"></textarea><small class="reason-settings-hint">One reason per line · These options appear when cancelling an order or item.</small></div>
             </div>
             <div class="settings-card" data-settings-feature="billing-rules" hidden>
                 <h3>🧮 Billing Rules</h3>
@@ -2459,7 +2483,7 @@
         <div class="form-group"><label>Item Tax Mode</label><select id="menuTaxMode"><option value="exclusive">Exclusive — tax added</option><option value="inclusive">Inclusive — tax included</option></select></div>
       </div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Sale Channel Availability & Prices</h3><p>Choose where guests can order this item and set a different price for each channel.</p></div></div><div id="menuChannelAvailability" class="menu-channel-availability"></div><div id="menuChannelPriceGrid" class="menu-channel-price-grid"></div></div>
-      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Create Small, Regular, Large, Half, Full, etc.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
+      <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Variants / Sizes</h3><p>Set a price for each sale channel and choose add-ons for individual sizes.</p></div><button type="button" class="table-action-btn" onclick="addMenuVariantRow()">＋ Add Variant</button></div><div class="variant-editor-head"><span>Name</span><span>SKU</span><span>Base price</span><span>Unit</span><span></span></div><div id="menuVariantsEditor"></div></div>
       <div class="menu-form-section"><div class="menu-form-section-head"><div><h3>Item Options</h3><p>Attach and arrange saved choices such as milk options, add-ons or spice levels. The order is used in billing and the QR menu.</p></div><button type="button" class="table-action-btn" onclick="openOptionSetsModal()">Manage Option Sets</button></div><details id="menuOptionSetDisclosure" class="menu-option-set-disclosure"><summary><span class="menu-option-set-disclosure-copy"><span class="menu-option-set-add-mark" aria-hidden="true">＋</span><span><strong>Add item options</strong><small id="menuOptionSetSelectionSummary">No options selected</small></span></span><svg class="menu-option-set-disclosure-chevron" viewBox="0 0 20 20" aria-hidden="true"><path d="m5 7 5 5 5-5"/></svg></summary><div id="menuOptionSetPicker" class="menu-option-set-picker"></div></details></div>
       <div class="modal-actions"><button class="big-btn" onclick="saveMenuItemV2()">💾 Save Item</button><button class="cancel-btn" onclick="closeAddMenuModal()">Cancel</button></div></div></div>
     <div id="menuPriceModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="menuPriceModalTitle">
@@ -3147,7 +3171,6 @@
         </div>
 
         <div class="bill-footer">
-            <p id="billRcmLine">RCM applicable: NO</p>
             <p id="billCustomFooter">Thank You!
 Visit Again 😊</p>
         </div>

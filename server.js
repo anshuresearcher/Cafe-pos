@@ -1193,6 +1193,7 @@ async function ensureBusinessTables() {
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`);
+    await pool.query("ALTER TABLE menu_variants ADD COLUMN IF NOT EXISTS option_set_ids JSONB NOT NULL DEFAULT '[]'::jsonb");
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_menu_variants_menu ON menu_variants(menu_id)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS public_menu_settings (
         business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
@@ -1206,6 +1207,10 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE public_menu_settings ALTER COLUMN price_channel TYPE VARCHAR(64)`);
     await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS public_base_url TEXT");
     await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS category_order JSONB NOT NULL DEFAULT '[]'::jsonb");
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS outlet_open BOOLEAN NOT NULL DEFAULT TRUE");
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS hours_enabled BOOLEAN NOT NULL DEFAULT FALSE");
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS open_time VARCHAR(5) NOT NULL DEFAULT '09:00'");
+    await pool.query("ALTER TABLE public_menu_settings ADD COLUMN IF NOT EXISTS close_time VARCHAR(5) NOT NULL DEFAULT '22:00'");
     await pool.query(`CREATE TABLE IF NOT EXISTS qr_menu_events (
         id BIGSERIAL PRIMARY KEY,
         business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE,
@@ -1934,12 +1939,42 @@ function publicOnlinePromotions(settings, channelKey = "online") {
     return marketing;
 }
 
+function qrMenuClockTime(value, fallback) {
+    const time = String(value || "");
+    return /^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(time) ? time : fallback;
+}
+function qrMenuTimeLabel(value) {
+    const [hour, minute] = qrMenuClockTime(value, "09:00").split(":").map(Number);
+    return `${hour % 12 || 12}:` + String(minute).padStart(2, "0") + (hour >= 12 ? " PM" : " AM");
+}
+function qrMenuOrderingAvailability(publication = {}, restaurantName = "", now = new Date()) {
+    const outletOpen = publication.outlet_open !== false;
+    const hoursEnabled = publication.hours_enabled === true;
+    const openTime = qrMenuClockTime(publication.open_time, "09:00");
+    const closeTime = qrMenuClockTime(publication.close_time, "22:00");
+    let withinHours = true;
+    if (hoursEnabled) {
+        const parts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+        const current = Number(parts.find(part => part.type === "hour")?.value || 0) * 60 + Number(parts.find(part => part.type === "minute")?.value || 0);
+        const [oh, om] = openTime.split(":").map(Number), [ch, cm] = closeTime.split(":").map(Number);
+        const start = oh * 60 + om, end = ch * 60 + cm;
+        withinHours = start === end || (start < end ? current >= start && current < end : current >= start || current < end);
+    }
+    const orderingOpen = outletOpen && withinHours;
+    const hours = hoursEnabled ? " We’re back " + qrMenuTimeLabel(openTime) + "–" + qrMenuTimeLabel(closeTime) + " IST." : "";
+    return { orderingOpen, outletOpen, hoursEnabled, openTime, closeTime,
+        closedMessage: orderingOpen ? "" : String(restaurantName || "The cafe") + " is closed rn 😴 — the kitchen’s on a lil break." + hours + " Catch us during open hours for the good stuff." };
+}
+
 app.get("/public-menu/:token", async (req, res) => {
     const token = String(req.params.token || "");
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
     try {
         const access = await runSystemContext(() => pool.query(
-            "SELECT business_id, enabled, price_channel, category_order FROM public_menu_settings WHERE token=$1 LIMIT 1",
+            `SELECT s.business_id, s.enabled, s.price_channel, s.category_order,
+                    s.outlet_open, s.hours_enabled, s.open_time, s.close_time, b.business_name
+             FROM public_menu_settings s JOIN businesses b ON b.id=s.business_id
+             WHERE s.token=$1 LIMIT 1`,
             [token]
         ));
         const publication = access.rows[0];
@@ -1951,7 +1986,7 @@ app.get("/public-menu/:token", async (req, res) => {
                 pool.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]),
                 pool.query("SELECT id, name, image_url FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order, name, id", [businessId]),
                 pool.query("SELECT id, name, description, tags, category, price, channel_prices, sales_channels, image_url, qr_available, tax_rate, tax_mode, option_set_ids FROM menu WHERE business_id=$1 AND available=TRUE ORDER BY category, name, id", [businessId]),
-                pool.query("SELECT id, menu_id, name, price, unit, channel_prices FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
+                pool.query("SELECT id, menu_id, name, price, unit, channel_prices, option_set_ids FROM menu_variants WHERE business_id=$1 AND available=TRUE ORDER BY menu_id, id", [businessId]),
                 pool.query("SELECT table_number FROM restaurant_tables WHERE business_id=$1 ORDER BY table_number", [businessId])
             ]);
             const business = businessResult.rows[0] || {};
@@ -1973,6 +2008,11 @@ app.get("/public-menu/:token", async (req, res) => {
             const priceChannel = qrChannels.find(channel => channel.key === publication.price_channel)?.key || qrChannels.find(channel => channel.key === "online")?.key || qrChannels[0]?.key || "online";
             const configuredOptionSets = Array.isArray(settings.menuOptionSets) ? settings.menuOptionSets : [];
             const optionSetsById = new Map(configuredOptionSets.map(set => [String(set.id), set]));
+            const toPublicOptionSets = ids => (Array.isArray(ids) ? ids : []).map(id => optionSetsById.get(String(id))).filter(Boolean).map(set => ({
+                id: String(set.id), name: String(set.name || "Options"), minSelections: Math.max(0, Number(set.minSelections) || 0),
+                maxSelections: Math.max(1, Number(set.maxSelections) || 1),
+                options: (Array.isArray(set.options) ? set.options : []).map(option => ({ id: String(option.id), name: String(option.name || "Choice"), price: Math.max(0, Number(option.price) || 0) }))
+            }));
             const itemsById = new Map();
             const items = menuResult.rows.map(item => {
                 if (!menuItemChannels(item, settings).includes(priceChannel)) return null;
@@ -1989,11 +2029,7 @@ app.get("/public-menu/:token", async (req, res) => {
                     inStock: item.qr_available !== false,
                     taxRate: Number(item.tax_rate || 0),
                     taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
-                    optionSets: (Array.isArray(item.option_set_ids) ? item.option_set_ids : []).map(id => optionSetsById.get(String(id))).filter(Boolean).map(set => ({
-                        id: String(set.id), name: String(set.name || "Options"), minSelections: Math.max(0, Number(set.minSelections) || 0),
-                        maxSelections: Math.max(1, Number(set.maxSelections) || 1),
-                        options: (Array.isArray(set.options) ? set.options : []).map(option => ({ id: String(option.id), name: String(option.name || "Choice"), price: Math.max(0, Number(option.price) || 0) }))
-                    })),
+                    optionSets: toPublicOptionSets(item.option_set_ids),
                     variants: []
                 };
                 itemsById.set(Number(item.id), entry);
@@ -2007,7 +2043,8 @@ app.get("/public-menu/:token", async (req, res) => {
                     id: String(variant.id),
                     name: variant.name,
                     unit: variant.unit || "",
-                    price: Number(prices[priceChannel] ?? variant.price ?? item.price)
+                    price: Number(prices[priceChannel] ?? variant.price ?? item.price),
+                    optionSets: toPublicOptionSets([...new Set([...(item.optionSets || []).map(set => String(set.id)), ...(Array.isArray(variant.option_set_ids) ? variant.option_set_ids.map(String) : [])])])
                 });
             }
             return {
@@ -2024,6 +2061,7 @@ app.get("/public-menu/:token", async (req, res) => {
                     return { name, imageUrl: String(category?.image_url || "") };
                 }),
                 items,
+                ...qrMenuOrderingAvailability(publication, settings.restaurantName || business.business_name),
                 tables: tableResult.rows.map(row => String(row.table_number))
             };
         });
@@ -2179,12 +2217,16 @@ app.post("/public-menu/:token/orders", async (req, res) => {
     }
     try {
         const access = await runSystemContext(() => pool.query(
-            "SELECT business_id, enabled, price_channel FROM public_menu_settings WHERE token=$1 LIMIT 1",
+            `SELECT s.business_id, s.enabled, s.price_channel, s.outlet_open, s.hours_enabled, s.open_time, s.close_time, b.business_name
+             FROM public_menu_settings s JOIN businesses b ON b.id=s.business_id
+             WHERE s.token=$1 LIMIT 1`,
             [token]
         ));
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
+        const availability = qrMenuOrderingAvailability(publication, publication.business_name);
+        if (!availability.orderingOpen) return res.status(403).json({ error: availability.closedMessage });
         const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
         const result = await tenantContext.run({ businessId }, async () => {
             const client = await rawPoolConnect();
@@ -2194,6 +2236,12 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 if (sessionKey) await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionKey]);
                 const businessSettingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
                 const businessSettings = businessSettingsResult.rows[0]?.settings || {};
+                const livePublication = await client.query(
+                    "SELECT outlet_open, hours_enabled, open_time, close_time FROM public_menu_settings WHERE business_id=$1 LIMIT 1",
+                    [businessId]
+                );
+                const liveAvailability = qrMenuOrderingAvailability(livePublication.rows[0] || publication, businessSettings.restaurantName || publication.business_name);
+                if (!liveAvailability.orderingOpen) throw Object.assign(new Error(liveAvailability.closedMessage), { status: 403 });
                 const qrChannels = salesChannelsForSettings(businessSettings).filter(channel => channel.qrMenu);
                 const priceChannel = qrChannels.find(channel => channel.key === publication.price_channel)?.key || qrChannels.find(channel => channel.key === "online")?.key || qrChannels[0]?.key || "online";
                 const tableResult = await client.query(
@@ -2232,7 +2280,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 }
                 const variantIds = requestedLines.map(line => line.variantId).filter(Boolean);
                 const variantResult = variantIds.length ? await client.query(
-                    "SELECT id,menu_id,name,price,unit,channel_prices FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE",
+                    "SELECT id,menu_id,name,price,unit,channel_prices,option_set_ids FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE",
                     [businessId, variantIds]
                 ) : { rows: [] };
                 const variantById = new Map(variantResult.rows.map(variant => [Number(variant.id), variant]));
@@ -2248,7 +2296,8 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                     const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
                     const price = Number(variant ? (variantPrices[priceChannel] ?? variant.price) : (prices[priceChannel] ?? item.price));
                     if (!Number.isFinite(price) || price < 0) throw Object.assign(new Error("A menu price is invalid"), { status: 400 });
-                    const normalizedOptions = await normalizeOrderItemOptions(client, businessId, item, line.options, undefined, undefined);
+                    const optionSetIds = [...new Set([...(Array.isArray(item.option_set_ids) ? item.option_set_ids : []), ...(Array.isArray(variant?.option_set_ids) ? variant.option_set_ids : [])].map(String))];
+                    const normalizedOptions = await normalizeOrderItemOptions(client, businessId, { ...item, option_set_ids: optionSetIds }, line.options, undefined, undefined);
                     const finalPrice = price + normalizedOptions.addOnPrice;
                     orderLines.push({
                         menuId: line.itemId,
@@ -2458,7 +2507,7 @@ app.get("/api/menu/public-settings", async (req, res) => {
             [businessId, crypto.randomBytes(24).toString("hex")]
         );
         const result = await pool.query(
-            "SELECT enabled, price_channel, token, public_base_url, category_order FROM public_menu_settings WHERE business_id=$1",
+            "SELECT enabled, price_channel, token, public_base_url, category_order, outlet_open, hours_enabled, open_time, close_time FROM public_menu_settings WHERE business_id=$1",
             [businessId]
         );
         const settings = result.rows[0];
@@ -2476,6 +2525,10 @@ app.get("/api/menu/public-settings", async (req, res) => {
         const localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(requestHost) ? getLocalNetworkMenuUrl() : null;
         res.json({
             enabled: settings.enabled,
+            outletOpen: settings.outlet_open !== false,
+            hoursEnabled: settings.hours_enabled === true,
+            openTime: qrMenuClockTime(settings.open_time, "09:00"),
+            closeTime: qrMenuClockTime(settings.close_time, "22:00"),
             priceChannel: selectedQrChannel?.key || "online",
             priceChannelLabel: selectedQrChannel?.label || "Slash",
             qrMenuChannels,
@@ -2529,6 +2582,11 @@ app.put("/api/menu/public-settings", async (req, res) => {
     const requestedPriceChannel = String(req.body.priceChannel || "online").trim().toLowerCase();
     const hasPublicBaseUrl = Object.prototype.hasOwnProperty.call(req.body || {}, "publicBaseUrl");
     const hasHeroImages = Object.prototype.hasOwnProperty.call(req.body || {}, "heroImages");
+    const outletOpen = req.body.outletOpen !== false;
+    const hoursEnabled = req.body.hoursEnabled === true;
+    const openTime = String(req.body.openTime || "09:00").trim();
+    const closeTime = String(req.body.closeTime || "22:00").trim();
+    if (!/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(openTime) || !/^([01][0-9]|2[0-3]):[0-5][0-9]$/.test(closeTime)) return res.status(400).json({ error: "Choose valid QR menu operating hours." });
     let heroImages = [];
     if (hasHeroImages) {
         try {
@@ -2560,15 +2618,19 @@ app.put("/api/menu/public-settings", async (req, res) => {
         if (!qrMenuChannels.some(channel => channel.key === requestedPriceChannel)) return res.status(400).json({ error: "Choose an active QR Menu sale channel." });
         const priceChannel = requestedPriceChannel;
         const result = await pool.query(
-            `INSERT INTO public_menu_settings(business_id, token, enabled, price_channel, public_base_url)
-             VALUES($1,$2,$3,$4,CASE WHEN $5 THEN $6 ELSE NULL END)
+            `INSERT INTO public_menu_settings(business_id,token,enabled,price_channel,public_base_url,outlet_open,hours_enabled,open_time,close_time)
+             VALUES($1,$2,$3,$4,CASE WHEN $5 THEN $6 ELSE NULL END,$7,$8,$9,$10)
              ON CONFLICT (business_id) DO UPDATE
              SET enabled=EXCLUDED.enabled,
                  price_channel=EXCLUDED.price_channel,
                  public_base_url=CASE WHEN $5 THEN EXCLUDED.public_base_url ELSE public_menu_settings.public_base_url END,
+                 outlet_open=EXCLUDED.outlet_open,
+                 hours_enabled=EXCLUDED.hours_enabled,
+                 open_time=EXCLUDED.open_time,
+                 close_time=EXCLUDED.close_time,
                  updated_at=CURRENT_TIMESTAMP
-             RETURNING enabled, price_channel, token, public_base_url`,
-            [businessId, crypto.randomBytes(24).toString("hex"), enabled, priceChannel, hasPublicBaseUrl, publicBaseUrl]
+             RETURNING enabled, price_channel, token, public_base_url, outlet_open, hours_enabled, open_time, close_time`,
+            [businessId, crypto.randomBytes(24).toString("hex"), enabled, priceChannel, hasPublicBaseUrl, publicBaseUrl, outletOpen, hoursEnabled, openTime, closeTime]
         );
         if (hasHeroImages) {
             await pool.query(`
@@ -2585,6 +2647,10 @@ app.put("/api/menu/public-settings", async (req, res) => {
         res.json({
             success: true,
             enabled: settings.enabled,
+            outletOpen: settings.outlet_open !== false,
+            hoursEnabled: settings.hours_enabled === true,
+            openTime: qrMenuClockTime(settings.open_time, "09:00"),
+            closeTime: qrMenuClockTime(settings.close_time, "22:00"),
             priceChannel: settings.price_channel,
             priceChannelLabel: qrMenuChannels.find(channel => channel.key === settings.price_channel)?.label || "Slash",
             qrMenuChannels,
@@ -2783,7 +2849,7 @@ app.get(
             );
             const items = result.rows;
             const variants = await pool.query(`
-                SELECT mv.id, mv.menu_id, mv.name, mv.sku, mv.price, mv.unit, mv.channel_prices, mv.available
+                SELECT mv.id, mv.menu_id, mv.name, mv.sku, mv.price, mv.unit, mv.channel_prices, mv.option_set_ids, mv.available
                 FROM menu_variants mv
                 INNER JOIN menu m ON m.id=mv.menu_id AND m.business_id=$1
                 WHERE mv.business_id=$1
@@ -2868,6 +2934,7 @@ function cleanVariants(value) {
         price: Number(v.price),
         unit: String(v.unit || 'ea').trim() || 'ea',
         channelPrices: cleanChannelPrices(v.channelPrices || v.channel_prices),
+        optionSetIds: cleanMenuOptionSetIds(v.optionSetIds || v.option_set_ids),
         available: v.available !== false
     })).filter(v => v.name && Number.isFinite(v.price) && v.price >= 0);
 }
@@ -3018,9 +3085,9 @@ async function replaceMenuVariants(client, menuId, variants) {
     await client.query(`DELETE FROM menu_variants WHERE menu_id=$1 AND business_id=$2`, [menuId, businessId]);
     for (const v of variants) {
         await client.query(`
-            INSERT INTO menu_variants(menu_id,name,sku,price,unit,channel_prices,available,business_id)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8)
-        `, [menuId, v.name, v.sku, v.price, v.unit, JSON.stringify(v.channelPrices), v.available, businessId]);
+            INSERT INTO menu_variants(menu_id,name,sku,price,unit,channel_prices,option_set_ids,available,business_id)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        `, [menuId, v.name, v.sku, v.price, v.unit, JSON.stringify(v.channelPrices), JSON.stringify(v.optionSetIds), v.available, businessId]);
     }
 }
 
@@ -3307,7 +3374,8 @@ app.patch("/api/menu/:id/prices", async (req, res) => {
     if (!Number.isInteger(id) || id <= 0 || !Number.isFinite(price) || price < 0) {
         return res.status(400).json({ error: "Enter a valid item price" });
     }
-    if (variantPrices.some(row => !Number.isInteger(Number(row.id)) || !Number.isFinite(Number(row.price)) || Number(row.price) < 0)) {
+    if (variantPrices.some(row => !Number.isInteger(Number(row.id)) || !Number.isFinite(Number(row.price)) || Number(row.price) < 0 ||
+        (row.channelPrices && Object.values(row.channelPrices).some(value => !Number.isFinite(Number(value)) || Number(value) < 0)))) {
         return res.status(400).json({ error: "Enter valid prices for every variant" });
     }
     const client = await pool.connect();
@@ -3322,10 +3390,16 @@ app.patch("/api/menu/:id/prices", async (req, res) => {
             return res.status(404).json({ error: "Menu item not found" });
         }
         for (const variant of variantPrices) {
-            const updated = await client.query(
-                "UPDATE menu_variants SET price=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND menu_id=$3 AND business_id=$4 RETURNING id",
-                [Number(variant.price), Number(variant.id), id, businessId]
-            );
+            const hasChannelPrices = Object.prototype.hasOwnProperty.call(variant, "channelPrices");
+            const updated = hasChannelPrices
+                ? await client.query(
+                    "UPDATE menu_variants SET price=$1, channel_prices=$2::jsonb, updated_at=CURRENT_TIMESTAMP WHERE id=$3 AND menu_id=$4 AND business_id=$5 RETURNING id",
+                    [Number(variant.price), JSON.stringify(cleanChannelPrices(variant.channelPrices)), Number(variant.id), id, businessId]
+                )
+                : await client.query(
+                    "UPDATE menu_variants SET price=$1, updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND menu_id=$3 AND business_id=$4 RETURNING id",
+                    [Number(variant.price), Number(variant.id), id, businessId]
+                );
             if (!updated.rows.length) throw Object.assign(new Error("A menu variant could not be found"), { status: 400 });
         }
         await client.query("COMMIT");
@@ -3794,7 +3868,7 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
     if (menuById.size !== menuIds.length) throw new Error("One of the menu items is no longer available for this business.");
     const variantIds = [...new Set(items.map(item => item.variantId).filter(Boolean))];
     const variantRows = variantIds.length ? await db.query(`
-        SELECT id,menu_id,name,price,channel_prices,unit
+        SELECT id,menu_id,name,price,channel_prices,unit,option_set_ids
         FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE
     `, [Number(businessId), variantIds]) : { rows: [] };
     const variantsById = new Map(variantRows.rows.map(row => [Number(row.id), row]));
@@ -3809,7 +3883,8 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
         const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
         const basePrice = Number(variant ? (variantPrices[channel] ?? variant.price) : (menuPrices[channel] ?? menu.price));
         if (!Number.isFinite(basePrice) || basePrice < 0) throw new Error("One of the menu prices is invalid.");
-        const optionData = await normalizeOrderItemOptions(db, businessId, menu, item.options);
+        const assignedOptionIds = [...new Set([...(Array.isArray(menu.option_set_ids) ? menu.option_set_ids : []), ...(Array.isArray(variant?.option_set_ids) ? variant.option_set_ids : [])].map(String))];
+        const optionData = await normalizeOrderItemOptions(db, businessId, { ...menu, option_set_ids: assignedOptionIds }, item.options);
         item.name = String(menu.name || "Item") + (variant?.name ? ` - ${variant.name}` : "");
         item.price = basePrice + optionData.addOnPrice;
         item.unit = variant?.unit || menu.unit || "ea";
@@ -3995,7 +4070,7 @@ app.post(
             if (menuMetadataById.size !== menuIds.length) throw new Error("One of the menu items is no longer available for this business.");
             const variantIds = [...new Set(normalizedItems.map(item => item.variantId).filter(Boolean))];
             const variantRows = variantIds.length ? await client.query(
-                `SELECT id,menu_id,price,channel_prices,unit FROM menu_variants WHERE id=ANY($1::int[]) AND business_id=$2 AND available=TRUE`,
+                `SELECT id,menu_id,price,channel_prices,unit,option_set_ids FROM menu_variants WHERE id=ANY($1::int[]) AND business_id=$2 AND available=TRUE`,
                 [variantIds, businessId]
             ) : { rows: [] };
             const variantsById = new Map(variantRows.rows.map(item => [Number(item.id), item]));
@@ -4016,7 +4091,8 @@ app.post(
                 item.taxMode = metadata.tax_mode === "inclusive" ? "inclusive" : "exclusive";
                 item.category = String(metadata.category || "");
                 item.basePrice = catalogPrice;
-                const normalizedOptions = await normalizeOrderItemOptions(client, businessId, metadata, item.source.options);
+                const assignedOptionIds = [...new Set([...(Array.isArray(metadata.option_set_ids) ? metadata.option_set_ids : []), ...(Array.isArray(variant?.option_set_ids) ? variant.option_set_ids : [])].map(String))];
+                const normalizedOptions = await normalizeOrderItemOptions(client, businessId, { ...metadata, option_set_ids: assignedOptionIds }, item.source.options);
                 item.options = normalizedOptions.options;
                 item.price = item.basePrice + normalizedOptions.addOnPrice;
             }
@@ -4306,17 +4382,21 @@ app.get("/api/qr-service-requests", async (req, res) => {
     const afterId = cursorProvided ? Number(req.query.afterId) : null;
     if (cursorProvided && (!Number.isSafeInteger(afterId) || afterId < 0)) return res.status(400).json({ error: "Invalid service request cursor" });
     try {
+        const publicationResult = await pool.query(
+            "SELECT outlet_open,hours_enabled,open_time,close_time FROM public_menu_settings WHERE business_id=$1 LIMIT 1", [businessId]
+        );
+        const orderingOpen = qrMenuOrderingAvailability(publicationResult.rows[0] || {}).orderingOpen;
         const latestResult = await pool.query(
             "SELECT COALESCE(MAX(id),0)::bigint AS latest_id FROM qr_service_requests WHERE business_id=$1", [businessId]
         );
         const latestId = Number(latestResult.rows[0]?.latest_id || 0);
-        if (!cursorProvided) return res.set("Cache-Control", "no-store").json({ latestId, cursorId: latestId, requests: [] });
+        if (!cursorProvided) return res.set("Cache-Control", "no-store").json({ latestId, cursorId: latestId, requests: [], orderingOpen });
         const result = await pool.query(
             `SELECT id,table_number,request_type,created_at FROM qr_service_requests
              WHERE business_id=$1 AND id>$2 ORDER BY id LIMIT 100`, [businessId, afterId]
         );
         const cursorId = result.rows.length ? Number(result.rows[result.rows.length - 1].id) : latestId;
-        res.set("Cache-Control", "no-store").json({ latestId, cursorId, requests: result.rows });
+        res.set("Cache-Control", "no-store").json({ latestId, cursorId, requests: result.rows, orderingOpen });
     } catch (error) {
         console.error("QR service request poll failed:", error);
         res.status(500).json({ error: "Could not check table service requests" });
@@ -9416,7 +9496,6 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
     const collected=receipt.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(receipt.amountCollected||0);
     const due=receipt.amountDue===undefined?Math.max(0,Number(receipt.total||0)-collected):Number(receipt.amountDue||0);
     if(!receipt.isOpenOrder){body.push('Payment Summary');if(allocations.length)allocations.forEach(payment=>body.push(...pair(clean(payment.method||'Payment'),moneyValue(payment.amount))));else body.push(...pair(clean(receipt.paymentMethod||'Payment'),moneyValue(collected)));body.push(...pair('Balance',moneyValue(due)));}
-    body.push(line,...center('RCM applicable: NO'));
     body.push(line);
     const footer=[...String(settings.footer||'Visit Again!\nThank you.').replace('Thank You!\nVisit Again 😊','Visit Again!\nThank you.').split(/\r?\n/).map(clean).filter(Boolean)];
     const encode=rows=>Buffer.from(rows.filter(Boolean).join('\n')+'\n','utf8');
