@@ -127,6 +127,8 @@ const publicRateLimiters = {
     registration: createPublicRateLimiter('registration', 60 * 60 * 1000, 5),
     qrOrder: createPublicRateLimiter('qr-order', 10 * 60 * 1000, 20),
     qrCustomer: createPublicRateLimiter('qr-customer', 10 * 60 * 1000, 10),
+    qrOtpSend: createPublicRateLimiter('qr-otp-send', 10 * 60 * 1000, 5),
+    qrOtpVerify: createPublicRateLimiter('qr-otp-verify', 10 * 60 * 1000, 20),
     qrAnalytics: createPublicRateLimiter('qr-analytics', 10 * 60 * 1000, 240),
     qrTracking: createPublicRateLimiter('qr-tracking', 60 * 1000, 60),
     deviceRegistration: createPublicRateLimiter('device-registration', 60 * 60 * 1000, 10)
@@ -149,6 +151,8 @@ app.use((req, res, next) => {
     else if (method === 'POST' && route === '/api/public/device/register') limiter = publicRateLimiters.deviceRegistration;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/orders$/i.test(route)) limiter = publicRateLimiters.qrOrder;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/customers$/i.test(route)) limiter = publicRateLimiters.qrCustomer;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/otp\/send$/i.test(route)) limiter = publicRateLimiters.qrOtpSend;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/otp\/verify$/i.test(route)) limiter = publicRateLimiters.qrOtpVerify;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/analytics$/i.test(route)) limiter = publicRateLimiters.qrAnalytics;
     else if (method === 'GET' && /^\/public-menu\/[a-f0-9]{48}\/orders\/\d+$/i.test(route)) limiter = publicRateLimiters.qrTracking;
     return limiter ? limiter(req, res, next) : next();
@@ -2174,22 +2178,163 @@ app.post("/public-menu/:token/service-requests", async (req, res) => {
     }
 });
 
-app.post("/public-menu/:token/customers", async (req,res)=>{
-    const token=String(req.params.token||"");
-    if(!/^[a-f0-9]{48}$/i.test(token))return res.status(404).json({error:"Menu not found"});
-    try{
-        const details=normalizeQrGuestCustomer(req.body);
-        const access=await runSystemContext(()=>pool.query("SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1",[token]));
-        const publication=access.rows[0];
-        if(!publication||!publication.enabled||!(await businessHasLicenseAddon(publication.business_id,"Table QR")))return res.status(404).json({error:"This QR menu is not currently accepting orders"});
-        const businessId=Number(publication.business_id);
-        const customer=await tenantContext.run({businessId},()=>upsertQrGuestCustomer(pool,businessId,details));
-        res.status(200).json({success:true,customer});
-    }catch(error){
-        if(error.status)return res.status(error.status).json({error:error.message});
-        console.error("Save public QR guest details error:",error);
-        res.status(500).json({error:"Could not save your details"});
+// =====================================================
+// QR GUEST WHATSAPP OTP + VERIFIED GUEST SESSION
+// =====================================================
+function qrGuestCookieName(token) {
+    return "slash_qr_" + crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+function qrGuestCookiePath(token) { return "/public-menu/" + String(token); }
+function qrGuestPhone(value) {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (!/^\d{10}$/.test(digits)) throw Object.assign(new Error("Enter a valid 10-digit Indian mobile number."), { status: 400 });
+    return digits;
+}
+function qrGuestCookieOptions(token, maxAge) {
+    return { path: qrGuestCookiePath(token), maxAge, httpOnly: true, sameSite: "Lax", secure: process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL) };
+}
+async function qrGuestPublication(token) {
+    const result = await runSystemContext(() => pool.query("SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+    const publication = result.rows[0];
+    if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) throw Object.assign(new Error("This QR menu is not currently accepting orders"), { status: 404 });
+    return publication;
+}
+async function fast2SmsRequest(endpoint, payload) {
+    const apiKey = String(process.env.FAST2SMS_API_KEY || "").trim();
+    if (!apiKey || !String(process.env.FAST2SMS_OTP_ID || "").trim()) throw Object.assign(new Error("WhatsApp OTP is not configured. Please ask the cafe team for help."), { status: 503 });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+        const response = await fetch("https://www.fast2sms.com/dev/otp/" + endpoint, {
+            method: "POST", headers: { "authorization": apiKey, "content-type": "application/json", "accept": "application/json" },
+            body: JSON.stringify(payload), signal: controller.signal
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.return !== true) {
+            console.warn("Fast2SMS OTP provider rejected request", { endpoint, status: response.status, statusCode: data.status_code });
+            throw Object.assign(new Error(endpoint === "send" ? "Could not send the OTP. Check your number and try again." : "The OTP could not be verified. Check the code and try again."), { status: 502 });
+        }
+        return data;
+    } catch (error) {
+        if (error.status) throw error;
+        console.warn("Fast2SMS OTP request failed", { endpoint, message: error.name === "AbortError" ? "timeout" : error.message });
+        throw Object.assign(new Error("OTP service is temporarily unavailable. Please try again."), { status: 502 });
+    } finally { clearTimeout(timeout); }
+}
+async function getQrGuestSession(req, res, token, businessId, tableNumber, phone) {
+    const cookie = getCookie(req, qrGuestCookieName(token));
+    if (!cookie || !/^[a-f0-9]{64}$/i.test(cookie)) return null;
+    const tokenHash = crypto.createHash("sha256").update(cookie).digest("hex");
+    const result = await runSystemContext(() => pool.query(
+        `SELECT id,customer_id,phone FROM qr_guest_sessions
+         WHERE session_token_hash=$1 AND business_id=$2 AND menu_token_hash=$3 AND table_number=$4
+           AND phone=$5 AND expires_at>CURRENT_TIMESTAMP LIMIT 1`,
+        [tokenHash, businessId, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]
+    ));
+    if (!result.rows.length) return null;
+    await runSystemContext(() => pool.query("UPDATE qr_guest_sessions SET last_activity_at=CURRENT_TIMESTAMP,expires_at=CURRENT_TIMESTAMP+INTERVAL '2 hours' WHERE id=$1", [result.rows[0].id]));
+    setCookie(res, qrGuestCookieName(token), cookie, qrGuestCookieOptions(token, 2 * 60 * 60));
+    return result.rows[0];
+}
+app.post("/public-menu/:token/otp/send", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.body?.phone);
+        const tableNumber = String(req.body?.tableNumber || "").trim();
+        if (!tableNumber || tableNumber.length > 60) return res.status(400).json({ error: "Choose a valid table before verifying your number." });
+        const publication = await qrGuestPublication(token);
+        const table = await runSystemContext(() => pool.query("SELECT 1 FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1", [publication.business_id, tableNumber]));
+        if (!table.rows.length) return res.status(400).json({ error: "This QR link does not match an active table." });
+        const menuHash = crypto.createHash("sha256").update(token).digest("hex");
+        const existing = await runSystemContext(() => pool.query(
+            `SELECT id,resend_after FROM qr_guest_otp_challenges WHERE business_id=$1 AND menu_token_hash=$2 AND table_number=$3 AND phone=$4 AND verified_at IS NULL AND expires_at>CURRENT_TIMESTAMP ORDER BY created_at DESC LIMIT 1`,
+            [publication.business_id, menuHash, tableNumber, phone]
+        ));
+        if (existing.rows[0] && new Date(existing.rows[0].resend_after).getTime() > Date.now()) return res.status(429).json({ error: "Please wait 60 seconds before requesting another OTP." });
+        const recent = await runSystemContext(() => pool.query(
+            `SELECT COUNT(*)::int AS count FROM qr_guest_otp_challenges WHERE business_id=$1 AND phone=$2 AND created_at>CURRENT_TIMESTAMP-INTERVAL '1 hour'`,
+            [publication.business_id, phone]
+        ));
+        if (Number(recent.rows[0]?.count || 0) >= 5) return res.status(429).json({ error: "Too many OTP requests for this number. Please try again later." });
+        const provider = await fast2SmsRequest("send", { mobile: phone, otp_id: String(process.env.FAST2SMS_OTP_ID).trim(), otp_expiry: 10, otp_length: 6 });
+        const challengeId = crypto.randomUUID();
+        await runSystemContext(() => pool.query(
+            `INSERT INTO qr_guest_otp_challenges(id,business_id,menu_token_hash,table_number,phone,provider_request_id,expires_at,resend_after)
+             VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP+INTERVAL '10 minutes',CURRENT_TIMESTAMP+INTERVAL '60 seconds')`,
+            [challengeId, publication.business_id, menuHash, tableNumber, phone, String(provider.request_id || "").slice(0, 200)]
+        ));
+        res.set("Cache-Control", "no-store");
+        return res.json({ success: true, challengeId, expiresInSeconds: 600, resendInSeconds: 60, message: "OTP sent. Check WhatsApp messages." });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest OTP send error:", error.message);
+        return res.status(500).json({ error: "Could not send OTP. Please try again." });
     }
+});
+
+app.post("/public-menu/:token/otp/verify", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.body?.phone);
+        const tableNumber = String(req.body?.tableNumber || "").trim();
+        const challengeId = String(req.body?.challengeId || "");
+        const otp = String(req.body?.otp || "").trim();
+        const details = normalizeQrGuestCustomer({ ...req.body?.customer, phone });
+        if (!/^[0-9]{4,8}$/.test(otp)) return res.status(400).json({ error: "Enter the OTP sent to your WhatsApp." });
+        const publication = await qrGuestPublication(token);
+        const challengeResult = await runSystemContext(() => pool.query(
+            `SELECT id,attempts FROM qr_guest_otp_challenges WHERE id=$1 AND business_id=$2 AND menu_token_hash=$3 AND table_number=$4 AND phone=$5 AND verified_at IS NULL AND expires_at>CURRENT_TIMESTAMP LIMIT 1`,
+            [challengeId, publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]
+        ));
+        const challenge = challengeResult.rows[0];
+        if (!challenge) return res.status(400).json({ error: "This OTP has expired. Request a new one." });
+        if (Number(challenge.attempts) >= 5) return res.status(429).json({ error: "Too many incorrect attempts. Request a new OTP." });
+        await runSystemContext(() => pool.query("UPDATE qr_guest_otp_challenges SET attempts=attempts+1 WHERE id=$1", [challengeId]));
+        await fast2SmsRequest("verify", { mobile: phone, otp });
+        const customer = await tenantContext.run({ businessId: Number(publication.business_id) }, () => upsertQrGuestCustomer(pool, Number(publication.business_id), details));
+        const sessionToken = crypto.randomBytes(32).toString("hex");
+        const sessionHash = crypto.createHash("sha256").update(sessionToken).digest("hex");
+        await runSystemContext(async () => {
+            await pool.query("UPDATE qr_guest_otp_challenges SET verified_at=CURRENT_TIMESTAMP WHERE id=$1", [challengeId]);
+            await pool.query("DELETE FROM qr_guest_sessions WHERE business_id=$1 AND menu_token_hash=$2 AND table_number=$3 AND phone=$4", [publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]);
+            await pool.query(
+                `INSERT INTO qr_guest_sessions(business_id,menu_token_hash,table_number,phone,customer_id,session_token_hash,expires_at,last_activity_at)
+                 VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP+INTERVAL '2 hours',CURRENT_TIMESTAMP)`,
+                [publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone, customer.id, sessionHash]
+            );
+        });
+        setCookie(res, qrGuestCookieName(token), sessionToken, qrGuestCookieOptions(token, 2 * 60 * 60));
+        res.set("Cache-Control", "no-store");
+        return res.json({ success: true, customer, expiresInSeconds: 7200 });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest OTP verify error:", error.message);
+        return res.status(500).json({ error: "Could not verify OTP. Please try again." });
+    }
+});
+
+app.get("/public-menu/:token/session", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.query?.phone);
+        const tableNumber = String(req.query?.tableNumber || "").trim();
+        const publication = await qrGuestPublication(token);
+        const session = await getQrGuestSession(req, res, token, Number(publication.business_id), tableNumber, phone);
+        res.set("Cache-Control", "no-store");
+        if (!session) return res.status(401).json({ verified: false });
+        return res.json({ verified: true, customerId: session.customer_id, expiresInSeconds: 7200 });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest session check error:", error.message);
+        return res.status(500).json({ error: "Could not check verification session" });
+    }
+});
+
+app.post("/public-menu/:token/customers", async (req,res)=>{
+    return res.status(410).json({error:"Phone verification is required. Please request and verify a WhatsApp OTP."});
 });
 
 app.post("/public-menu/:token/orders", async (req, res) => {
@@ -2225,6 +2370,9 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
+        const verifiedPhone = qrGuestPhone(guestCustomerDetails.phone);
+        const verifiedGuestSession = await getQrGuestSession(req, res, token, businessId, tableNumber, verifiedPhone);
+        if (!verifiedGuestSession) return res.status(401).json({ error: "Your phone verification session has expired. Please verify your WhatsApp number again." });
         const availability = qrMenuOrderingAvailability(publication, publication.business_name);
         if (!availability.orderingOpen) return res.status(403).json({ error: availability.closedMessage });
         const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
