@@ -2212,7 +2212,7 @@ async function fast2SmsRequest(endpoint, payload) {
         const data = await response.json().catch(() => ({}));
         if (!response.ok || data.return !== true) {
             console.warn("Fast2SMS OTP provider rejected request", { endpoint, status: response.status, statusCode: data.status_code });
-            throw Object.assign(new Error(endpoint === "send" ? "Could not send the OTP. Check your number and try again." : "The OTP could not be verified. Check the code and try again."), { status: 502 });
+            throw Object.assign(new Error(endpoint === "send" ? "Could not send the OTP. Check your number and try again." : "OTP incorrect or expired. Check the code and try again."), { status: 502 });
         }
         return data;
     } catch (error) {
