@@ -2257,7 +2257,8 @@ app.post("/public-menu/:token/otp/send", async (req, res) => {
             [publication.business_id, phone]
         ));
         if (Number(recent.rows[0]?.count || 0) >= 5) return res.status(429).json({ error: "Too many OTP requests for this number. Please try again later." });
-        const provider = await fast2SmsRequest("send", { mobile: phone, otp_id: String(process.env.FAST2SMS_OTP_ID).trim(), otp_expiry: 10, otp_length: 6 });
+        const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        const provider = await fast2SmsRequest("send", { mobile: phone, otp_id: String(process.env.FAST2SMS_OTP_ID).trim(), otp_expiry: 10, otp_length: 6, otp: generatedOtp  });
         const challengeId = crypto.randomUUID();
         await runSystemContext(() => pool.query(
             `INSERT INTO qr_guest_otp_challenges(id,business_id,menu_token_hash,table_number,phone,provider_request_id,expires_at,resend_after)

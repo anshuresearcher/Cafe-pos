@@ -3563,7 +3563,7 @@ window.printThermalBill = async function(options = {}) {
 
     if (!(window.cafePrinters || []).some(printer => printer.is_default && printer.active !== false) && data.orderId) {
         try { window.cafePrinters = await api("/printers?source=order"); }
-        catch (error) { return alert("Could not load an order printer: " + error.message); }
+        catch (error) { showProfileToast("Could not load an order printer: " + error.message); return; }
     }
 
     const defaultPrinter = (window.cafePrinters || []).find(function(printer) {
@@ -3571,7 +3571,8 @@ window.printThermalBill = async function(options = {}) {
     });
 
     if (!defaultPrinter) {
-        return alert("No default bill printer is configured. Open Printer settings and select a default printer.");
+        showProfileToast("No default bill printer is configured. Open Printer settings and select a default printer.");
+        return;
     }
 
     const markBillPrinted=async()=>{
@@ -3602,12 +3603,25 @@ window.printThermalBill = async function(options = {}) {
                         header: appSettings.header,
                         footer: appSettings.footer,
                         customerMessage: appSettings.customerMessage,
-                        showPoweredByCafePilot: appSettings.showPoweredByCafePilot
+                        showPoweredByCafePilot: appSettings.showPoweredByCafePilot,
+                        uppercaseItems: appSettings.uppercaseItems === true
                     }
                 });
                 if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the invoice PDF.");
                 await markBillPrinted();
                 showProfileToast((data.isOpenOrder ? "Proforma PDF saved to " : "Invoice PDF saved to ") + result.outputFile);
+                return;
+            }
+            if (window.cafePOSDesktop?.printReceipt) {
+                const result = await window.cafePOSDesktop.printReceipt({
+                    printerName: defaultPrinter.name,
+                    receipt,
+                    paperWidth: defaultPrinter.paper_width || appSettings.paperWidth || "80",
+                    copies: billCopies
+                });
+                if (!result?.success) throw new Error(result?.error || "Windows could not send the bill to the selected printer.");
+                await markBillPrinted();
+                showProfileToast(`Bill sent to ${result.printerName || defaultPrinter.name}.`);
                 return;
             }
             const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
@@ -3647,7 +3661,7 @@ window.printThermalBill = async function(options = {}) {
         throw new Error("Unsupported printer connection type.");
     } catch (error) {
         console.error("Direct bill printing failed:", error);
-        alert("Could not print to " + defaultPrinter.name + ": " + error.message);
+        showProfileToast("Could not print to " + defaultPrinter.name + ": " + error.message);
     }
 };
 
@@ -5775,8 +5789,13 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
             const text=receipt.join("\n");
             const printerId=Number(first.printer_id||0);
             if(printerId&&first.printer_connection_type==="local"){
-                const response=await fetch((window.CAFE_PRINT_SERVICE_URL||"http://127.0.0.1:18181")+"/print",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"})});
-                const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||"Windows print service rejected the KOT.");
+                if(window.cafePOSDesktop?.printReceipt){
+                    const result=await window.cafePOSDesktop.printReceipt({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"});
+                    if(!result?.success)throw new Error(result?.error||"Windows could not send the KOT to the selected printer.");
+                }else{
+                    const response=await fetch((window.CAFE_PRINT_SERVICE_URL||"http://127.0.0.1:18181")+"/print",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"})});
+                    const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||"Windows print service rejected the KOT.");
+                }
             }else if(printerId&&first.printer_connection_type==="network"){
                 await api(`/printers/${printerId}/print?source=kot`,{method:"POST",body:JSON.stringify({receipt:text,settings:appSettings})});
             }else if(printerId&&first.printer_connection_type==="bluetooth"){
@@ -9819,8 +9838,8 @@ function resetPrinterForm(){document.getElementById("printerForm")?.reset();docu
 function renderPrinters(){const body=document.getElementById("printersBody");if(!body)return;const rows=window.cafePrinters||[];body.innerHTML=rows.map(function(p){const type=p.connection_type||"local";const address=type==="network"?esc(p.host)+":"+esc(p.port):type==="bluetooth"?esc(p.bluetooth_name||p.name):"Windows direct printing";const label=type==="network"?"Network / IP":type==="bluetooth"?"Bluetooth":"Local computer";return '<tr><td>'+esc(p.name)+'</td><td>'+label+'</td><td>'+address+'</td><td>'+esc(p.paper_width)+'mm</td><td>'+(p.is_default?'<span class="access-status active">Default</span>':'—')+'</td><td><div class="action-row"><button type="button" onclick="testPrinter('+Number(p.id)+')">Test</button><button type="button" class="cancel-btn" onclick="editPrinter('+Number(p.id)+')">Edit</button><button type="button" class="danger-btn" onclick="deletePrinter('+Number(p.id)+')">Delete</button></div></td></tr>'}).join("")||'<tr><td colspan="6">No printers saved for this business.</td></tr>'}
 async function loadPrinters(){try{window.cafePrinters=await api("/printers");setText("printerCount",window.cafePrinters.length);renderPrinters();showPrinterMessage("");await discoverWindowsPrinters()}catch(e){window.cafePrinters=[];setText("printerCount",0);renderPrinters();showPrinterMessage(e.message,true);await discoverWindowsPrinters()}}
 function editPrinter(id){const p=(window.cafePrinters||[]).find(function(x){return Number(x.id)===Number(id)});if(!p)return;document.getElementById("printerId").value=p.id;document.getElementById("printerName").value=p.name||"";document.getElementById("printerType").value=p.connection_type||"local";document.getElementById("printerHost").value=p.host||"";document.getElementById("printerPort").value=p.port||9100;document.getElementById("printerBluetoothName").value=p.bluetooth_name||"";document.getElementById("printerServiceUuid").value=p.service_uuid||"000018f0-0000-1000-8000-00805f9b34fb";document.getElementById("printerCharacteristicUuid").value=p.characteristic_uuid||"00002af1-0000-1000-8000-00805f9b34fb";document.getElementById("printerPaperWidth").value=p.paper_width||"80";document.getElementById("printerIsDefault").checked=Boolean(p.is_default);document.getElementById("printerFormTitle").textContent="Edit Printer";togglePrinterFields();document.getElementById("kot-groups").scrollIntoView({behavior:"smooth",block:"start"})}
-async function savePrinter(){try{const id=printerFormValue("printerId");const type=printerFormValue("printerType");const selectedWindowsPrinter=type==="local"?(document.getElementById("windowsPrinterSelect")?.value||""):"";const printerName=(type==="local"&&selectedWindowsPrinter)?selectedWindowsPrinter:printerFormValue("printerName").trim();const body={name:printerName,connectionType:type,host:printerFormValue("printerHost").trim(),port:Number(printerFormValue("printerPort")||9100),bluetoothName:printerFormValue("printerBluetoothName").trim(),serviceUuid:printerFormValue("printerServiceUuid").trim(),characteristicUuid:printerFormValue("printerCharacteristicUuid").trim(),paperWidth:printerFormValue("printerPaperWidth")||"80",isDefault:document.getElementById("printerIsDefault").checked};const saved=await api(id?"/printers/"+id:"/printers",{method:id?"PUT":"POST",body:JSON.stringify(body)});showPrinterMessage("Printer saved.");resetPrinterForm();await loadPrinters();if(saved.printer)showPrinterMessage("Saved "+saved.printer.name+".")}catch(e){showPrinterMessage(e.message,true)}}
-async function deletePrinter(id){if(!confirm("Delete this saved printer?"))return;try{await api("/printers/"+id,{method:"DELETE"});await loadPrinters();showPrinterMessage("Printer deleted.")}catch(e){showPrinterMessage(e.message,true)}}
+async function savePrinter(){try{const id=printerFormValue("printerId");const type=printerFormValue("printerType");const selectedWindowsPrinter=type==="local"?(document.getElementById("windowsPrinterSelect")?.value||""):"";const printerName=(type==="local"&&selectedWindowsPrinter)?selectedWindowsPrinter:printerFormValue("printerName").trim();const body={name:printerName,connectionType:type,host:printerFormValue("printerHost").trim(),port:Number(printerFormValue("printerPort")||9100),bluetoothName:printerFormValue("printerBluetoothName").trim(),serviceUuid:printerFormValue("printerServiceUuid").trim(),characteristicUuid:printerFormValue("printerCharacteristicUuid").trim(),paperWidth:printerFormValue("printerPaperWidth")||"80",isDefault:document.getElementById("printerIsDefault").checked};const saved=await api(id?"/printers/"+id:"/printers",{method:id?"PUT":"POST",body:JSON.stringify(body)});const savedPrinter=saved.printer||{};const savedId=Number(savedPrinter.id||id||0);if(type==="bluetooth"&&pendingBluetoothPrinterPair?.deviceId&&savedId)rememberBluetoothPrinterDevice(savedId,pendingBluetoothPrinterPair.deviceId,pendingBluetoothPrinterPair.businessId);pendingBluetoothPrinterPair=null;showPrinterMessage("Printer saved.");resetPrinterForm();await loadPrinters();if(saved.printer)showPrinterMessage("Saved "+saved.printer.name+".")}catch(e){showPrinterMessage(e.message,true)}}
+ async function deletePrinter(id){if(!confirm("Delete this saved printer?"))return;try{await api("/printers/"+id,{method:"DELETE"});forgetBluetoothPrinterDevice(id);await loadPrinters();showPrinterMessage("Printer deleted.")}catch(e){showPrinterMessage(e.message,true)}}
 function printerReceiptText(data,paperWidth="80"){
     const width=paperWidth==="58"?32:48;
     const currency=appSettings.currency||"₹";
@@ -9885,6 +9904,11 @@ function printerReceiptText(data,paperWidth="80"){
     footer.split(/\r?\n/).map(value=>value.trim()).filter(Boolean).forEach(value=>center(value).forEach(line=>lines.push(line)));
     return lines.filter(Boolean).join("\n")+"\n\n\n";
 }
+let pendingBluetoothPrinterPair=null;
+function bluetoothPrinterDeviceStorageKey(printerId,businessId=currentUser?.business_id){return `cafeBluetoothPrinter:${Number(businessId||0)}:${Number(printerId||0)}`}
+function rememberBluetoothPrinterDevice(printerId,deviceId,businessId=currentUser?.business_id){try{localStorage.setItem(bluetoothPrinterDeviceStorageKey(printerId,businessId),String(deviceId||""))}catch(_){}}
+function readBluetoothPrinterDeviceId(printerId,businessId=currentUser?.business_id){try{return localStorage.getItem(bluetoothPrinterDeviceStorageKey(printerId,businessId))||""}catch(_){return ""}}
+function forgetBluetoothPrinterDevice(printerId,businessId=currentUser?.business_id){try{localStorage.removeItem(bluetoothPrinterDeviceStorageKey(printerId,businessId))}catch(_){}}
 function isBluetoothSelectionCancelled(error){return /user cancell?ed the requestdevice\(\) chooser|bluetooth.*selection.*cancell?ed/i.test(String(error?.message||error||""))}
 function bluetoothSelectionMessage(error){return isBluetoothSelectionCancelled(error)?"Bluetooth selection was cancelled. Try again and choose the powered-on printer from the device list.":String(error?.message||error||"Bluetooth device selection failed.")}
 function renderDesktopBluetoothDevices(payload={}){
@@ -9927,8 +9951,23 @@ async function sendBluetoothPrinterText(printer,text,center=true){
     const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";
     const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";
     const name=String(printer.bluetooth_name||printer.bluetoothName||printer.name||"").trim();
-    const requestOptions=name?{filters:[{namePrefix:name}],optionalServices:[serviceUuid]}:{acceptAllDevices:true,optionalServices:[serviceUuid]};
-    const device=await navigator.bluetooth.requestDevice(requestOptions);
+    let device;
+    if(window.cafePOSDesktop){
+        if(typeof navigator.bluetooth.getDevices!=="function")throw new Error("Bluetooth silent printing is unavailable. Open Printer & KOT Groups, edit this printer, select it once with Bluetooth setup, and save it again.");
+        const devices=await navigator.bluetooth.getDevices();
+        const rememberedId=readBluetoothPrinterDeviceId(printer.id);
+        device=rememberedId?devices.find(item=>item.id===rememberedId):null;
+        if(!device){
+            const normalizedName=name.toLocaleLowerCase();
+            const matches=devices.filter(item=>normalizedName&&String(item.name||"").trim().toLocaleLowerCase()===normalizedName);
+            if(matches.length===1){device=matches[0];rememberBluetoothPrinterDevice(printer.id,device.id);}
+            else if(matches.length>1)throw new Error("More than one paired Bluetooth printer has this name. Edit this printer and select the correct device once.");
+        }
+        if(!device)throw new Error("This Bluetooth printer has not been paired with Slash on this computer. Open Printer & KOT Groups, edit the printer, select it once with Bluetooth setup, and save.");
+    }else{
+        const requestOptions=name?{filters:[{namePrefix:name}],optionalServices:[serviceUuid]}:{acceptAllDevices:true,optionalServices:[serviceUuid]};
+        device=await navigator.bluetooth.requestDevice(requestOptions);
+    }
     const server=await device.gatt.connect();
     try{
         const service=await server.getPrimaryService(serviceUuid);
@@ -9948,6 +9987,7 @@ async function pairBluetoothFromForm(){
         const serviceUuid=printerFormValue("printerServiceUuid")||"000018f0-0000-1000-8000-00805f9b34fb";
         const device=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:[serviceUuid]});
         const name=device.name||"Bluetooth Printer";
+        pendingBluetoothPrinterPair={deviceId:device.id,businessId:Number(currentUser?.business_id||0)};
         document.getElementById("printerBluetoothName").value=name;
         if(!printerFormValue("printerName"))document.getElementById("printerName").value=name;
         showPrinterMessage("Selected "+name+". Save the printer to finish setup.");
@@ -9962,6 +10002,16 @@ async function printLocalPrinterTest(name){
             });
             if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the test PDF.");
             showPrinterMessage("Test PDF saved to " + result.outputFile);
+            return;
+        }
+        if (window.cafePOSDesktop?.printReceipt) {
+            const result = await window.cafePOSDesktop.printReceipt({
+                printerName: name,
+                receipt: "SLASH POS\nPRINTER TEST\n" + name + "\n" + formatPOSDateTime() + "\n\n\n",
+                paperWidth: document.getElementById("printerPaperWidth")?.value || appSettings.paperWidth || "80"
+            });
+            if (!result?.success) throw new Error(result?.error || "Windows could not send the printer test.");
+            showPrinterMessage("Test print sent to " + (result.printerName || name) + ".");
             return;
         }
         const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
@@ -9980,7 +10030,7 @@ async function printLocalPrinterTest(name){
             : "Windows printer test failed: " + e.message, true);
     }
 }
-async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"SLASH POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
+async function testPrinter(id){const printer=(window.cafePrinters||[]).find(function(p){return Number(p.id)===Number(id)});if(!printer)return;try{if(printer.connection_type==="local"){await printLocalPrinterTest(printer.name);return}if(printer.connection_type==="bluetooth"){await sendBluetoothPrinterText(printer,"SLASH POS PRINTER TEST\n"+printer.name+"\nConnection successful.\n\n\n");showPrinterMessage("Bluetooth test sent to "+printer.name+".");return}await api("/printers/"+id+"/test",{method:"POST"});showPrinterMessage("Network printer test sent.")}catch(e){showPrinterMessage(bluetoothSelectionMessage(e),!isBluetoothSelectionCancelled(e))}}
 function orderCategoryReportQuery(includeExport = false, notify = false) {
     const range = document.getElementById("reportDateFilter")?.value || "today";
     const params = new URLSearchParams({ range });
@@ -10703,6 +10753,7 @@ function setQrServiceVoiceOperational(operational){
     if(qrServiceSpeechRetryHandler){document.removeEventListener("pointerdown",qrServiceSpeechRetryHandler,true);document.removeEventListener("keydown",qrServiceSpeechRetryHandler,true);qrServiceSpeechRetryHandler=null;}
     qrServiceSpeechRetryArmed=false;
     try{window.speechSynthesis?.cancel();}catch(_){}
+    window.cafePOSDesktop?.cancelHindiAlert?.();
 }
 function warmQrTableServiceSpeech(){
     if(!window.speechSynthesis)return;
@@ -10785,6 +10836,14 @@ function queueQrTableServiceVoice(request){
         const generation=next.generation;
         const voice=await waitForHindiVoice();
         if(generation!==qrServiceSpeechGeneration){qrServiceSpeechActive=false;return;}
+        if(!voice&&window.cafePOSDesktop?.speakHindiAlert){
+            try{
+                const result=await window.cafePOSDesktop.speakHindiAlert(next.text);
+                if(generation!==qrServiceSpeechGeneration){qrServiceSpeechActive=false;return;}
+                if(result?.success){qrServiceSpeechActive=false;setTimeout(speakNext,180);return;}
+                if(result?.error)console.warn("Windows Hindi table-service voice fallback failed:",result.error);
+            }catch(error){console.warn("Windows Hindi table-service voice fallback failed:",error.message);}
+        }
         const utterance=new SpeechSynthesisUtterance(next.text);
         utterance.lang=voice?.lang||"hi-IN";utterance.rate=0.94;utterance.pitch=1;utterance.volume=1;
         if(voice)utterance.voice=voice;
@@ -10869,6 +10928,7 @@ function stopQrTableServiceAlerts(){
     posQrServiceRequestCursor=null;posQrServiceRequestBusy=false;qrServiceSpeechQueue=[];qrServiceSpeechActive=false;qrServiceSpeechGeneration++;pendingQrServiceAlertSounds=0;pendingQrServiceVoiceRequests=[];
     document.getElementById("qrServiceRequestToastStack")?.remove();
     try{if(window.speechSynthesis)window.speechSynthesis.cancel();}catch(_){}
+    window.cafePOSDesktop?.cancelHindiAlert?.();
 }
 let posQrOrderAlertCursor=null;
 let posQrOrderActivityCursor=null;
