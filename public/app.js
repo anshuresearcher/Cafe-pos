@@ -82,6 +82,7 @@ function scheduleSessionExpiry(expiresAt) {
 function handleAutomaticLogout(message = "Your session has expired. Please login again.") {
     clearSessionExpiryTimer();
     stopSessionHeartbeat();
+    stopDashboardAutoRefresh();
     stopReservationAutoRefresh();
     stopPOSQrOrderAlerts?.();
 
@@ -124,6 +125,10 @@ let selectedPOSChannelKey = "";
 
 let restaurantTables = [];
 let currentOrders = [];
+let selectedTableViewNumber = "";
+let tableViewStatusFilter = "all";
+let tableViewOrderRequestToken = 0;
+let dashboardAutoRefreshTimer = null;
 let currentMenu = [];
 let currentCustomers = [];
 let currentReservations = [];
@@ -658,7 +663,7 @@ async function loginUser(event) {
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();stopQrTableServiceAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopDashboardAutoRefresh();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();stopQrTableServiceAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){try {
     const r = await api("/auth/me");
 
@@ -997,6 +1002,7 @@ async function startAuthenticatedApp(){
     await loadSettings();
     startSessionHeartbeat();
     startReservationAutoRefresh();
+    startDashboardAutoRefresh();
     startPOSQrOrderAlerts();
     startQrTableServiceAlerts();
     stopKOTAlertPolling();
@@ -4211,8 +4217,14 @@ async function viewOrder(orderId) {
             if (moreMenu) moreMenu.innerHTML = menuItems.join("");
             if (toolbar) toolbar.hidden = false;
             renderQrOrderWorkflow(order);
-            actions.innerHTML = "";
-            actions.hidden = true;
+            const canCheckout = !closed && !cancelled && canTakePayment && hasPermission("payments", "create") && hasPermission("new_order", "view");
+            const checkoutTitle = !hasPermission("payments", "create") || !hasPermission("new_order", "view")
+                ? "Checkout access is required to complete this order."
+                : isQrOrder && status !== "ready"
+                    ? "Accept this QR order and mark it ready before checkout."
+                    : "Checkout";
+            actions.innerHTML = `<button type="button" class="order-detail-print-btn" onclick="printCurrentOrder()"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/></svg>Print bill</button>${!closed && !cancelled ? `<button type="button" class="order-detail-checkout-btn" onclick="${isQrOrder ? `checkoutQrOrder(${orderIdValue})` : `payOpenOrder(${orderIdValue})`}"${canCheckout ? "" : ` disabled title="${esc(checkoutTitle)}"`}>Checkout <span aria-hidden="true">→</span></button>` : ""}`;
+            actions.hidden = false;
         }
         document.querySelectorAll(".order-list-card").forEach(card => card.classList.toggle("selected", Number(card.dataset.orderId) === Number(order.id)));
 
@@ -4399,6 +4411,127 @@ async function printCurrentOrder() {
     await window.printThermalBill({ manual: true });
 }
 
+function getActiveOrderForTable(tableNumber) {
+    return (Array.isArray(currentOrders) ? currentOrders : [])
+        .filter(order => String(order.table_number || "") === String(tableNumber || ""))
+        .filter(order => !["completed", "cancelled"].includes(String(order.status || "").toLowerCase()))
+        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
+}
+
+function selectTableViewTable(tableNumber) {
+    selectedTableViewNumber = String(tableNumber || "");
+    document.querySelectorAll("#billingTablesGrid .billing-table-card").forEach(card => {
+        card.classList.toggle("selected", card.dataset.tableNumber === selectedTableViewNumber);
+    });
+    renderTableViewOrderPanel(selectedTableViewNumber);
+}
+
+function setTableViewFilter(filter) {
+    const allowed = ["all", "available", "occupied", "reserved"];
+    tableViewStatusFilter = allowed.includes(String(filter).toLowerCase()) ? String(filter).toLowerCase() : "all";
+    const grid = document.getElementById("billingTablesGrid");
+    if (grid) grid.scrollTop = 0;
+    document.querySelectorAll("[data-table-view-filter]").forEach(button => {
+        const active = button.dataset.tableViewFilter === tableViewStatusFilter;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-pressed", String(active));
+    });
+    applyTableViewFilter();
+}
+
+function applyTableViewFilter() {
+    const grid = document.getElementById("billingTablesGrid");
+    if (!grid) return;
+    const cards = [...grid.querySelectorAll(".billing-table-card")];
+    const visibleCards = cards.filter(card => tableViewStatusFilter === "all" || card.dataset.tableStatus === tableViewStatusFilter);
+    cards.forEach(card => { card.hidden = !visibleCards.includes(card); });
+    setText("tableViewVisibleCount", tableViewStatusFilter === "all"
+        ? `${cards.length} ${cards.length === 1 ? "table" : "tables"}`
+        : `${visibleCards.length} ${tableViewStatusFilter} ${visibleCards.length === 1 ? "table" : "tables"}`);
+
+    const visibleSelection = visibleCards.find(card => card.dataset.tableNumber === selectedTableViewNumber);
+    if (!visibleCards.length) {
+        const panel = document.getElementById("tableViewOrderPanel");
+        if (panel) panel.innerHTML = `<div class="table-view-empty"><span aria-hidden="true">▦</span><strong>No ${esc(tableViewStatusFilter)} tables</strong><p>There are no tables in this status right now. Choose another filter to see more tables.</p></div>`;
+        return;
+    }
+    const nextSelection = visibleSelection || visibleCards[0];
+    selectedTableViewNumber = nextSelection.dataset.tableNumber || "";
+    cards.forEach(card => card.classList.toggle("selected", card === nextSelection));
+    renderTableViewOrderPanel(selectedTableViewNumber);
+}
+
+function updateTableViewFilterCounts() {
+    const cards = [...(document.getElementById("billingTablesGrid")?.querySelectorAll(".billing-table-card") || [])];
+    setText("tableViewAllCount", cards.length);
+    setText("tableViewAvailableCount", cards.filter(card => card.dataset.tableStatus === "available").length);
+    setText("tableViewOccupiedCount", cards.filter(card => card.dataset.tableStatus === "occupied").length);
+    setText("tableViewReservedCount", cards.filter(card => card.dataset.tableStatus === "reserved").length);
+}
+
+async function printTableViewOrder(orderId) {
+    try {
+        const data = await api(`/orders/${Number(orderId)}`);
+        currentOrderForDetails = data;
+        await printCurrentOrder();
+    } catch (error) {
+        alert("Unable to print this order: " + error.message);
+    }
+}
+
+async function renderTableViewOrderPanel(tableNumber = selectedTableViewNumber) {
+    const panel = document.getElementById("tableViewOrderPanel");
+    if (!panel) return;
+    const requestToken = ++tableViewOrderRequestToken;
+    const table = (restaurantTables || []).find(entry => String(entry.table_number) === String(tableNumber));
+    if (!table) {
+        panel.innerHTML = `<div class="table-view-empty"><span aria-hidden="true">▦</span><strong>Select a table</strong><p>Its current order and checkout actions will appear here.</p></div>`;
+        return;
+    }
+
+    const activeOrder = getActiveOrderForTable(table.table_number);
+    if (!activeOrder) {
+        const canStart = String(table.status || "").toLowerCase() === "available" && hasPermission("new_order", "view");
+        const occupiedWithoutAccess = String(table.status || "").toLowerCase() === "occupied" && !hasPermission("orders", "view");
+        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">TABLE</span><h3>${esc(table.table_number)}</h3><p>${esc(table.capacity || 0)} seats</p></div><span class="table-view-state ${String(table.status || "available").toLowerCase()}">${esc(table.status || "Available")}</span></div><div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">${occupiedWithoutAccess ? "🔒" : "🧾"}</span><strong>${occupiedWithoutAccess ? "Order details are restricted" : String(table.status || "").toLowerCase() === "occupied" ? "No active order found" : "No open order"}</strong><p>${occupiedWithoutAccess ? "You need order viewing access to see this table’s order." : String(table.status || "").toLowerCase() === "occupied" ? "This table is marked occupied, but there is no active order to show." : "Start a dine-in order for this table when your guests are ready."}</p>${canStart ? `<button type="button" class="table-view-start-btn" onclick="selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, "&quot;")},'Available')">＋ Start order</button>` : ""}</div>`;
+        return;
+    }
+
+    if (!hasPermission("orders", "view")) {
+        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">TABLE</span><h3>${esc(table.table_number)}</h3></div><span class="table-view-state occupied">Occupied</span></div><div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">🔒</span><strong>Order details are restricted</strong><p>You need order viewing access to see this table’s order.</p></div>`;
+        return;
+    }
+
+    panel.innerHTML = `<div class="table-view-order-loading"><span class="pos-sync-spinner" aria-hidden="true"></span><span>Loading order…</span></div>`;
+    try {
+        const data = await api(`/orders/${Number(activeOrder.id)}`);
+        if (requestToken !== tableViewOrderRequestToken) return;
+        currentOrderForDetails = data;
+        const order = data.order || activeOrder;
+        let paymentSummary = data.paymentSummary || null;
+        if (!paymentSummary) {
+            try { paymentSummary = await api(`/orders/${Number(order.id)}/payment-summary`); } catch (_) { paymentSummary = null; }
+        }
+        if (requestToken !== tableViewOrderRequestToken) return;
+        const items = Array.isArray(data.items) ? data.items : [];
+        const amountCollected = Number(paymentSummary?.amountCollected ?? order.amount_collected ?? 0);
+        const amountDue = Math.max(0, Number(paymentSummary?.amountDue ?? (Number(order.total || 0) - amountCollected)));
+        const status = String(order.status || "Open");
+        const normalizedStatus = status.toLowerCase();
+        const isQrOrder = isQrTrackedOrder(order);
+        const canCheckout = hasPermission("payments", "create") && hasPermission("new_order", "view") && (!isQrOrder || normalizedStatus === "ready");
+        const checkoutTitle = !hasPermission("payments", "create") || !hasPermission("new_order", "view")
+            ? "Checkout access is required to complete this order."
+            : isQrOrder && normalizedStatus !== "ready"
+                ? "Accept this QR order and mark it ready before checkout."
+                : "Checkout";
+        const itemRows = items.map(item => `<tr><td>${esc(item.item_name || "Item")}${formatItemOptionNames(item.options) ? `<small>${esc(formatItemOptionNames(item.options))}</small>` : ""}</td><td>${Number(item.quantity || 0)}</td><td>${money(item.price)}</td><td>${money(item.line_total)}</td></tr>`).join("");
+        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">OPEN TABLE ORDER</span><h3>${esc(table.table_number)}</h3><p>${esc(order.order_number || `Order #${order.id}`)} · ${order.created_at ? esc(formatPOSDateTime(order.created_at)) : ""}</p></div><span class="table-view-state occupied">${esc(status)}</span></div>${order.customer_name || order.customer_phone ? `<div class="table-view-customer"><strong>Customer</strong><span>${esc(order.customer_name || "")}${order.customer_phone ? ` · ${esc(order.customer_phone)}` : ""}</span></div>` : ""}<div class="table-view-order-items"><div class="table-container"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${itemRows || `<tr><td colspan="4">No items on this order.</td></tr>`}</tbody></table></div></div><div class="table-view-order-totals"><div><span>Subtotal</span><strong>${money(order.subtotal)}</strong></div><div><span>GST</span><strong>${money(order.gst)}</strong></div>${Number(order.discount || 0) > 0 ? `<div><span>Discount</span><strong>−${money(order.discount)}</strong></div>` : ""}${Number(order.service_charge || 0) > 0 ? `<div><span>Charges</span><strong>${money(order.service_charge)}</strong></div>` : ""}<div class="table-view-total"><span>Total</span><strong>${money(order.total)}</strong></div><div><span>Amount collected</span><strong>${money(amountCollected)}</strong></div><div class="table-view-due"><span>Amount due</span><strong>${money(amountDue)}</strong></div></div><div class="table-view-order-actions"><button type="button" class="order-detail-print-btn" onclick="printTableViewOrder(${Number(order.id)})"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/></svg>Print bill</button><button type="button" class="order-detail-checkout-btn" onclick="${isQrOrder ? `checkoutQrOrder(${Number(order.id)})` : `payOpenOrder(${Number(order.id)})`}"${canCheckout ? "" : ` disabled title="${esc(checkoutTitle)}"`}>Checkout <span aria-hidden="true">→</span></button></div>`;
+    } catch (error) {
+        if (requestToken === tableViewOrderRequestToken) panel.innerHTML = `<div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">!</span><strong>Couldn’t load this order</strong><p>${esc(error.message || "Refresh the table view and try again.")}</p></div>`;
+    }
+}
+
 // ==========================================
 // TABLE MANAGEMENT
 // ==========================================
@@ -4409,6 +4542,19 @@ async function loadTables() {
 
         restaurantTables =
             await api("/tables");
+
+        const tableViewActive = document.getElementById("table-view")?.classList.contains("active-page");
+        if (tableViewActive) {
+            if (hasPermission("orders", "view")) {
+                try { currentOrders = await api("/orders"); }
+                catch (error) { currentOrders = []; console.warn("Unable to refresh table orders:", error.message); }
+            } else {
+                currentOrders = [];
+            }
+            if (!restaurantTables.some(table => String(table.table_number) === selectedTableViewNumber)) {
+                selectedTableViewNumber = restaurantTables.find(table => getActiveOrderForTable(table.table_number))?.table_number || restaurantTables[0]?.table_number || "";
+            }
+        }
 
 
         window.restaurantTables =
@@ -4511,19 +4657,36 @@ async function loadTables() {
 
         const billingGrid = document.getElementById("billingTablesGrid");
         if (billingGrid) {
+            const billingGridScrollTop = billingGrid.scrollTop;
             billingGrid.innerHTML = restaurantTables.map(function(table) {
-                const status = String(table.status || "Available").toLowerCase();
-                const active = document.getElementById("tableNumber")?.value === table.table_number;
-                const label = status === "occupied" ? "Occupied" : status === "reserved" ? "Reserved" : "Available";
+                const activeOrder = getActiveOrderForTable(table.table_number);
+                const status = activeOrder ? "occupied" : String(table.status || "Available").toLowerCase();
+                const active = tableViewActive
+                    ? String(selectedTableViewNumber) === String(table.table_number)
+                    : document.getElementById("tableNumber")?.value === table.table_number;
+                const label = activeOrder ? String(activeOrder.status || "Open") : status === "occupied" ? "Occupied" : status === "reserved" ? "Reserved" : "Available";
                 return `
                     <button type="button"
                         class="billing-table-card ${status} ${active ? "selected" : ""}"
-                        onclick="selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, '&quot;')}, ${JSON.stringify(String(table.status)).replace(/"/g, '&quot;')})">
+                        data-table-number="${esc(table.table_number)}"
+                        data-table-status="${status}"
+                        onclick="${tableViewActive ? `selectTableViewTable(${JSON.stringify(String(table.table_number)).replace(/"/g, '&quot;')})` : `selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, '&quot;')}, ${JSON.stringify(String(table.status)).replace(/"/g, '&quot;')})`}">
                         <span class="billing-table-number">${esc(table.table_number)}</span>
                         <span class="billing-table-seat">${esc(table.capacity)} seats</span>
-                        <span class="billing-table-status">${label}</span>
+                        <span class="billing-table-status">${esc(label)}</span>
+                        ${activeOrder ? `<small class="billing-table-order-ref">${esc(activeOrder.order_number || `Order #${activeOrder.id}`)} · ${money(activeOrder.total)}</small>` : ""}
                     </button>`;
             }).join("") || `<div class="billing-table-empty">No tables configured.</div>`;
+            billingGrid.scrollTop = billingGridScrollTop;
+            if (tableViewActive) {
+                document.querySelectorAll("[data-table-view-filter]").forEach(button => {
+                    const active = button.dataset.tableViewFilter === tableViewStatusFilter;
+                    button.classList.toggle("active", active);
+                    button.setAttribute("aria-pressed", String(active));
+                });
+                updateTableViewFilterCounts();
+                applyTableViewFilter();
+            }
         }
 
         setText(
@@ -8326,6 +8489,22 @@ async function updateDashboard() {
 
 }
 
+function stopDashboardAutoRefresh() {
+    if (dashboardAutoRefreshTimer) {
+        clearInterval(dashboardAutoRefreshTimer);
+        dashboardAutoRefreshTimer = null;
+    }
+}
+
+function startDashboardAutoRefresh() {
+    stopDashboardAutoRefresh();
+    dashboardAutoRefreshTimer = setInterval(() => {
+        if (document.visibilityState === "visible" && currentUser && hasPermission("dashboard", "view") && document.getElementById("dashboard")?.classList.contains("active-page")) {
+            updateDashboard().catch(error => console.warn("Dashboard refresh failed:", error.message));
+        }
+    }, 15000);
+}
+
 
 // ==========================================
 // SALES & REPORTS
@@ -11019,6 +11198,8 @@ function stopPOSQrOrderAlerts(){
 }
 if(!window.__qrOrderRefreshTimer){
     window.__qrOrderRefreshTimer=setInterval(()=>{
-        if(document.visibilityState==="visible"&&currentUser&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))updateOrdersTable(true,Date.now()-lastOrderDetailsRefreshAt>=60000);
+        if(document.visibilityState!=="visible"||!currentUser)return;
+        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))updateOrdersTable(true,Date.now()-lastOrderDetailsRefreshAt>=60000);
+        else if(hasPermission("tables","view")&&document.getElementById("table-view")?.classList.contains("active-page"))loadTables();
     },15000);
 }

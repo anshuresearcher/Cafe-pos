@@ -404,7 +404,7 @@
             </button>
 
                 <div class="profile-widget">
-                    <button type="button" id="profileAvatarBtn" class="profile-avatar-btn" onclick="toggleProfilePanel()" aria-haspopup="true" aria-expanded="false">
+                    <button type="button" id="profileAvatarBtn" class="profile-avatar-btn" onclick="toggleProfilePanel()" aria-label="Open account menu" title="Account menu" aria-haspopup="true" aria-expanded="false">
                         <span id="profileAvatarInitial">U</span>
                     </button>
 
@@ -663,22 +663,21 @@
         </section>
 
         <section id="table-view" class="page billing-table-view-page">
-            <div class="billing-table-view-heading">
-                <div>
-                    <span class="eyebrow">POINT OF SALE</span>
-                    <h2>Table View</h2>
-                    <p>Choose a table to start or continue a dine-in order.</p>
-                </div>
-                <div class="billing-table-legend" aria-label="Table status">
-                    <span><i class="available"></i>Available</span>
-                    <span><i class="occupied"></i>Occupied</span>
-                    <span><i class="reserved"></i>Reserved</span>
-                </div>
+            <div id="tableArea" class="billing-tables-area table-view-workspace">
+                <section class="table-view-list-panel" aria-label="Restaurant tables">
+                    <div class="table-view-list-heading"><div><strong>Select a table</strong><span id="billingTableHint">Choose any table to see its order.</span></div><small id="tableViewVisibleCount">Loading tables…</small></div>
+                    <div class="table-view-filters" role="group" aria-label="Filter tables by status">
+                        <button type="button" class="active" data-table-view-filter="all" aria-pressed="true" onclick="setTableViewFilter('all')">All <span id="tableViewAllCount">0</span></button>
+                        <button type="button" data-table-view-filter="available" aria-pressed="false" onclick="setTableViewFilter('available')">Available <span id="tableViewAvailableCount">0</span></button>
+                        <button type="button" data-table-view-filter="occupied" aria-pressed="false" onclick="setTableViewFilter('occupied')">Occupied <span id="tableViewOccupiedCount">0</span></button>
+                        <button type="button" data-table-view-filter="reserved" aria-pressed="false" onclick="setTableViewFilter('reserved')">Reserved <span id="tableViewReservedCount">0</span></button>
+                    </div>
+                    <div id="billingTablesGrid" class="billing-tables-grid"></div>
+                </section>
+                <aside id="tableViewOrderPanel" class="table-view-order-panel" aria-label="Selected table order" aria-live="polite">
+                    <div class="table-view-empty"><span aria-hidden="true">▦</span><strong>Select a table</strong><p>Its current order and checkout actions will appear here.</p></div>
+                </aside>
             </div>
-            <div id="tableArea" class="billing-tables-area">
-                            <div class="billing-tables-heading"><strong>Select a table</strong><span id="billingTableHint">Green = available · Yellow = occupied</span></div>
-                            <div id="billingTablesGrid" class="billing-tables-grid"></div>
-                        </div>
         </section>
         <section id="orders" class="page orders-page">
             <div class="orders-tabs" role="tablist" aria-label="Order status">

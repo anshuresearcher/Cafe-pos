@@ -1721,12 +1721,11 @@ body{
    ===================================================== */
 .profile-widget{position:relative;display:flex;align-items:center;}
 .profile-avatar-btn{
-  width:38px;height:38px;border-radius:50%;
-  border:none;cursor:pointer;
-  background:var(--pos-accent,#1f6feb);
-  color:#fff;font-size:15px;font-weight:700;
-  display:flex;align-items:center;justify-content:center;
-  box-shadow:0 2px 6px rgba(20,30,50,.15);
+  width:40px;height:40px;border-radius:50%;
+  border:0;cursor:pointer;
+  background:#111827;color:#fff;font-size:15px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;overflow:hidden;padding:0;
+  box-shadow:0 3px 9px rgba(20,30,50,.2);
   transition:box-shadow .15s ease, transform .15s ease;
 }
 .profile-avatar-btn:hover{box-shadow:0 4px 12px rgba(20,30,50,.22);transform:translateY(-1px);}
@@ -1924,13 +1923,13 @@ body:has(#new-order.active-page) .billing-menu-panel .food-card-content .food-me
 body:has(#new-order.active-page) .billing-menu-panel .food-card-bottom{margin-top:4px}
 body:has(#new-order.active-page) .billing-menu-panel .food-card-bottom button{display:none}
 body:has(#new-order.active-page) .billing-menu-panel .food-card-bottom strong{font-size:12px}
-body:has(#new-order.active-page) .billing-cart-panel{position:relative;z-index:4;display:flex;flex-direction:column;padding:0;overflow:auto;background:#fff;border:0;border-left:1px solid #e7e9ed}
+body:has(#new-order.active-page) .billing-cart-panel{position:relative;z-index:4;display:flex;flex-direction:column;padding:0;overflow-y:auto;overflow-x:hidden;background:#fff;border:0;border-left:1px solid #e7e9ed}
 body:has(#new-order.active-page) .billing-cart-header{padding:13px 16px 10px;border-bottom:1px solid #eceff2}
-body:has(#new-order.active-page) .billing-cart-items{min-height:60px;padding:0 14px}
+body:has(#new-order.active-page) .billing-cart-items{flex:1 1 auto;min-height:0;padding:0 14px;overscroll-behavior:contain}
 body:has(#new-order.active-page) .billing-customer-panel{margin:9px 12px;padding:10px;background:#f8fafc;border:1px solid #e7ebef;border-radius:8px}
 body:has(#new-order.active-page) .billing-customer-fields{grid-template-columns:1fr 1fr}
 body:has(#new-order.active-page) .billing-customer-fields input{width:100%;padding:8px;border:1px solid #dfe4ea;border-radius:7px;background:#fff}
-body:has(#new-order.active-page) .billing-action-row{position:static;padding:10px 12px;background:#fff}
+body:has(#new-order.active-page) .billing-action-row{position:sticky;bottom:0;z-index:5;flex:0 0 auto;margin-top:auto;padding:10px 12px max(10px,env(safe-area-inset-bottom));background:rgba(255,255,255,.98);box-shadow:0 -6px 14px rgba(17,24,39,.06);}
 body:has(#new-order.active-page) .billing-action-row .save-order-btn,
 body:has(#new-order.active-page) .billing-action-row .pay-btn{min-height:46px;padding:10px;font-size:12px}
 
@@ -2147,6 +2146,48 @@ body:has(#table-view.active-page) .billing-table-view-page .billing-table-card.r
   body:has(#table-view.active-page) .main>.billing-table-view-page.active-page{padding:18px 14px}
   body:has(#table-view.active-page) .billing-table-view-page .billing-tables-grid{grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:10px}
 }
+.billing-table-view-page .billing-tables-area.table-view-workspace{display:grid;grid-template-columns:minmax(270px,.82fr) minmax(0,1.35fr);align-items:stretch;gap:14px;height:calc(100% - 76px);min-height:470px;padding:12px;overflow:hidden}
+.table-view-list-panel{display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden}
+.billing-table-view-page .table-view-list-panel .billing-tables-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:2px 3px 12px}
+.billing-table-view-page .table-view-list-panel .billing-tables-grid{display:grid;flex:1;align-content:start;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:10px;min-height:0;max-height:none;padding:2px 4px 8px 2px;overflow:auto}
+.billing-table-view-page .table-view-list-panel .billing-table-card{position:relative;display:flex;min-height:112px;align-items:flex-start;justify-content:center;gap:5px;padding:14px 12px;border:1px solid #e3e8ec;border-radius:13px;background:#fff;text-align:left;transition:border-color .16s ease,background .16s ease,box-shadow .16s ease,transform .16s ease}
+.billing-table-view-page .table-view-list-panel .billing-table-card:hover{transform:translateY(-1px);border-color:#adbcc5;box-shadow:0 6px 16px rgba(24,39,50,.07)}
+.billing-table-view-page .table-view-list-panel .billing-table-card.selected{outline:0;border-color:#202936;background:#f3f6f8;box-shadow:0 0 0 2px rgba(32,41,54,.09)}
+.billing-table-view-page .table-view-list-panel .billing-table-card.occupied{background:#fffaf0;border-color:#e8d3a7}
+.billing-table-view-page .table-view-list-panel .billing-table-card.occupied.selected{border-color:#9b7320;background:#fff7e5}
+.billing-table-view-page .billing-table-order-ref{max-width:100%;overflow:hidden;color:#6b7580;font-size:9px;text-overflow:ellipsis;white-space:nowrap}
+.table-view-order-panel{display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden;border:1px solid #e3e8ec;border-radius:13px;background:#fff;box-shadow:0 4px 16px rgba(15,23,42,.035)}
+.table-view-order-heading{display:flex;flex:0 0 auto;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 18px;border-bottom:1px solid #edf0f2}
+.table-view-order-heading h3{margin:4px 0;color:#26343d;font-size:19px}
+.table-view-order-heading p{margin:4px 0 0;color:#7a8790;font-size:11px}
+.table-view-state{flex:0 0 auto;padding:6px 9px;border-radius:999px;background:#edf7ef;color:#34734c;font-size:10px;font-weight:800;text-transform:capitalize}
+.table-view-state.occupied,.table-view-state.pending,.table-view-state.preparing,.table-view-state.ready{background:#fff3db;color:#91600b}
+.table-view-state.reserved{background:#fff0f0;color:#a33c3c}
+.table-view-customer{display:flex;flex:0 0 auto;align-items:center;gap:10px;margin:12px 14px 0;padding:11px 13px;border:1px solid #e8edeb;border-radius:10px;background:#f8faf9;color:#4a5960;font-size:11px}
+.table-view-customer strong{color:#283941}
+.table-view-order-items{flex:1 1 auto;min-height:100px;padding:13px 14px;overflow:auto}
+.table-view-order-items .table-container{overflow:auto;border:1px solid #e9edef;border-radius:9px}
+.table-view-order-items table{width:100%;border-collapse:collapse}
+.table-view-order-items th,.table-view-order-items td{padding:10px 9px;border-bottom:1px solid #edf0f2;text-align:left;font-size:11px}
+.table-view-order-items th{background:#f8fafb;color:#78848c;font-size:10px;text-transform:uppercase}
+.table-view-order-items td small{display:block;margin-top:3px;color:#77858b;font-size:10px}
+.table-view-order-totals{display:grid;flex:0 0 auto;gap:7px;margin:0 14px 12px;padding:13px;border:1px solid #e8ecef;border-radius:10px;background:#fbfcfd}
+.table-view-order-totals>div{display:flex;justify-content:space-between;gap:12px;color:#64717a;font-size:11px}
+.table-view-order-totals strong{color:#29363e}
+.table-view-order-totals .table-view-total{padding-top:8px;border-top:1px solid #e7ebee;color:#202b33;font-size:14px;font-weight:800}
+.table-view-order-totals .table-view-total strong{font-size:15px}
+.table-view-order-totals .table-view-due{color:#467144;font-weight:750}
+.table-view-order-totals .table-view-due strong{color:#467144}
+.table-view-order-actions{display:flex;flex:0 0 auto;gap:9px;margin-top:auto;padding:12px 14px max(12px,env(safe-area-inset-bottom));border-top:1px solid #edf0f2;background:#fafcfc}
+.table-view-empty{display:grid;flex:1;align-content:center;justify-items:center;gap:8px;padding:28px;color:#7c878e;text-align:center}
+.table-view-empty>span{display:grid;width:44px;height:44px;place-items:center;border:1px solid #e5eaed;border-radius:13px;background:#f7f9fa;color:#6e7c84;font-size:22px}
+.table-view-empty strong{color:#36454d;font-size:14px}
+.table-view-empty p{max-width:300px;margin:0;color:#7a8790;font-size:11px;line-height:1.5}
+.table-view-empty-inline{min-height:0}
+.table-view-start-btn{min-height:40px;margin-top:8px;padding:8px 14px;border:0;border-radius:9px;background:#111827;color:#fff;font-size:11px;font-weight:750;cursor:pointer}
+.table-view-order-loading{display:flex;flex:1;align-items:center;justify-content:center;gap:10px;color:#74818a;font-size:12px}
+@media(max-width:760px){.billing-table-view-page .billing-tables-area.table-view-workspace{grid-template-columns:1fr;height:auto;min-height:0;overflow:visible}.table-view-list-panel{min-height:300px}.billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(auto-fill,minmax(115px,1fr));max-height:42vh}.table-view-order-panel{min-height:430px}.table-view-order-actions{position:sticky;bottom:0}}
+@media(max-width:420px){.billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table-view-order-heading{padding:13px}.table-view-order-items{padding:10px}.table-view-order-totals{margin:0 10px 10px}.table-view-order-actions{padding:10px}.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{min-height:42px;padding:8px;font-size:11px}}
 /* POS checkout, business info, channel preferences and Marketing */
 .login-business-welcome{display:flex;align-items:center;gap:7px;margin:14px 0 2px;padding:11px 14px;border:1px solid #dedede;border-radius:12px;background:#f6f6f6;color:#555;font-size:13px}.login-business-welcome[hidden]{display:none}.login-business-welcome strong{color:#111;font-weight:700}
 .pos-sale-channel{display:flex;flex-direction:column;gap:3px;min-width:142px;color:#666;font-size:11px;font-weight:700;text-align:left}.pos-sale-channel select{min-height:42px;padding:8px 30px 8px 11px;border:1px solid #d8d8d8;border-radius:10px;background:#fff;color:#171717;font:inherit;font-size:13px}
@@ -2792,6 +2833,17 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 @media(max-width:900px){.orders-workspace{grid-template-columns:minmax(260px,.82fr) minmax(0,1.18fr)}.orders-list-panel,.orders-detail-panel{max-height:calc(100vh - 275px)}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:700px){.orders-workspace{grid-template-columns:1fr}.orders-list-panel,.orders-detail-panel{max-height:none;min-height:0}.orders-list-panel{max-height:42vh}.orders-detail-panel{min-height:400px}.orders-filter-bar{align-items:stretch}.orders-filter-bar label{flex:1 1 42%;min-width:130px}.orders-filter-reset{flex:1 1 100%}.order-detail-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.orders-search{width:100%}.kot-target-picker-card{grid-template-columns:1fr;align-items:start}.kot-target-picker-card .table-action-btn{justify-self:start}.kot-target-chips{grid-column:1}}
 @media(max-width:700px){.orders-page{width:calc(100% + 16px)}}
+
+/* Keep order actions anchored at the bottom of the order details pane. */
+.orders-detail-panel>#orderDetailsContent{flex:1 1 auto;min-height:0;overflow:auto}
+.orders-detail-panel>.orders-detail-actions{flex:0 0 auto;margin-top:auto;padding:12px 18px max(12px,env(safe-area-inset-bottom));background:rgba(250,252,252,.98);box-shadow:0 -6px 16px rgba(30,48,56,.045)}
+.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-checkout-btn,.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{display:inline-flex;flex:1;align-items:center;justify-content:center;gap:9px;min-height:46px;padding:10px 15px;border:1px solid #d7dfe5;border-radius:10px;background:#fff;color:#26343d;font-size:12px;font-weight:750;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
+.orders-detail-actions .order-detail-print-btn:hover,.table-view-order-actions .order-detail-print-btn:hover{background:#f6f9fa;box-shadow:0 4px 12px rgba(25,45,55,.08);transform:translateY(-1px)}
+.order-detail-print-btn svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.orders-detail-actions .order-detail-checkout-btn,.table-view-order-actions .order-detail-checkout-btn{border-color:#111827;background:#111827;color:#fff}
+.orders-detail-actions .order-detail-checkout-btn:hover:not(:disabled),.table-view-order-actions .order-detail-checkout-btn:hover:not(:disabled){background:#263448;box-shadow:0 5px 14px rgba(17,24,39,.18);transform:translateY(-1px)}
+.orders-detail-actions button:disabled,.table-view-order-actions button:disabled{cursor:not-allowed;opacity:.46}
+@media(max-width:480px){.orders-detail-panel>.orders-detail-actions{padding-right:12px;padding-left:12px}.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-checkout-btn{min-height:42px;padding:8px;font-size:11px}}
 
 /* Keep the order filters grouped behind a visible control beside search. */
 .orders-search-tools{display:flex;align-items:center;gap:8px;min-width:0}
@@ -3731,11 +3783,12 @@ body:has(#new-order.active-page) .billing-workspace{height:calc(100% - 60px)}
 #billModal.bill-preview-sidecar .bill-preview-toolbar .bill-preview-close{font-size:27px}
 
 /* Keep the existing account control available in the billing top bar. */
-body:has(#new-order.active-page) .main>.header{position:fixed;top:9px;right:16px;z-index:1200;display:flex!important;align-items:flex-start;justify-content:flex-end;width:38px;height:38px;margin:0;padding:0;overflow:visible}
+body:has(#new-order.active-page) .main>.header{position:fixed;top:9px;right:16px;z-index:1200;display:flex!important;align-items:flex-start;justify-content:flex-end;width:40px;height:40px;margin:0;padding:0;overflow:visible}
 body:has(#new-order.active-page) .main>.header .header-business-info,
 body:has(#new-order.active-page) .main>.header .new-order-btn{display:none!important}
-body:has(#new-order.active-page) .main>.header .header-actions{position:static!important;display:flex;flex-wrap:nowrap;gap:0;width:38px;height:38px;margin:0;padding:0}
+body:has(#new-order.active-page) .main>.header .header-actions{position:static!important;display:flex;flex-wrap:nowrap;gap:0;width:40px;height:40px;margin:0;padding:0}
 body:has(#new-order.active-page) .main>.header .profile-widget{display:flex}
+body.desktop-mode:has(#new-order.active-page) .main>.header{top:46px}
 
 /* Billing search and menu display controls. */
 .billing-menu-view-switcher{display:flex;flex:0 0 auto;align-items:center;gap:3px;padding:3px;border:1px solid #e1e6ec;border-radius:10px;background:#f8fafc}
@@ -3849,3 +3902,42 @@ body:has(#new-order.active-page) .billing-menu-panel .menu-grid[data-view="tile"
 .menu-price-variant-channels input{width:100%;padding:8px;border:1px solid #dfe3e8;border-radius:8px}
 @media(max-width:800px){.variant-editor-head{display:none}.variant-editor-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(110px,.8fr) minmax(85px,.55fr) 38px}.variant-channel-price-grid,.variant-option-set-list,.menu-price-variant-channels{grid-template-columns:1fr 1fr}}
 @media(max-width:480px){.variant-editor-row{grid-template-columns:1fr 1fr}.variant-editor-row .variant-unit{grid-column:1}.variant-editor-row .variant-remove{grid-column:2;justify-self:end}.variant-channel-price-grid,.variant-option-set-list,.menu-price-variant-channels{grid-template-columns:1fr}}
+
+/* Give the table list room to show more tables and keep order actions inside the panel. */
+@media(min-width:761px){
+  body:has(#table-view.active-page) .main>.billing-table-view-page.active-page{display:flex;flex-direction:column;box-sizing:border-box;height:calc(100vh - 56px);min-height:0;padding:12px 18px;overflow:hidden}
+  body:has(#table-view.active-page) .billing-table-view-page .billing-tables-area.table-view-workspace{flex:1 1 auto;grid-template-columns:minmax(0,1.2fr) minmax(380px,.9fr);gap:14px;width:100%;height:auto;min-height:0;padding:12px;overflow:hidden}
+  body:has(#table-view.active-page) .billing-table-view-page .table-view-list-panel{min-height:0}
+  body:has(#table-view.active-page) .billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(auto-fill,minmax(118px,1fr));min-height:0;max-height:none;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#b7c0c8 #f2f4f6;overscroll-behavior:contain}
+  body:has(#table-view.active-page) .billing-table-view-page .table-view-order-panel{min-height:0}
+}
+.table-view-list-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:1px 3px 9px}
+.table-view-list-heading>div{display:grid;gap:3px}
+.table-view-list-heading>div>strong{color:#26343d;font-size:13px}
+.table-view-list-heading>div>span,.table-view-list-heading>small{color:#7a8790;font-size:10px}
+.table-view-list-heading>small{flex:0 0 auto;padding:5px 8px;border:1px solid #e7ecef;border-radius:999px;background:#f7f9fa;color:#596873;font-weight:750}
+.table-view-filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:0 2px 9px}
+.table-view-filters button{display:flex;align-items:center;justify-content:center;gap:5px;min-width:0;min-height:31px;padding:5px 7px;border:1px solid #e2e7eb;border-radius:8px;background:#fff;color:#5c6971;font-size:10px;font-weight:700;white-space:nowrap;cursor:pointer}
+.table-view-filters button span{display:inline-grid;min-width:17px;height:17px;place-items:center;padding:0 4px;border-radius:999px;background:#eef1f3;color:#6b7880;font-size:9px}
+.table-view-filters button.active{border-color:#26343d;background:#26343d;color:#fff}
+.table-view-filters button.active span{background:#fff;color:#26343d}
+.billing-table-view-page .table-view-list-panel .billing-tables-grid .billing-table-card[hidden]{display:none!important}
+.table-view-order-items{min-height:0!important;overscroll-behavior:contain}
+.table-view-order-items .table-container{width:100%;min-width:0;max-height:100%;overflow:auto;scrollbar-width:thin}
+.table-view-order-items table{table-layout:fixed}
+.table-view-order-items th:first-child,.table-view-order-items td:first-child{width:46%;overflow-wrap:anywhere}
+.table-view-order-items th:nth-child(2),.table-view-order-items td:nth-child(2){width:12%}
+.table-view-order-items th:nth-child(3),.table-view-order-items td:nth-child(3){width:20%}
+.table-view-order-items th:nth-child(4),.table-view-order-items td:nth-child(4){width:22%}
+.table-view-order-totals{gap:4px;margin:0 12px 8px;padding:10px}
+.table-view-order-totals>div{font-size:10px}
+.table-view-order-totals .table-view-total{padding-top:6px;font-size:13px}
+.table-view-order-totals .table-view-total strong{font-size:14px}
+.table-view-order-actions{box-sizing:border-box;align-items:stretch;flex:0 0 auto;width:100%;min-height:76px;margin:0;position:sticky;bottom:0;z-index:2;padding:10px 12px max(10px,env(safe-area-inset-bottom))}
+.table-view-order-actions>button{box-sizing:border-box;min-width:0;min-height:46px}
+@media(max-width:760px){
+  body:has(#table-view.active-page) .main>.billing-table-view-page.active-page{display:block;height:auto;min-height:calc(100vh - 56px);padding:18px 14px;overflow:visible}
+  .table-view-filters{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .table-view-order-items{min-height:90px!important}
+  .table-view-order-panel{min-height:410px}
+}
