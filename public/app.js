@@ -1463,10 +1463,6 @@ function setOrderType(type, preserveSaleChannel = false) {
     orderType = type;
     const label = document.getElementById("orderType");
     if (label) label.textContent = type;
-    const menuTitle = document.getElementById("billingMenuTitle");
-    if (menuTitle) menuTitle.textContent = type === "Dine-in" ? "Dine-in menu" : "Takeaway menu";
-    const takeawayHint = document.getElementById("takeawayMenuHint");
-    if (takeawayHint) takeawayHint.style.display = type === "Takeaway" ? "" : "none";
     const paxField = document.getElementById("billingPaxField");
     if (paxField) paxField.hidden = type !== "Dine-in";
     if (type !== "Dine-in") setBillingPaxForTable(null, 1);
@@ -1893,6 +1889,7 @@ function previewCurrentBill() {
         orderNumber: order.order_number || "New Order",
         invoiceNumber: currentOpenOrderData?.invoice?.invoice_number || null,
         orderType,
+        billingSettingsSnapshot: currentOpenOrderData?.order?.billing_settings_snapshot || billingSettingsSnapshotForChannel(),
         tableNumber: document.getElementById("tableNumber")?.value || null,
         pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null,
         subtotal: breakdown.subtotal,
@@ -2041,8 +2038,10 @@ const BUILT_IN_POS_CHANNEL_KEYS = new Set(DEFAULT_POS_CHANNELS.map(channel => ch
 let POS_CHANNELS = DEFAULT_POS_CHANNELS.map(channel => ({ ...channel }));
 function normalizePOSChannels(value) {
     const source = Array.isArray(value) ? value : [];
+    const fallbackCopies = typeof appSettings !== "undefined" && appSettings?.autoPrint === true ? appSettings.billCopies : 0;
     const defaultsByKey = new Map(DEFAULT_POS_CHANNELS.map(channel => [channel.key, channel]));
-    const entries = [...DEFAULT_POS_CHANNELS, ...source.filter(channel => !defaultsByKey.has(String(channel?.key || "").trim().toLowerCase()))].slice(0, 44);
+    const sourceByKey = new Map(source.map(channel => [String(channel?.key || "").trim().toLowerCase(), channel]));
+    const entries = [...DEFAULT_POS_CHANNELS.map(channel => ({ ...channel, ...(sourceByKey.get(channel.key) || {}) })), ...source.filter(channel => !defaultsByKey.has(String(channel?.key || "").trim().toLowerCase()))].slice(0, 44);
     const seen = new Set();
     const channels = entries.map(channel => {
         const key = String(channel?.key || "").trim().toLowerCase();
@@ -2051,7 +2050,8 @@ function normalizePOSChannels(value) {
             key,
             label: String(fixed?.label || channel?.label || "").trim().slice(0, 60),
             orderType: fixed?.orderType || (channel?.orderType === "Dine-in" ? "Dine-in" : channel?.orderType === "Takeaway" ? "Takeaway" : ""),
-            qrMenu: fixed ? fixed.qrMenu === true : channel?.qrMenu === true
+            qrMenu: fixed ? fixed.qrMenu === true : channel?.qrMenu === true,
+            billCopies: Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? fallbackCopies) || 0)))
         };
     }).filter(channel => {
         if (!/^[a-z][a-z0-9_]{1,19}$/.test(channel.key) || !channel.label || !channel.orderType || seen.has(channel.key)) return false;
@@ -2098,10 +2098,6 @@ function updateBillingChannelLabels() {
     const label = channel?.label || (orderType === "Dine-in" ? "Dine" : "Takeaway");
     const orderLabel = document.getElementById("orderType");
     if (orderLabel) orderLabel.textContent = label;
-    const menuTitle = document.getElementById("billingMenuTitle");
-    if (menuTitle) menuTitle.textContent = label + " menu";
-    const hint = document.getElementById("takeawayMenuHint");
-    if (hint) hint.textContent = label + " billing is ready — choose items below.";
 }
 function renderBillingSaleChannelOptions() {
     const select = document.getElementById("billingSaleChannel");
@@ -2972,6 +2968,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         }
         window.currentBillData = {
             orderId: completedOrder.id || order.id,
+            billingSettingsSnapshot: completedOrder.billing_settings_snapshot || order.billing_settings_snapshot || billingSettingsSnapshotForChannel(),
             isOpenOrder: Boolean(paymentOptions.keepOpen),
             orderNumber: completedOrder.order_number || orderNumber,
             invoiceNumber: invoice?.invoice_number || null,
@@ -3006,7 +3003,8 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         };
         showPage("new-order");
         showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : paymentOptions.paymentMode === "partial" ? "Order closed · balance due" : "Sale completed");
-        if (!paymentOptions.keepOpen && appSettings.autoPrint === true) Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
+        const channelBillCopies = Number(window.currentBillData.billingSettingsSnapshot?.billCopies || 0);
+        if (!paymentOptions.keepOpen && channelBillCopies > 0) Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
         if (hasPermission("dashboard")) updateDashboard().catch(error=>console.warn("Dashboard refresh failed:",error.message));
     } catch (error) {
         console.error(error);
@@ -3186,6 +3184,12 @@ async function payOpenOrder(orderId) {
 }
 
 window.openBillPreview = function(data) {
+    const previousBillSettings = appSettings;
+    const savedBillingSettings = data?.billingSettingsSnapshot || data?.billing_settings_snapshot || null;
+    if (savedBillingSettings && typeof savedBillingSettings === "object") {
+        data = { ...data, billingSettingsSnapshot: savedBillingSettings };
+        appSettings = { ...appSettings, ...savedBillingSettings };
+    }
     window.currentBillData = data || {};
 
     const modal = document.getElementById("billModal");
@@ -3385,6 +3389,7 @@ window.openBillPreview = function(data) {
     }
 
     if (!modal) {
+        appSettings = previousBillSettings;
         alert("Bill modal not found.");
         return;
     }
@@ -3529,6 +3534,7 @@ window.openBillPreview = function(data) {
     }
 
     modal.style.display = "flex";
+    appSettings = previousBillSettings;
 };
 
 
@@ -3562,7 +3568,8 @@ window.printBill = function() {
 window.printThermalBill = async function(options = {}) {
     const data = window.currentBillData;
     const manualPrint = options.manual === true;
-    const configuredBillCopies = Math.min(20, Math.max(0, Math.floor(Number(appSettings.billCopies) || 0)));
+    const billSettings = { ...appSettings, ...(data?.billingSettingsSnapshot || data?.billing_settings_snapshot || {}) };
+    const configuredBillCopies = Math.min(20, Math.max(0, Math.floor(Number(billSettings.billCopies) || 0)));
     const billCopies = manualPrint && configuredBillCopies === 0 ? 1 : configuredBillCopies;
     if (!data) return alert("No bill is available to print.");
     if (!manualPrint && billCopies === 0) { showProfileToast("Automatic bill printing skipped · copies set to 0"); return; }
@@ -3591,27 +3598,12 @@ window.printThermalBill = async function(options = {}) {
     try {
         // LOCAL = Windows installed printer. Print directly through the local Slash POS Printer Service.
         if (defaultPrinter.connection_type === "local") {
-            const receipt = printerReceiptText(data, defaultPrinter.paper_width || appSettings.paperWidth || "80");
+            const receipt = receiptTextWithBillingSnapshot(data, defaultPrinter.paper_width || billSettings.paperWidth || "80");
             if (window.cafePOSDesktop?.saveReceiptPdf && /microsoft print to pdf/i.test(defaultPrinter.name)) {
                 const result = await window.cafePOSDesktop.saveReceiptPdf({
                     kind: "invoice",
                     bill: data,
-                    settings: {
-                        restaurantName: appSettings.restaurantName,
-                        businessLegalName: appSettings.businessLegalName,
-                        businessType: appSettings.businessType,
-                        address: appSettings.address,
-                        phone: appSettings.phone,
-                        gstin: appSettings.gstin,
-                        fssai: appSettings.fssai,
-                        currency: appSettings.currency,
-                        businessLogoUrl: businessLogoUrl(),
-                        header: appSettings.header,
-                        footer: appSettings.footer,
-                        customerMessage: appSettings.customerMessage,
-                        showPoweredByCafePilot: appSettings.showPoweredByCafePilot,
-                        uppercaseItems: appSettings.uppercaseItems === true
-                    }
+                    settings: { ...billSettings, businessLogoUrl: billSettings.businessLogoUrl ?? businessLogoUrl() }
                 });
                 if (!result?.success || !result.outputFile) throw new Error(result?.error || "Could not create the invoice PDF.");
                 await markBillPrinted();
@@ -3622,7 +3614,7 @@ window.printThermalBill = async function(options = {}) {
                 const result = await window.cafePOSDesktop.printReceipt({
                     printerName: defaultPrinter.name,
                     receipt,
-                    paperWidth: defaultPrinter.paper_width || appSettings.paperWidth || "80",
+                    paperWidth: defaultPrinter.paper_width || billSettings.paperWidth || "80",
                     copies: billCopies
                 });
                 if (!result?.success) throw new Error(result?.error || "Windows could not send the bill to the selected printer.");
@@ -3636,7 +3628,7 @@ window.printThermalBill = async function(options = {}) {
                 const response = await fetch(serviceUrl + "/print", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ printerName: defaultPrinter.name, receipt, paperWidth: defaultPrinter.paper_width || appSettings.paperWidth || "80" })
+                    body: JSON.stringify({ printerName: defaultPrinter.name, receipt, paperWidth: defaultPrinter.paper_width || billSettings.paperWidth || "80" })
                 });
                 result = await response.json().catch(function(){ return {}; });
                 if (!response.ok) throw new Error(result.error || "Windows print service rejected the job.");
@@ -3649,7 +3641,7 @@ window.printThermalBill = async function(options = {}) {
         if (defaultPrinter.connection_type === "network") {
             await api("/printers/" + defaultPrinter.id + "/print"+source, {
                 method: "POST",
-                body: JSON.stringify({ receipt: data, settings: appSettings, copies: billCopies })
+                body: JSON.stringify({ receipt: data, settings: billSettings, copies: billCopies })
             });
             await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
@@ -3657,7 +3649,7 @@ window.printThermalBill = async function(options = {}) {
         }
 
         if (defaultPrinter.connection_type === "bluetooth") {
-            const receipt = printerReceiptText(data, defaultPrinter.paper_width || appSettings.paperWidth || "80");
+            const receipt = receiptTextWithBillingSnapshot(data, defaultPrinter.paper_width || billSettings.paperWidth || "80");
             for (let copy = 0; copy < billCopies; copy++) await sendBluetoothPrinterText(defaultPrinter, receipt, false);
             await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
@@ -4373,6 +4365,7 @@ async function printCurrentOrder() {
 
     window.currentBillData = {
         orderId: Number(order.id) || null,
+        billingSettingsSnapshot: order.billing_settings_snapshot || null,
         isOpenOrder: String(order.status || "").toLowerCase() !== "completed",
         invoiceNumber: order.invoice_number || order.invoiceNumber || order.order_number || "-",
         orderNumber: order.order_number || "-",
@@ -5805,7 +5798,7 @@ async function printOpenOrder(orderId){
         const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
-        const bill={orderId:Number(orderId),isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",cashierName:order.cashier_name||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),unit:item.unit||"ea",options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
+        const bill={orderId:Number(orderId),billingSettingsSnapshot:order.billing_settings_snapshot||null,isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",cashierName:order.cashier_name||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),unit:item.unit||"ea",options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
         window.openBillPreview(bill);
         await window.printThermalBill({ manual: true });
     }catch(error){alert("Unable to print open order: "+error.message);}
@@ -5819,6 +5812,7 @@ async function viewOrderBill(orderId){
         const collected=Number(paymentSummary?.amountCollected||0);
         window.openBillPreview({
             orderId:Number(orderId),
+            billingSettingsSnapshot:order.billing_settings_snapshot||null,
             isOpenOrder:!["completed","cancelled"].includes(String(order.status||"").toLowerCase()),
             orderNumber:order.order_number||`#${orderId}`,
             invoiceNumber:order.invoice_number||"",
@@ -7539,7 +7533,8 @@ function renderSalesChannels() {
     if (!list) return;
     list.innerHTML = POS_CHANNELS.map(channel => {const isBuiltIn=BUILT_IN_POS_CHANNEL_KEYS.has(channel.key);return `<article class="sales-channel-card">
         <div class="sales-channel-card-top"><div><h4>${esc(channel.label)}</h4><p>${channel.orderType === "Dine-in" ? "Dine-in / table flow" : "Takeaway / delivery flow"}</p></div><span class="sales-channel-badge">${channel.qrMenu ? "QR Menu" : "POS channel"}</span></div>
-        ${isBuiltIn?'<div class="sales-channel-protected">Built-in channel · name and settings are protected</div>':`<div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>`}
+        <div class="sales-channel-bill-copies"><label for="saleChannelCopies_${esc(channel.key)}">Bill copies on order close</label><input id="saleChannelCopies_${esc(channel.key)}" type="number" min="0" max="20" step="1" value="${Math.min(20,Math.max(0,Number(channel.billCopies)||0))}" onchange="saveSalesChannelBillCopies('${esc(channel.key)}',this.value)"><small>0 skips automatic printing · up to 20 copies</small></div>
+        ${isBuiltIn?'<div class="sales-channel-protected">Built-in channel · name and order flow are protected</div>':`<div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>`}
     </article>`;}).join("");
 }
 function openSalesChannelModal(key = "") {
@@ -7586,6 +7581,22 @@ async function persistSalesChannels(nextChannels) {
     renderMarketingDeals();
     localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
 }
+async function saveSalesChannelBillCopies(key, value) {
+    const copies = Number(value);
+    if (!Number.isInteger(copies) || copies < 0 || copies > 20) {
+        showProfileToast("Choose between 0 and 20 bill copies.");
+        renderSalesChannels();
+        return;
+    }
+    const next = POS_CHANNELS.map(channel => channel.key === key ? { ...channel, billCopies: copies } : { ...channel });
+    try {
+        await persistSalesChannels(next);
+        showProfileToast(`${getSaleChannel(key)?.label || "Sale channel"}: bill copies saved.`);
+    } catch (error) {
+        renderSalesChannels();
+        showProfileToast(error.message || "Could not save bill copies.");
+    }
+}
 async function saveSalesChannel() {
     const editingKey = document.getElementById("salesChannelEditingKey").value;
     if(editingKey&&BUILT_IN_POS_CHANNEL_KEYS.has(editingKey)){showProfileToast("Built-in sale channels are protected.");return;}
@@ -7600,7 +7611,7 @@ async function saveSalesChannel() {
     }
     const next = editingKey
         ? POS_CHANNELS.map(channel => channel.key === editingKey ? { ...channel, label, orderType, qrMenu } : channel)
-        : [...POS_CHANNELS, { key, label, orderType, qrMenu }];
+        : [...POS_CHANNELS, { key, label, orderType, qrMenu, billCopies: appSettings.autoPrint === true ? Number(appSettings.billCopies) || 0 : 0 }];
     if (!next.some(channel => channel.orderType === "Dine-in") || !next.some(channel => channel.orderType === "Takeaway")) return alert("Keep at least one Dine-in channel and one Takeaway / delivery channel active.");
     if (!next.some(channel => channel.qrMenu)) return alert("Keep at least one channel connected to the QR Menu.");
     try { closeSalesChannelModal(); await persistSalesChannels(next); showProfileToast("Sale channel saved and applied."); }
@@ -7820,7 +7831,25 @@ function removeRestaurantLogo() {
 }
 
 function businessLogoUrl() {
+    if (Object.prototype.hasOwnProperty.call(appSettings || {}, "businessLogoUrl")) return String(appSettings.businessLogoUrl || "");
     return String(currentUser?.logo_url || "");
+}
+
+function billingSettingsSnapshotForChannel(channelKey = selectedPOSChannelKey) {
+    const channel = getSaleChannel(channelKey);
+    const keys = ["restaurantName","businessLegalName","businessType","address","phone","gstin","fssai","header","footer","showInvoice","showCustomer","showCustomerPhone","showOrder","showOrderType","showTable","showTimestamp","showGST","showPayment","showQR","uppercaseItems","wrapItems","gstCalculationEnabled","currency","gstRate","paperWidth","autoPrint","autoClose","logoUrl","upiId","receiptFont","customerMessage","showItemNotes","totalRoundingMode","roundTotals","designerShowNotes","designerShowInvoiceMeta","designerCompact","accentLabel","showPoweredByCafePilot"];
+    const snapshot = {};
+    keys.forEach(key => { if (Object.prototype.hasOwnProperty.call(appSettings || {}, key)) snapshot[key] = appSettings[key]; });
+    snapshot.billCopies = Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? (appSettings.autoPrint === true ? appSettings.billCopies : 0)) || 0)));
+    snapshot.businessLogoUrl = businessLogoUrl();
+    return snapshot;
+}
+
+function receiptTextWithBillingSnapshot(data, paperWidth) {
+    const previous = appSettings;
+    appSettings = { ...appSettings, ...(data?.billingSettingsSnapshot || data?.billing_settings_snapshot || {}) };
+    try { return printerReceiptText(data, paperWidth); }
+    finally { appSettings = previous; }
 }
 
 async function saveSettings() {

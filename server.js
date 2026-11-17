@@ -126,6 +126,8 @@ const publicRateLimiters = {
     supportLogin: createPublicRateLimiter('support-login', 15 * 60 * 1000, 5),
     registration: createPublicRateLimiter('registration', 60 * 60 * 1000, 5),
     qrOrder: createPublicRateLimiter('qr-order', 10 * 60 * 1000, 20),
+    qrOtpSend: createPublicRateLimiter('qr-otp-send', 10 * 60 * 1000, 5),
+    qrOtpVerify: createPublicRateLimiter('qr-otp-verify', 10 * 60 * 1000, 20),
     qrAnalytics: createPublicRateLimiter('qr-analytics', 10 * 60 * 1000, 240),
     qrTracking: createPublicRateLimiter('qr-tracking', 60 * 1000, 60),
     deviceRegistration: createPublicRateLimiter('device-registration', 60 * 60 * 1000, 10)
@@ -147,6 +149,8 @@ app.use((req, res, next) => {
     else if (method === 'POST' && route === '/api/public/register-business') limiter = publicRateLimiters.registration;
     else if (method === 'POST' && route === '/api/public/device/register') limiter = publicRateLimiters.deviceRegistration;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/orders$/i.test(route)) limiter = publicRateLimiters.qrOrder;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/otp\/send$/i.test(route)) limiter = publicRateLimiters.qrOtpSend;
+    else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/otp\/verify$/i.test(route)) limiter = publicRateLimiters.qrOtpVerify;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/analytics$/i.test(route)) limiter = publicRateLimiters.qrAnalytics;
     else if (method === 'GET' && /^\/public-menu\/[a-f0-9]{48}\/orders\/\d+$/i.test(route)) limiter = publicRateLimiters.qrTracking;
     return limiter ? limiter(req, res, next) : next();
@@ -1310,6 +1314,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS discount NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_charge NUMERIC(12,2) NOT NULL DEFAULT 0`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS bill_printed_at TIMESTAMP`);
+    await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS billing_settings_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS notes TEXT`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS non_chargeable_reason VARCHAR(120)`);
     await pool.query(`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancellation_reason VARCHAR(300)`);
@@ -1844,10 +1849,11 @@ const DEFAULT_SALES_CHANNELS = [
     { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
 ];
 
-function normalizeSalesChannels(value) {
+function normalizeSalesChannels(value, fallbackBillCopies = 0) {
     const source = Array.isArray(value) ? value : [];
     const defaultsByKey = new Map(DEFAULT_SALES_CHANNELS.map(channel => [channel.key, channel]));
-    const entries = [...DEFAULT_SALES_CHANNELS, ...source.filter(entry => !defaultsByKey.has(String(entry?.key || "").trim().toLowerCase()))].slice(0, 44);
+    const sourceByKey = new Map(source.map(entry => [String(entry?.key || "").trim().toLowerCase(), entry]));
+    const entries = [...DEFAULT_SALES_CHANNELS.map(channel => ({ ...channel, ...(sourceByKey.get(channel.key) || {}) })), ...source.filter(entry => !defaultsByKey.has(String(entry?.key || "").trim().toLowerCase()))].slice(0, 44);
     const channels = [];
     const seen = new Set();
     for (const entry of entries) {
@@ -1857,13 +1863,68 @@ function normalizeSalesChannels(value) {
         const orderType = fixed?.orderType || (entry?.orderType === "Dine-in" ? "Dine-in" : entry?.orderType === "Takeaway" ? "Takeaway" : "");
         if (!/^[a-z][a-z0-9_]{1,19}$/.test(key) || !label || !orderType || seen.has(key)) continue;
         seen.add(key);
-        channels.push({ key, label, orderType, qrMenu: fixed ? fixed.qrMenu === true : entry?.qrMenu === true });
+        const requestedCopies = Number(entry?.billCopies ?? fallbackBillCopies);
+        const billCopies = Number.isFinite(requestedCopies) ? Math.min(20, Math.max(0, Math.floor(requestedCopies))) : 0;
+        channels.push({ key, label, orderType, qrMenu: fixed ? fixed.qrMenu === true : entry?.qrMenu === true, billCopies });
     }
     return channels;
 }
 
 function salesChannelsForSettings(settings) {
-    return normalizeSalesChannels(settings?.posSalesChannels);
+    const fallbackCopies = settings?.autoPrint === true ? settings?.billCopies : 0;
+    return normalizeSalesChannels(settings?.posSalesChannels, fallbackCopies);
+}
+
+const BILLING_SNAPSHOT_KEYS = [
+    "restaurantName", "businessLegalName", "businessType", "address", "phone", "gstin", "fssai",
+    "header", "footer", "showInvoice", "showCustomer", "showCustomerPhone", "showOrder", "showOrderType",
+    "showTable", "showTimestamp", "showGST", "showPayment", "showQR", "uppercaseItems", "wrapItems",
+    "gstCalculationEnabled", "currency", "gstRate", "paperWidth", "autoPrint", "autoClose", "billCopies",
+    "logoUrl", "upiId", "receiptFont", "customerMessage", "showItemNotes", "totalRoundingMode", "roundTotals",
+    "designerShowNotes", "designerShowInvoiceMeta", "designerCompact", "accentLabel", "showPoweredByCafePilot"
+];
+
+function createBillingSettingsSnapshot(settings = {}, channel = null, logoUrl = "", showPoweredByCafePilot = true) {
+    const snapshot = {};
+    for (const key of BILLING_SNAPSHOT_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(settings || {}, key)) snapshot[key] = settings[key];
+    }
+    snapshot.billCopies = Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? (settings?.autoPrint === true ? settings?.billCopies : 0)) || 0)));
+    snapshot.businessLogoUrl = String(logoUrl || "");
+    snapshot.showPoweredByCafePilot = showPoweredByCafePilot !== false;
+    return snapshot;
+}
+
+async function backfillOrderBillingSettingsSnapshots() {
+    await runSystemContext(async () => {
+        let afterOrderId = 0;
+        while (true) {
+            const legacyOrders = await pool.query(`
+                SELECT o.id,o.sales_channel_key,COALESCE(s.settings,'{}'::jsonb) AS settings,COALESCE(b.logo_url,'') AS business_logo_url,COALESCE(brand.show_powered_by_cafe_pilot,TRUE) AS show_powered_by_cafe_pilot
+                FROM orders o
+                LEFT JOIN app_settings s ON s.business_id=o.business_id
+                LEFT JOIN businesses b ON b.id=o.business_id
+                LEFT JOIN support_business_branding brand ON brand.business_id=o.business_id
+                WHERE o.id>$1 AND COALESCE(o.billing_settings_snapshot,'{}'::jsonb)='{}'::jsonb
+                ORDER BY o.id LIMIT 250
+            `, [afterOrderId]);
+            if (!legacyOrders.rows.length) break;
+            const snapshotBatch = [];
+            for (const legacyOrder of legacyOrders.rows) {
+                const settings = legacyOrder.settings && typeof legacyOrder.settings === "object" ? legacyOrder.settings : {};
+                const channel = salesChannelsForSettings(settings).find(entry => entry.key === legacyOrder.sales_channel_key) || null;
+                const snapshot = createBillingSettingsSnapshot(settings, channel, legacyOrder.business_logo_url, legacyOrder.show_powered_by_cafe_pilot);
+                snapshotBatch.push({ id: Number(legacyOrder.id), snapshot });
+            }
+            afterOrderId = Math.max(afterOrderId, ...snapshotBatch.map(entry => entry.id));
+            await pool.query(`
+                UPDATE orders AS o
+                SET billing_settings_snapshot=input.snapshot
+                FROM jsonb_to_recordset($1::jsonb) AS input(id INTEGER,snapshot JSONB)
+                WHERE o.id=input.id AND COALESCE(o.billing_settings_snapshot,'{}'::jsonb)='{}'::jsonb
+            `, [JSON.stringify(snapshotBatch)]);
+        }
+    });
 }
 
 function resolveSaleChannel(settings, channelKey, orderType = null) {
@@ -2172,6 +2233,164 @@ app.post("/public-menu/:token/service-requests", async (req, res) => {
     }
 });
 
+// QR GUEST WHATSAPP OTP + VERIFIED GUEST SESSION
+// =====================================================
+function qrGuestCookieName(token) {
+    return "slash_qr_" + crypto.createHash("sha256").update(String(token)).digest("hex").slice(0, 16);
+}
+function qrGuestCookiePath(token) { return "/public-menu/" + String(token); }
+function qrGuestPhone(value) {
+    const digits = String(value || "").replace(/\D/g, "");
+    if (!/^\d{10}$/.test(digits)) throw Object.assign(new Error("Enter a valid 10-digit Indian mobile number."), { status: 400 });
+    return digits;
+}
+function qrGuestCookieOptions(token, maxAge) {
+    return { path: qrGuestCookiePath(token), maxAge, httpOnly: true, sameSite: "Lax", secure: process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL) };
+}
+async function qrGuestPublication(token) {
+    const result = await runSystemContext(() => pool.query("SELECT business_id,enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+    const publication = result.rows[0];
+    if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) throw Object.assign(new Error("This QR menu is not currently accepting orders"), { status: 404 });
+    return publication;
+}
+async function fast2SmsRequest(endpoint, payload) {
+    const apiKey = String(process.env.FAST2SMS_API_KEY || "").trim();
+    if (!apiKey || !String(process.env.FAST2SMS_OTP_ID || "").trim()) throw Object.assign(new Error("WhatsApp OTP is not configured. Please ask the cafe team for help."), { status: 503 });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+        const response = await fetch("https://www.fast2sms.com/dev/otp/" + endpoint, {
+            method: "POST", headers: { "authorization": apiKey, "content-type": "application/json", "accept": "application/json" },
+            body: JSON.stringify(payload), signal: controller.signal
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.return !== true) {
+            console.warn("Fast2SMS OTP provider rejected request", { endpoint, status: response.status, statusCode: data.status_code });
+            throw Object.assign(new Error(endpoint === "send" ? "Could not send the OTP. Check your number and try again." : "OTP incorrect or expired. Check the code and try again."), { status: 502 });
+        }
+        return data;
+    } catch (error) {
+        if (error.status) throw error;
+        console.warn("Fast2SMS OTP request failed", { endpoint, message: error.name === "AbortError" ? "timeout" : error.message });
+        throw Object.assign(new Error("OTP service is temporarily unavailable. Please try again."), { status: 502 });
+    } finally { clearTimeout(timeout); }
+}
+async function getQrGuestSession(req, res, token, businessId, tableNumber, phone) {
+    const cookie = getCookie(req, qrGuestCookieName(token));
+    if (!cookie || !/^[a-f0-9]{64}$/i.test(cookie)) return null;
+    const tokenHash = crypto.createHash("sha256").update(cookie).digest("hex");
+    const result = await runSystemContext(() => pool.query(
+        `SELECT id,customer_id,phone FROM qr_guest_sessions
+         WHERE session_token_hash=$1 AND business_id=$2 AND menu_token_hash=$3 AND table_number=$4
+           AND phone=$5 AND expires_at>CURRENT_TIMESTAMP LIMIT 1`,
+        [tokenHash, businessId, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]
+    ));
+    if (!result.rows.length) return null;
+    await runSystemContext(() => pool.query("UPDATE qr_guest_sessions SET last_activity_at=CURRENT_TIMESTAMP,expires_at=CURRENT_TIMESTAMP+INTERVAL '2 hours' WHERE id=$1", [result.rows[0].id]));
+    setCookie(res, qrGuestCookieName(token), cookie, qrGuestCookieOptions(token, 2 * 60 * 60));
+    return result.rows[0];
+}
+app.post("/public-menu/:token/otp/send", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.body?.phone);
+        const tableNumber = String(req.body?.tableNumber || "").trim();
+        if (!tableNumber || tableNumber.length > 60) return res.status(400).json({ error: "Choose a valid table before verifying your number." });
+        const publication = await qrGuestPublication(token);
+        const table = await runSystemContext(() => pool.query("SELECT 1 FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1", [publication.business_id, tableNumber]));
+        if (!table.rows.length) return res.status(400).json({ error: "This QR link does not match an active table." });
+        const menuHash = crypto.createHash("sha256").update(token).digest("hex");
+        const existing = await runSystemContext(() => pool.query(
+            `SELECT id,resend_after FROM qr_guest_otp_challenges WHERE business_id=$1 AND menu_token_hash=$2 AND table_number=$3 AND phone=$4 AND verified_at IS NULL AND expires_at>CURRENT_TIMESTAMP ORDER BY created_at DESC LIMIT 1`,
+            [publication.business_id, menuHash, tableNumber, phone]
+        ));
+        if (existing.rows[0] && new Date(existing.rows[0].resend_after).getTime() > Date.now()) return res.status(429).json({ error: "Please wait 60 seconds before requesting another OTP." });
+        const recent = await runSystemContext(() => pool.query(
+            `SELECT COUNT(*)::int AS count FROM qr_guest_otp_challenges WHERE business_id=$1 AND phone=$2 AND created_at>CURRENT_TIMESTAMP-INTERVAL '1 hour'`,
+            [publication.business_id, phone]
+        ));
+        if (Number(recent.rows[0]?.count || 0) >= 5) return res.status(429).json({ error: "Too many OTP requests for this number. Please try again later." });
+        const provider = await fast2SmsRequest("send", { mobile: phone, otp_id: String(process.env.FAST2SMS_OTP_ID).trim(), otp_expiry: 10, otp_length: 6 });
+        const challengeId = crypto.randomUUID();
+        await runSystemContext(() => pool.query(
+            `INSERT INTO qr_guest_otp_challenges(id,business_id,menu_token_hash,table_number,phone,provider_request_id,expires_at,resend_after)
+             VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP+INTERVAL '10 minutes',CURRENT_TIMESTAMP+INTERVAL '60 seconds')`,
+            [challengeId, publication.business_id, menuHash, tableNumber, phone, String(provider.request_id || "").slice(0, 200)]
+        ));
+        res.set("Cache-Control", "no-store");
+        return res.json({ success: true, challengeId, expiresInSeconds: 600, resendInSeconds: 60, message: "OTP sent. Check WhatsApp messages." });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest OTP send error:", error.message);
+        return res.status(500).json({ error: "Could not send OTP. Please try again." });
+    }
+});
+
+app.post("/public-menu/:token/otp/verify", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.body?.phone);
+        const tableNumber = String(req.body?.tableNumber || "").trim();
+        const challengeId = String(req.body?.challengeId || "");
+        const otp = String(req.body?.otp || "").trim();
+        const details = normalizeQrGuestCustomer({ ...req.body?.customer, phone });
+        if (!/^[0-9]{4,8}$/.test(otp)) return res.status(400).json({ error: "Enter the OTP sent to your WhatsApp." });
+        const publication = await qrGuestPublication(token);
+        const challengeResult = await runSystemContext(() => pool.query(
+            `SELECT id,attempts FROM qr_guest_otp_challenges WHERE id=$1 AND business_id=$2 AND menu_token_hash=$3 AND table_number=$4 AND phone=$5 AND verified_at IS NULL AND expires_at>CURRENT_TIMESTAMP LIMIT 1`,
+            [challengeId, publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]
+        ));
+        const challenge = challengeResult.rows[0];
+        if (!challenge) return res.status(400).json({ error: "This OTP has expired. Request a new one." });
+        if (Number(challenge.attempts) >= 5) return res.status(429).json({ error: "Too many incorrect attempts. Request a new OTP." });
+        await runSystemContext(() => pool.query("UPDATE qr_guest_otp_challenges SET attempts=attempts+1 WHERE id=$1", [challengeId]));
+        await fast2SmsRequest("verify", { mobile: phone, otp });
+        const customer = await tenantContext.run({ businessId: Number(publication.business_id) }, () => upsertQrGuestCustomer(pool, Number(publication.business_id), details));
+        const sessionToken = crypto.randomBytes(32).toString("hex");
+        const sessionHash = crypto.createHash("sha256").update(sessionToken).digest("hex");
+        await runSystemContext(async () => {
+            await pool.query("UPDATE qr_guest_otp_challenges SET verified_at=CURRENT_TIMESTAMP WHERE id=$1", [challengeId]);
+            await pool.query("DELETE FROM qr_guest_sessions WHERE business_id=$1 AND menu_token_hash=$2 AND table_number=$3 AND phone=$4", [publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]);
+            await pool.query(
+                `INSERT INTO qr_guest_sessions(business_id,menu_token_hash,table_number,phone,customer_id,session_token_hash,expires_at,last_activity_at)
+                 VALUES($1,$2,$3,$4,$5,$6,CURRENT_TIMESTAMP+INTERVAL '2 hours',CURRENT_TIMESTAMP)`,
+                [publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone, customer.id, sessionHash]
+            );
+        });
+        setCookie(res, qrGuestCookieName(token), sessionToken, qrGuestCookieOptions(token, 2 * 60 * 60));
+        res.set("Cache-Control", "no-store");
+        return res.json({ success: true, customer, expiresInSeconds: 7200 });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest OTP verify error:", error.message);
+        return res.status(500).json({ error: "Could not verify OTP. Please try again." });
+    }
+});
+
+app.get("/public-menu/:token/session", async (req, res) => {
+    const token = String(req.params.token || "");
+    if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
+    try {
+        const phone = qrGuestPhone(req.query?.phone);
+        const tableNumber = String(req.query?.tableNumber || "").trim();
+        const publication = await qrGuestPublication(token);
+        const session = await getQrGuestSession(req, res, token, Number(publication.business_id), tableNumber, phone);
+        res.set("Cache-Control", "no-store");
+        if (!session) return res.status(401).json({ verified: false });
+        return res.json({ verified: true, customerId: session.customer_id, expiresInSeconds: 7200 });
+    } catch (error) {
+        if (error.status) return res.status(error.status).json({ error: error.message });
+        console.error("QR guest session check error:", error.message);
+        return res.status(500).json({ error: "Could not check verification session" });
+    }
+});
+
+app.post("/public-menu/:token/customers", async (req,res)=>{
+    return res.status(410).json({error:"Phone verification is required. Please request and verify a WhatsApp OTP."});
+});
+
 app.post("/public-menu/:token/orders", async (req, res) => {
     const token = String(req.params.token || "");
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
@@ -2205,6 +2424,9 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
+        const verifiedPhone = qrGuestPhone(guestCustomerDetails.phone);
+        const verifiedGuestSession = await getQrGuestSession(req, res, token, businessId, tableNumber, verifiedPhone);
+        if (!verifiedGuestSession) return res.status(401).json({ error: "Your phone verification session has expired. Please verify your WhatsApp number again." });
         const availability = qrMenuOrderingAvailability(publication, publication.business_name);
         if (!availability.orderingOpen) return res.status(403).json({ error: availability.closedMessage });
         const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
@@ -2301,6 +2523,8 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 const total = orderLines.reduce((sum, line, index) => sum + lineNets[index] + lineNets[index] * line.taxRate / 100, 0);
                 const note = String(req.body?.notes || "").trim().slice(0, 300);
                 const qrChannel = qrChannels.find(channel => channel.key === priceChannel);
+                const businessLogoResult = await client.query("SELECT b.logo_url,COALESCE(brand.show_powered_by_cafe_pilot,TRUE) AS show_powered_by_cafe_pilot FROM businesses b LEFT JOIN support_business_branding brand ON brand.business_id=b.id WHERE b.id=$1", [businessId]);
+                const billingSettingsSnapshot = createBillingSettingsSnapshot(businessSettings, qrChannel, businessLogoResult.rows[0]?.logo_url || "", businessLogoResult.rows[0]?.show_powered_by_cafe_pilot);
                 const requestedCurrentOrder = req.body?.currentOrder && typeof req.body.currentOrder === "object" ? req.body.currentOrder : {};
                 const currentOrderId = Number(requestedCurrentOrder.orderId);
                 const currentTrackingToken = String(requestedCurrentOrder.trackingToken || "");
@@ -2372,8 +2596,8 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                 } else {
                     const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
                     const orderResult = await client.query(
-                        "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,public_session_key,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id,order_number,table_number,total,status",
-                        [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, sessionKey, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash"]
+                        "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,public_session_key,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name,billing_settings_snapshot) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) RETURNING id,order_number,table_number,total,status",
+                        [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, sessionKey, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash", JSON.stringify(billingSettingsSnapshot)]
                     );
                     order = orderResult.rows[0];
                 }
@@ -3974,6 +4198,8 @@ app.post(
             const settingsRow = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
             const businessSettings = settingsRow.rows[0]?.settings || {};
             const saleChannel = resolveSaleChannel(businessSettings, b.saleChannelKey || defaultSaleChannelForOrderType(businessSettings, orderType), orderType);
+            const businessLogoResult = await client.query("SELECT b.logo_url,COALESCE(brand.show_powered_by_cafe_pilot,TRUE) AS show_powered_by_cafe_pilot FROM businesses b LEFT JOIN support_business_branding brand ON brand.business_id=b.id WHERE b.id=$1", [businessId]);
+            const billingSettingsSnapshot = createBillingSettingsSnapshot(businessSettings, saleChannel, businessLogoResult.rows[0]?.logo_url || "", businessLogoResult.rows[0]?.show_powered_by_cafe_pilot);
             if (b.marketingDealId) assertMarketingDealAvailableForBilling(businessSettings, b.marketingDealId, saleChannel.key);
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.discountAdjustmentId, saleChannel.key);
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.chargeAdjustmentId, saleChannel.key);
@@ -4140,11 +4366,12 @@ app.post(
                         charge_adjustment_name,
                         pax,
                         sales_channel_key,
-                        sales_channel_name
+                        sales_channel_name,
+                        billing_settings_snapshot
                     )
                     VALUES
                     (
-                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14,$15,$16,$17,$18,$19,$20,$21
+                        $1,$2,$3,$4,$5,$6,$7,$12,$8,$9,$10,$11,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22::jsonb
                     )
                     RETURNING *
                     `,
@@ -4169,7 +4396,8 @@ app.post(
                         b.chargeAdjustmentName ? String(b.chargeAdjustmentName).slice(0, 120) : null,
                         pax,
                         saleChannel.key,
-                        saleChannel.label
+                        saleChannel.label,
+                        JSON.stringify(billingSettingsSnapshot)
                     ]
                 );
 
@@ -10868,6 +11096,8 @@ async function startServer() {
         console.log('6/10 ensureTenantIsolationPhase2A');
         await ensureTenantIsolationPhase2A();
         console.log('✅ ensureTenantIsolationPhase2A complete');
+        await backfillOrderBillingSettingsSnapshots();
+        console.log('✅ Existing orders have frozen bill settings');
         console.log('7/10 ensurePhase2BAuthIsolation');
         await ensurePhase2BAuthIsolation();
         console.log('✅ ensurePhase2BAuthIsolation complete');
