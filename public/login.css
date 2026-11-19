@@ -133,6 +133,31 @@
 #loginCard .login-btn:focus-visible,
 #loginCard button:focus-visible { outline: 3px solid rgba(71, 132, 106, .34); outline-offset: 2px; }
 #loginCard .login-error { margin: 10px 0 0; color: #b42318; font-size: 12px; text-align: left; }
+#loginCard #loginPasswordStep[hidden],
+#loginCard #loginUserList[hidden],
+#loginCard #loginUserPicker[hidden],
+#loginCard #loginSelectedUserPanel[hidden] { display: none !important; }
+#loginCard .login-user-list { display: grid; gap: 8px; max-height: min(42vh, 330px); margin-top: 10px; overflow-y: auto; }
+#loginCard .login-user-option { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px; border: 1px solid #e2e8e1; border-radius: 12px; background: #fff; color: #26352e; text-align: left; cursor: pointer; transition: border-color .16s ease, background .16s ease, transform .16s ease; }
+#loginCard .login-user-option:hover { border-color: #8db39e; background: #f5faf6; transform: translateY(-1px); }
+#loginCard .login-user-option-copy { display: grid; gap: 4px; min-width: 0; }
+#loginCard .login-user-option-copy strong { overflow: hidden; color: #26352e; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+#loginCard .login-user-option-copy small { color: #78847e; font-size: 11px; }
+#loginCard .login-user-blocked-badge { flex: none; padding: 5px 8px; border-radius: 999px; background: #fff1e8; color: #a34f12; font-size: 10px; font-weight: 750; }
+#loginCard .login-user-empty { margin: 0; padding: 13px; border-radius: 11px; background: #f5f7f2; color: var(--login-muted); font-size: 13px; }
+#loginCard .login-selected-user-panel { margin: 0 0 10px; }
+#loginCard .login-back-users { padding: 0; border: 0; background: transparent; color: #557461; font-size: 12px; font-weight: 650; cursor: pointer; }
+#loginCard .login-selected-user-copy { display: grid; gap: 4px; margin-top: 13px; padding: 12px 14px; border: 1px solid #e1ece4; border-radius: 11px; background: #f5faf6; }
+#loginCard .login-selected-user-copy span { color: #78847e; font-size: 11px; }
+#loginCard .login-selected-user-copy strong { color: #285843; font-size: 15px; }
+#loginCard .login-password-wrap { position: relative; }
+#loginCard .login-password-wrap input { width: 100%; padding-right: 50px !important; }
+#loginCard .login-password-toggle { position: absolute; top: 50%; right: 7px; display: grid; width: 36px; height: 36px; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: #68766e; cursor: pointer; transform: translateY(-50%); }
+#loginCard .login-password-toggle:hover { background: #f0f4f0; color: #285843; }
+#loginCard .login-eye-icon { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+#loginCard .login-eye-icon circle { fill: currentColor; stroke: none; }
+#loginCard .login-eye-slash { display: none; }
+#loginCard .login-eye-icon[data-visible="true"] .login-eye-slash { display: block; }
 #loginBusinessWelcome { display: grid; gap: 4px; margin: 0 0 17px; padding: 12px 14px; border: 1px solid #e1ece4; border-radius: 11px; background: #f5faf6; color: #66766b; font-size: 12px; }
 #loginBusinessWelcome strong { color: #285843; font-size: 14px; }
 #loginCard .register-business-link { min-height: 44px; margin-top: 15px; border: 1px solid #e1e7e1; border-radius: 10px; background: #fff; color: #40524a; font-size: 12px; transition: background .18s ease, border-color .18s ease; }

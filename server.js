@@ -122,7 +122,6 @@ function createPublicRateLimiter(scope, windowMs, limit) {
     };
 }
 const publicRateLimiters = {
-    login: createPublicRateLimiter('login', 15 * 60 * 1000, 10),
     supportLogin: createPublicRateLimiter('support-login', 15 * 60 * 1000, 5),
     registration: createPublicRateLimiter('registration', 60 * 60 * 1000, 5),
     qrOrder: createPublicRateLimiter('qr-order', 10 * 60 * 1000, 20),
@@ -144,8 +143,7 @@ app.use((req, res, next) => {
     const method = req.method.toUpperCase();
     const route = req.path;
     let limiter = null;
-    if (method === 'POST' && route === '/api/auth/login') limiter = publicRateLimiters.login;
-    else if (method === 'POST' && route === '/api/support/login') limiter = publicRateLimiters.supportLogin;
+    if (method === 'POST' && route === '/api/support/login') limiter = publicRateLimiters.supportLogin;
     else if (method === 'POST' && route === '/api/public/register-business') limiter = publicRateLimiters.registration;
     else if (method === 'POST' && route === '/api/public/device/register') limiter = publicRateLimiters.deviceRegistration;
     else if (method === 'POST' && /^\/public-menu\/[a-f0-9]{48}\/orders$/i.test(route)) limiter = publicRateLimiters.qrOrder;
@@ -1502,12 +1500,6 @@ app.get("/register-business", (_, res) => res.redirect("/?view=register-business
 // =====================================================
 app.post('/api/public/register-business', async (req, res) => {
     if (process.env.PUBLIC_BUSINESS_REGISTRATION_ENABLED !== 'true') return res.status(404).json({ error: 'Public business registration is disabled' });
-    const registrationSecret = String(process.env.PUBLIC_BUSINESS_REGISTRATION_KEY || '');
-    const presentedSecret = String(req.get('x-business-registration-key') || '');
-    if (registrationSecret.length < 32 || presentedSecret.length !== registrationSecret.length ||
-        !crypto.timingSafeEqual(Buffer.from(presentedSecret), Buffer.from(registrationSecret))) {
-        return res.status(404).json({ error: 'Public business registration is disabled' });
-    }
     try {
         return await runSystemContext(async () => {
             const client = await pool.connect();
@@ -1597,6 +1589,25 @@ app.get('/api/public/device-business', async (req,res)=>{
         res.status(500).json({error:'Could not load business name'});
     }
 });
+app.get('/api/public/device-users', async (req,res)=>{
+    try {
+        const deviceId=getCookie(req,'cafe_device_id');
+        if(!deviceId) return res.status(403).json({error:'This device is not registered'});
+        const result=await runSystemContext(()=>pool.query(`
+            SELECT u.display_name AS "displayName",u.username,p.name AS "profileName",u.is_blocked AS "isBlocked"
+            FROM registered_devices d
+            JOIN businesses b ON b.id=d.business_id AND b.active=TRUE
+            JOIN app_users u ON u.business_id=b.id AND u.active=TRUE
+            LEFT JOIN access_profiles p ON p.id=u.profile_id AND p.business_id=u.business_id
+            WHERE d.device_id=$1 AND d.status='active'
+            ORDER BY u.is_owner DESC,LOWER(u.display_name),LOWER(u.username)
+        `,[deviceId]));
+        res.json({users:result.rows});
+    } catch(e) {
+        console.error('Device business users lookup error:',e);
+        res.status(500).json({error:'Could not load business users'});
+    }
+});
 // AUTH ROUTES
 // =====================================================
 app.post("/api/auth/login", async (req,res)=>{
@@ -1622,7 +1633,6 @@ app.post("/api/auth/login", async (req,res)=>{
         }
 
         const businessId = Number(deviceLicense.device.business_id);
-        const identityKey = loginIdentityKey("business", businessId, username);
         const r = await tenantContext.run({ businessId }, () => pool.query(`
             SELECT u.id,u.display_name,u.username,u.profile_id,u.business_id,u.active,u.password_hash,u.permissions_override,u.is_owner,
                 u.failed_login_attempts,u.is_blocked,
@@ -1637,11 +1647,6 @@ app.post("/api/auth/login", async (req,res)=>{
         const user=r.rows[0];
         if (user?.is_blocked) {
             return res.status(423).json({ error: "This account is blocked. Ask an Admin or Manager to unblock it." });
-        }
-        const existingLockout = await getLoginLockout(identityKey);
-        if (existingLockout) {
-            res.setHeader("Retry-After", String(Math.max(1, Math.ceil((existingLockout - Date.now()) / 1000))));
-            return res.status(429).json({ error: "Too many failed sign-in attempts. Try again later." });
         }
         const passwordValid = user?.active ? await verifyPassword(password,user.password_hash) : false;
         if(!passwordValid) {
@@ -1661,17 +1666,11 @@ app.post("/api/auth/login", async (req,res)=>{
                 `, [Number(user.id), businessId])).then(result => result.rows[0] || null);
             }
             if (accountAttempt?.is_blocked) {
-                await clearLoginFailures(identityKey);
                 await tenantContext.run({ businessId }, () => pool.query(
                     "DELETE FROM app_sessions WHERE user_id=$1 AND business_id=$2",
                     [Number(user.id), businessId]
                 ));
                 return res.status(423).json({ error: "This account was blocked after five failed sign-in attempts. Ask an Admin or Manager to unblock it." });
-            }
-            const lockedUntil = await recordFailedLogin(identityKey);
-            if (lockedUntil) {
-                res.setHeader("Retry-After", String(Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000))));
-                return res.status(429).json({error:"Too many failed sign-in attempts. Try again later."});
             }
             return res.status(401).json({error:"Invalid username or password"});
         }
@@ -1680,7 +1679,6 @@ app.post("/api/auth/login", async (req,res)=>{
         if (!session) {
             return res.status(423).json({ error: "This account is blocked or inactive. Ask an Admin or Manager to restore access." });
         }
-        await clearLoginFailures(identityKey);
         setCookie(res, "cafe_session", session.token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: "None", secure: true });
         res.json({ success: true, user, device: deviceLicense.device, license: deviceLicense.license, expiresAt: session.expiresAt });
     }catch(e){console.error("Login error:",e);res.status(500).json({error:"Login failed"});}
@@ -4556,6 +4554,13 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
                 WHERE oa.business_id=$1 AND oa.event_type='QR items added'
                   AND $3::bigint IS NOT NULL AND oa.id>$3
                 ORDER BY o.id,oa.id DESC
+            ), accepted_qr_orders AS (
+                SELECT oa.id AS activity_id,o.id,o.order_number,o.table_number,o.total,o.status,o.updated_at
+                FROM order_activity oa
+                JOIN orders o ON o.id=oa.order_id AND o.business_id=oa.business_id
+                WHERE oa.business_id=$1 AND oa.event_type='QR order accepted'
+                  AND $3::bigint IS NOT NULL AND oa.id>$3
+                ORDER BY oa.id
             )
             SELECT latest.latest_order_id,latest_activity.latest_activity_id,
                    COALESCE((SELECT json_agg(json_build_object(
@@ -4573,11 +4578,20 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
                        'total',appended_order_updates.total,
                        'status',appended_order_updates.status,
                        'updated_at',appended_order_updates.updated_at
-                   ) ORDER BY appended_order_updates.activity_id) FROM appended_order_updates),'[]'::json) AS updates
+                   ) ORDER BY appended_order_updates.activity_id) FROM appended_order_updates),'[]'::json) AS updates,
+                   COALESCE((SELECT json_agg(json_build_object(
+                       'id',accepted_qr_orders.id,
+                       'activity_id',accepted_qr_orders.activity_id,
+                       'order_number',accepted_qr_orders.order_number,
+                       'table_number',accepted_qr_orders.table_number,
+                       'total',accepted_qr_orders.total,
+                       'status',accepted_qr_orders.status,
+                       'updated_at',accepted_qr_orders.updated_at
+                   ) ORDER BY accepted_qr_orders.activity_id) FROM accepted_qr_orders),'[]'::json) AS accepted_orders
             FROM latest CROSS JOIN latest_activity
         `, [businessId, afterId, afterActivityId]);
         const row = result.rows[0] || {};
-        res.json({ latestOrderId: Number(row.latest_order_id || 0), latestActivityId: Number(row.latest_activity_id || 0), orders: row.orders || [], updates: row.updates || [] });
+        res.json({ latestOrderId: Number(row.latest_order_id || 0), latestActivityId: Number(row.latest_activity_id || 0), orders: row.orders || [], updates: row.updates || [], acceptedOrders: row.accepted_orders || [] });
     } catch (error) {
         console.error("QR order notification poll failed:", error);
         res.status(500).json({ error: "Failed to check for new QR orders" });

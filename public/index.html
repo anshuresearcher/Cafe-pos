@@ -203,12 +203,26 @@
             <span id="loginBusinessWelcomeCopy">Current registered business</span>
             <strong id="loginBusinessName"></strong>
         </div>
+        <div id="loginUserPicker" class="login-user-picker">
+            <button id="loginSelectUserButton" class="big-btn login-btn" type="button" onclick="openLoginUserPicker()">Select user</button>
+            <div id="loginUserList" class="login-user-list" hidden></div>
+        </div>
+        <div id="loginSelectedUserPanel" class="login-selected-user-panel" hidden>
+            <button class="login-back-users" type="button" onclick="backToLoginUsers()">← Choose a different user</button>
+            <div class="login-selected-user-copy"><span>Signing in as</span><strong id="loginSelectedUserName"></strong></div>
+        </div>
         <form onsubmit="loginUser(event)">
-            <label for="loginUsername">Username</label>
-            <input id="loginUsername" type="text" autocomplete="username" placeholder="Username" required>
-            <label for="loginPassword">Password</label>
-            <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Password" required>
-            <button class="big-btn login-btn" type="submit">Sign in</button>
+            <input id="loginUsername" type="hidden" autocomplete="username">
+            <div id="loginPasswordStep" hidden>
+                <label for="loginPassword">Password</label>
+                <div class="login-password-wrap">
+                    <input id="loginPassword" type="password" autocomplete="current-password" placeholder="Enter password" required>
+                    <button id="toggleLoginPassword" class="login-password-toggle" type="button" onclick="toggleLoginPasswordVisibility()" aria-label="Show password" title="Show password">
+                        <svg class="login-eye-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="login-eye-slash" d="m3 3 18 18"/></svg>
+                    </button>
+                </div>
+                <button class="big-btn login-btn" type="submit">Sign in</button>
+            </div>
             <div id="loginError" class="login-error"></div>
         </form>
         </div>
@@ -2890,7 +2904,7 @@
             if (login) login.style.display = "block";
             document.getElementById("loginCard")?.classList.remove("registration-mode");
 
-            const user = document.getElementById("loginUsername");
+            const user = document.getElementById("loginSelectUserButton");
             if (user) user.focus();
         };
 
@@ -2962,15 +2976,17 @@
                 if (keyInput) keyInput.value = "";
 
                 setTimeout(() => {
+                    loginUserOptions = null;
+                    backToLoginUsers();
                     window.setLoginDeviceRegistrationState?.(true);
 
-                    const username = document.getElementById("loginUsername");
+                    const username = document.getElementById("loginSelectUserButton");
                     if (username) username.focus();
 
                     const loginError = document.getElementById("loginError");
                     if (loginError) {
                         loginError.className = "login-error";
-                        loginError.textContent = "Device registered. Please log in.";
+                        loginError.textContent = "Device registered. Select your user to continue.";
                     }
                 }, 900);
 

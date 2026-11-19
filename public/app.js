@@ -110,6 +110,8 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
     if (password) {
         password.value = "";
     }
+    loginUserOptions = null;
+    backToLoginUsers();
 
     if (message) {
         alert(message);
@@ -572,6 +574,8 @@ function showLoginView() {
     document.getElementById("loginCard")?.classList.remove("registration-mode");
     document.getElementById("registerView")?.style.setProperty("display", "none");
     document.getElementById("loginView")?.style.setProperty("display", "block");
+    loginUserOptions = null;
+    backToLoginUsers();
 }
 
 async function registerBusiness(event) {
@@ -626,6 +630,8 @@ function cacheLoginBusinessName(name) {
     renderLoginBusinessWelcome(cleanName);
 }
 async function loadLoginBusinessWelcome() {
+    loginUserOptions = null;
+    backToLoginUsers();
     const cachedBusinessName = localStorage.getItem(LOGIN_BUSINESS_NAME_KEY) || "";
     try {
         const response = await fetch(API + "/public/device-business", { credentials: "same-origin" });
@@ -646,6 +652,107 @@ async function loadLoginBusinessWelcome() {
         return Boolean(cachedBusinessName);
     }
 }
+let loginUserOptions = null;
+async function openLoginUserPicker() {
+    const button = document.getElementById("loginSelectUserButton");
+    const list = document.getElementById("loginUserList");
+    const box = document.getElementById("loginError");
+    if (!list) return;
+    if (box) box.textContent = "";
+    if (button) { button.disabled = true; button.textContent = "Loading users…"; }
+    try {
+        if (!Array.isArray(loginUserOptions)) {
+            const response = await fetch(API + "/public/device-users", { credentials: "same-origin" });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || "Could not load business users");
+            loginUserOptions = Array.isArray(data.users) ? data.users : [];
+        }
+        list.replaceChildren();
+        if (!loginUserOptions.length) {
+            const empty = document.createElement("p");
+            empty.className = "login-user-empty";
+            empty.textContent = "No active users were found for this business.";
+            list.appendChild(empty);
+        } else {
+            loginUserOptions.forEach(user => {
+                const option = document.createElement("button");
+                option.type = "button";
+                option.className = "login-user-option";
+                const copy = document.createElement("span");
+                copy.className = "login-user-option-copy";
+                const name = document.createElement("strong");
+                name.textContent = String(user.displayName || user.username || "User");
+                const detail = document.createElement("small");
+                detail.textContent = [user.username, user.profileName].filter(Boolean).join(" · ");
+                copy.append(name, detail);
+                option.appendChild(copy);
+                if (user.isBlocked) {
+                    const badge = document.createElement("span");
+                    badge.className = "login-user-blocked-badge";
+                    badge.textContent = "Blocked";
+                    option.appendChild(badge);
+                }
+                option.addEventListener("click", () => selectLoginUser(user));
+                list.appendChild(option);
+            });
+        }
+        if (button) button.hidden = true;
+        list.hidden = false;
+    } catch (error) {
+        if (box) box.textContent = error.message || "Could not load business users";
+        if (button) { button.hidden = false; button.textContent = "Select user"; }
+        list.hidden = true;
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+function selectLoginUser(user) {
+    const username = String(user?.username || "").trim();
+    if (!username) return;
+    const usernameInput = document.getElementById("loginUsername");
+    const password = document.getElementById("loginPassword");
+    if (usernameInput) usernameInput.value = username;
+    if (password) { password.value = ""; password.type = "password"; }
+    const toggle = document.getElementById("toggleLoginPassword");
+    if (toggle) { toggle.dataset.visible = "false"; toggle.setAttribute("aria-label", "Show password"); toggle.title = "Show password"; }
+    const eye = toggle?.querySelector(".login-eye-icon");
+    if (eye) eye.dataset.visible = "false";
+    const selectedName = document.getElementById("loginSelectedUserName");
+    if (selectedName) selectedName.textContent = String(user.displayName || username);
+    document.getElementById("loginUserPicker")?.setAttribute("hidden", "");
+    document.getElementById("loginSelectedUserPanel")?.removeAttribute("hidden");
+    document.getElementById("loginPasswordStep")?.removeAttribute("hidden");
+    const box = document.getElementById("loginError");
+    if (box) box.textContent = "";
+    password?.focus();
+}
+function backToLoginUsers() {
+    const password = document.getElementById("loginPassword");
+    if (password) { password.value = ""; password.type = "password"; }
+    const usernameInput = document.getElementById("loginUsername");
+    if (usernameInput) usernameInput.value = "";
+    document.getElementById("loginSelectedUserPanel")?.setAttribute("hidden", "");
+    document.getElementById("loginPasswordStep")?.setAttribute("hidden", "");
+    document.getElementById("loginUserPicker")?.removeAttribute("hidden");
+    const button = document.getElementById("loginSelectUserButton");
+    const list = document.getElementById("loginUserList");
+    if (button) { button.disabled = false; button.textContent = "Select user"; button.hidden = Array.isArray(loginUserOptions); }
+    if (list) list.hidden = !Array.isArray(loginUserOptions);
+    const box = document.getElementById("loginError");
+    if (box) box.textContent = "";
+}
+function toggleLoginPasswordVisibility() {
+    const input = document.getElementById("loginPassword");
+    const button = document.getElementById("toggleLoginPassword");
+    if (!input || !button) return;
+    const visible = input.type === "password";
+    input.type = visible ? "text" : "password";
+    button.dataset.visible = String(visible);
+    button.setAttribute("aria-label", visible ? "Hide password" : "Show password");
+    button.title = visible ? "Hide password" : "Show password";
+    button.querySelector(".login-eye-icon")?.setAttribute("data-visible", String(visible));
+    input.focus();
+}
 async function loginUser(event) {
     event?.preventDefault();
     // Prime audio while the login submit is still a trusted user gesture;
@@ -654,6 +761,7 @@ async function loginUser(event) {
     const username=document.getElementById("loginUsername")?.value.trim()||"";
     const password=document.getElementById("loginPassword")?.value||"";
     const box=document.getElementById("loginError"); if(box) box.textContent="";
+    if(!username){if(box)box.textContent="Select your user to continue.";return;}
     try{
         const r=await fetch(API+"/auth/login",{method:"POST",credentials:"include",headers:{"Content-Type":"application/json"},body:JSON.stringify({username,password})});
         const data=await r.json().catch(()=>({})); if(!r.ok) throw new Error(data.error||"Login failed");
@@ -3963,16 +4071,22 @@ function renderQrOrderWorkflow(order) {
     const canAdvance = hasPermission("kitchen", "edit");
     const canCheckout = hasPermission("payments", "create") && hasPermission("new_order", "view");
     let note = "";
+    let actionButton = "";
     if (status === "pending") {
+        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Preparing')"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to accept this order."'}>Accept order</button>`;
         note = "New QR order · use Accept on its order card to send the ticket to the kitchen.";
     } else if (status === "preparing") {
+        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Ready')"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to mark this order ready."'}>Mark ready</button>`;
         note = "Accepted · kitchen is preparing this order. Mark it ready from its order card.";
     } else if (status === "ready") {
         note = "Ready · complete checkout from its order card to close this QR order.";
     }
+    note = note.replace("use Accept on its order card", "accept it below");
+    note = note.replace("Mark it ready from its order card", "use the button here to mark it ready");
+    note = note.replace("complete checkout from its order card", "complete checkout below");
     if (status === "ready" && !canCheckout) note += " Ask a cashier with checkout access to complete payment.";
     else if (!canAdvance && status !== "ready") note += " You do not have kitchen edit access for this step.";
-    panel.innerHTML = `<div class="qr-order-workflow-copy"><span class="eyebrow">QR ORDER FLOW</span><strong>${esc(note)}</strong></div>`;
+    panel.innerHTML = `<div class="qr-order-workflow-copy"><span class="eyebrow">QR ORDER FLOW</span><strong>${esc(note)}</strong></div>${actionButton}`;
     panel.hidden = false;
 }
 
@@ -10412,7 +10526,7 @@ async function downloadAdvancedReport(reportType){
 }
 
 async function loadDeploymentChecks(){try{const r=await api('/system/deployment-check');const box=document.getElementById('deploymentChecks');box.innerHTML=r.checks.map(c=>`<div class="deployment-check ${c.ok?'ok':'bad'}"><span>${c.ok?'✅':'⚠️'}</span><div><b>${esc(c.label)}</b><br><small>${esc(c.detail|| (c.ok?'Ready':'Needs attention'))}</small></div></div>`).join('');}catch(e){document.getElementById('deploymentChecks').textContent=e.message;}}
-function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE\nDATABASE_SSL_CA=\nDB_POOL_MAX=2\nCORS_ALLOWED_ORIGINS=https://your-pos-domain.example\nVAPID_PUBLIC_KEY=\nVAPID_PRIVATE_KEY=\nVAPID_SUBJECT=mailto:admin@example.com\nSUPPORT_USERNAME=\nSUPPORT_PASSWORD=\nPUBLIC_BUSINESS_REGISTRATION_ENABLED=false\nPUBLIC_BUSINESS_REGISTRATION_KEY=\n`;const blob=new Blob([text],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='.env.example';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);}
+function downloadEnvTemplate(){const text=`NODE_ENV=production\nPORT=3000\nDATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DATABASE\nDATABASE_SSL_CA=\nDB_POOL_MAX=2\nCORS_ALLOWED_ORIGINS=https://your-pos-domain.example\nVAPID_PUBLIC_KEY=\nVAPID_PRIVATE_KEY=\nVAPID_SUBJECT=mailto:admin@example.com\nSUPPORT_USERNAME=\nSUPPORT_PASSWORD=\nPUBLIC_BUSINESS_REGISTRATION_ENABLED=false\n`;const blob=new Blob([text],{type:'text/plain'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='.env.example';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(a.href);}
 
 // Keep all sales widgets exclusively on Dashboard and Reports by loading new pages only through their own hooks.
 const baseShowPage = showPage;
@@ -11153,7 +11267,7 @@ function playPOSQrOrderAlertSound(){
 function emitPOSQrOrderAlertSound(){
     emitPOSNotificationBuzzer();
 }
-function showQROrderArrivalToast(arrivals){
+function showQROrderArrivalToast(arrivals,accepted=false){
     const items=Array.isArray(arrivals)?arrivals:[];
     if(!items.length)return;
     let toast=document.getElementById("qrOrderArrivalToast");
@@ -11167,9 +11281,9 @@ function showQROrderArrivalToast(arrivals){
     }
     const first=items[0];
     const table=first.table_number?` · Table ${first.table_number}`:"";
-    const orderText=items.length===1?`${first.order_number||"New QR order"}${table}`:`${items.length} new QR orders have arrived`;
+    const orderText=items.length===1?`${first.order_number||"QR order"}${table}`:accepted?`${items.length} QR orders are ready for the kitchen`:`${items.length} new QR orders have arrived`;
     const canViewOrders=hasPermission("orders","view");
-    toast.innerHTML=`<span class="qr-order-arrival-icon" aria-hidden="true">▦</span><span class="qr-order-arrival-copy"><strong>${items.length===1?"New QR order received":"New QR orders received"}</strong><span>${esc(orderText)}</span></span><button type="button" class="qr-order-arrival-view">${canViewOrders?"View orders":"Open kitchen"}</button><button type="button" class="qr-order-arrival-close" aria-label="Dismiss notification">×</button>`;
+    toast.innerHTML=`<span class="qr-order-arrival-icon" aria-hidden="true">▦</span><span class="qr-order-arrival-copy"><strong>${accepted?(items.length===1?"QR order accepted":"QR orders accepted"):(items.length===1?"New QR order received":"New QR orders received")}</strong><span>${esc(orderText)}</span></span><button type="button" class="qr-order-arrival-view">${canViewOrders?"View orders":"Open kitchen"}</button><button type="button" class="qr-order-arrival-close" aria-label="Dismiss notification">×</button>`;
     toast.querySelector(".qr-order-arrival-view")?.addEventListener("click",()=>{if(canViewOrders){showPage("orders");updateOrdersTable(true,false);}else{showPage("kitchen");loadKOT(false);}toast.classList.remove("show");});
     toast.querySelector(".qr-order-arrival-close")?.addEventListener("click",()=>toast.classList.remove("show"));
     toast.classList.add("show");
@@ -11178,6 +11292,10 @@ function showQROrderArrivalToast(arrivals){
 }
 async function pollPOSQrOrderAlerts(){
     if(!currentUser){stopPOSQrOrderAlerts();return;}
+    if(document.visibilityState!=="visible"){
+        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        return;
+    }
     if((!hasPermission("orders","view")&&!hasPermission("kitchen","view"))||posQrOrderAlertBusy)return;
     posQrOrderAlertBusy=true;
     try{
@@ -11186,23 +11304,36 @@ async function pollPOSQrOrderAlerts(){
         if(posQrOrderActivityCursor!==null)cursors.set("afterActivityId",String(posQrOrderActivityCursor));
         const query=cursors.toString(),url="/orders/qr-notifications"+(query?"?"+query:"");
         const result=await api(url);
+        const previousOrderCursor=posQrOrderAlertCursor;
         const latest=Number(result.latestOrderId||0);
         const latestActivity=Number(result.latestActivityId||0);
         const arrivals=Array.isArray(result.orders)?result.orders:[];
         const updates=Array.isArray(result.updates)?result.updates:[];
+        const acceptedOrders=Array.isArray(result.acceptedOrders)?result.acceptedOrders:[];
         posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
         posQrOrderActivityCursor=Math.max(posQrOrderActivityCursor,latestActivity);
-        if(arrivals.length){
+        const acceptedIds=new Set(acceptedOrders.map(order=>Number(order.id)));
+        const unacceptedArrivals=arrivals.filter(order=>!acceptedIds.has(Number(order.id)));
+        const newOrdersFound=previousOrderCursor===null||latest>Number(previousOrderCursor);
+        if(unacceptedArrivals.length){
             // QR orders are a separate arrival source from regular POS KOTs. Alert
             // kitchen users here instead of relying on the KOT poll's initial seed.
             if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
             else playPOSQrOrderAlertSound();
-            showQROrderArrivalToast(arrivals);
+            showQROrderArrivalToast(unacceptedArrivals);
         }
-        if((arrivals.length||updates.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        if(acceptedOrders.length){
+            if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
+            else playPOSQrOrderAlertSound();
+            showQROrderArrivalToast(acceptedOrders,true);
+        }
+        if((newOrdersFound||arrivals.length||updates.length||acceptedOrders.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
         const changedSelectedOrder=updates.some(order=>Number(order.id)===Number(window.selectedOrderId));
         if(changedSelectedOrder)await viewOrder(Number(window.selectedOrderId));
-    }catch(error){console.warn("QR order notification check failed:",error.message);}
+    }catch(error){
+        console.warn("QR order notification check failed:",error.message);
+        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+    }
     finally{posQrOrderAlertBusy=false;}
 }
 function startPOSQrOrderAlerts(){
