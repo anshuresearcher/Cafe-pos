@@ -917,6 +917,13 @@ function permissionForRequest(req) {
     if (path === '/billing-adjustments' || path.startsWith('/billing-adjustments/')) return method === 'GET' ? 'settings.view' : 'settings.edit';
     if (path.startsWith('/system/')) return 'deployment.view';
     if (path === '/license/status') return 'settings.view';
+    if (path.startsWith('/kot-print-jobs/')) return 'kitchen.print';
+    if (path === '/kot-device-print-settings') return method === 'GET' ? 'kot_groups.view' : 'kot_groups.edit';
+    if (path === '/kot-printing-mode') {
+        if (req.user?.permissions?.['new_order.create'] === true) return 'new_order.create';
+        if (req.user?.permissions?.['kitchen.print'] === true) return 'kitchen.print';
+        return 'orders.view';
+    }
     if (path === '/qr-service-requests' || path.startsWith('/qr-service-requests/')) return method === 'GET' ? 'qr_service_requests.view' : 'qr_service_requests.manage';
     if (path === '/printers' || path.startsWith('/printers/')) {
         if (path.endsWith('/test') || path.endsWith('/print')) return req.query?.source === 'kot' ? 'kitchen.print' : req.query?.source === 'order' ? 'orders.print_open' : 'printer.print';
@@ -1266,6 +1273,29 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
 
     await pool.query(`CREATE TABLE IF NOT EXISTS kot_groups (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, description TEXT, station VARCHAR(60) NOT NULL DEFAULT 'Kitchen', sort_order INTEGER NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS kot_device_print_hosts (
+        business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+        enabled BOOLEAN NOT NULL DEFAULT FALSE,
+        host_device_id VARCHAR(128),
+        last_heartbeat TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS kot_device_print_jobs (
+        id BIGSERIAL PRIMARY KEY,
+        business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+        order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+        ticket_number INTEGER NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        claimed_by_device_id VARCHAR(128),
+        lease_until TIMESTAMPTZ,
+        next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        last_error TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        printed_at TIMESTAMPTZ,
+        UNIQUE (business_id, order_id, ticket_number)
+    )`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kot_device_print_jobs_pending ON kot_device_print_jobs(business_id,status,next_attempt_at,id)`);
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS printer_id INTEGER`);
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS category_names JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS item_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
@@ -3920,6 +3950,17 @@ async function createKOTForOrder(db, businessId, orderId) {
         return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7},$${offset+8})`;
     });
     await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options,order_item_id,ticket_number) VALUES ${rows.join(",")}`,values);
+    const devicePrinting = await db.query(
+        "SELECT enabled FROM kot_device_print_hosts WHERE business_id=$1 LIMIT 1",
+        [Number(businessId)]
+    );
+    if (devicePrinting.rows[0]?.enabled === true) {
+        await db.query(`
+            INSERT INTO kot_device_print_jobs(business_id,order_id,ticket_number)
+            VALUES($1,$2,$3)
+            ON CONFLICT(business_id,order_id,ticket_number) DO NOTHING
+        `, [Number(businessId), Number(orderId), ticketNumber]);
+    }
     return { count: items.rows.length, ticketNumber };
 }
 
@@ -6395,6 +6436,99 @@ app.put("/api/kot-groups/:id", async (req,res)=>{
 });
 app.delete("/api/kot-groups/:id", async (req,res)=>{
     try { const id=Number(req.params.id); const r=await pool.query(`DELETE FROM kot_groups WHERE id=$1 AND business_id=$2 RETURNING id`,[id,Number(req.user.business_id)]); if(!r.rows.length)return res.status(404).json({error:"KOT group not found"}); res.json({success:true}); } catch(e){res.status(500).json({error:"Failed to delete KOT group"});}
+});
+
+app.get("/api/kot-device-print-settings", async (req,res)=>{
+    try {
+        const businessId=Number(req.user.business_id);
+        const result=await pool.query(`
+            INSERT INTO kot_device_print_hosts(business_id,enabled)
+            VALUES($1,FALSE)
+            ON CONFLICT(business_id) DO UPDATE SET business_id=EXCLUDED.business_id
+            RETURNING enabled,host_device_id,last_heartbeat
+        `,[businessId]);
+        const host=result.rows[0];
+        res.json({enabled:host.enabled===true,hostActive:Boolean(host.host_device_id&&host.last_heartbeat&&new Date(host.last_heartbeat).getTime()>Date.now()-30000),isThisDeviceHost:String(host.host_device_id||"")===String(req.device?.device_id||"")});
+    }catch(e){res.status(500).json({error:"Failed to load counter ticket printing setting"});}
+});
+
+app.get("/api/kot-printing-mode", async (req,res)=>{
+    try {
+        const result=await pool.query("SELECT enabled FROM kot_device_print_hosts WHERE business_id=$1 LIMIT 1",[Number(req.user.business_id)]);
+        res.json({printAllTicketsFromDevice:result.rows[0]?.enabled===true});
+    }catch(e){res.status(500).json({error:"Could not load kitchen ticket printing mode."});}
+});
+
+app.put("/api/kot-device-print-settings", async (req,res)=>{
+    try {
+        const businessId=Number(req.user.business_id);
+        if(typeof req.body?.enabled!=="boolean")return res.status(400).json({error:"Choose whether counter ticket printing is on or off."});
+        const result=await pool.query(`
+            INSERT INTO kot_device_print_hosts(business_id,enabled)
+            VALUES($1,$2)
+            ON CONFLICT(business_id) DO UPDATE
+              SET enabled=EXCLUDED.enabled,
+                  host_device_id=CASE WHEN EXCLUDED.enabled THEN kot_device_print_hosts.host_device_id ELSE NULL END,
+                  last_heartbeat=CASE WHEN EXCLUDED.enabled THEN kot_device_print_hosts.last_heartbeat ELSE NULL END,
+                  updated_at=CURRENT_TIMESTAMP
+            RETURNING enabled,host_device_id,last_heartbeat
+        `,[businessId,req.body.enabled]);
+        const host=result.rows[0];
+        res.json({success:true,enabled:host.enabled===true,hostActive:Boolean(host.host_device_id&&host.last_heartbeat&&new Date(host.last_heartbeat).getTime()>Date.now()-30000),isThisDeviceHost:String(host.host_device_id||"")===String(req.device?.device_id||"")});
+    }catch(e){console.error("Counter ticket printing setting update failed:",e);res.status(500).json({error:"Could not update counter ticket printing."});}
+});
+
+app.post("/api/kot-print-jobs/claim", async (req,res)=>{
+    try {
+        const businessId=Number(req.user.business_id);
+        const deviceId=String(req.device?.device_id||"").trim();
+        if(!deviceId)return res.status(403).json({error:"This POS device is not registered for ticket printing."});
+        const host=await pool.query(`
+            UPDATE kot_device_print_hosts
+            SET host_device_id=$2,last_heartbeat=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+            WHERE business_id=$1 AND enabled=TRUE
+              AND (host_device_id IS NULL OR host_device_id=$2 OR last_heartbeat IS NULL OR last_heartbeat<CURRENT_TIMESTAMP-INTERVAL '30 seconds')
+            RETURNING business_id
+        `,[businessId,deviceId]);
+        if(!host.rows.length)return res.json({success:true,job:null});
+        const claimed=await pool.query(`
+            WITH next_job AS (
+                SELECT id FROM kot_device_print_jobs
+                WHERE business_id=$1 AND attempts<3 AND next_attempt_at<=CURRENT_TIMESTAMP
+                  AND (status='pending' OR (status='claimed' AND lease_until<CURRENT_TIMESTAMP))
+                ORDER BY id
+                FOR UPDATE SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE kot_device_print_jobs j
+            SET status='claimed',attempts=j.attempts+1,claimed_by_device_id=$2,
+                lease_until=CURRENT_TIMESTAMP+INTERVAL '2 minutes',last_error=NULL
+            FROM next_job
+            WHERE j.id=next_job.id AND j.business_id=$1
+            RETURNING j.id,j.order_id,j.ticket_number,j.attempts
+        `,[businessId,deviceId]);
+        res.json({success:true,job:claimed.rows[0]||null});
+    }catch(e){console.error("Counter KOT print job claim failed:",e);res.status(500).json({error:"Could not check for kitchen tickets to print."});}
+});
+
+app.post("/api/kot-print-jobs/:id/complete", async (req,res)=>{
+    try {
+        const jobId=Number(req.params.id),businessId=Number(req.user.business_id),deviceId=String(req.device?.device_id||"");
+        if(!Number.isInteger(jobId)||jobId<=0)return res.status(400).json({error:"Invalid print job."});
+        const printed=req.body?.success===true;
+        const error=String(req.body?.error||"").trim().slice(0,500)||null;
+        const result=await pool.query(`
+            UPDATE kot_device_print_jobs
+            SET status=CASE WHEN $1 THEN 'printed' WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,
+                printed_at=CASE WHEN $1 THEN CURRENT_TIMESTAMP ELSE printed_at END,
+                next_attempt_at=CASE WHEN $1 OR attempts>=3 THEN next_attempt_at ELSE CURRENT_TIMESTAMP+INTERVAL '15 seconds' END,
+                lease_until=NULL,last_error=CASE WHEN $1 THEN NULL ELSE $2 END
+            WHERE id=$3 AND business_id=$4 AND status='claimed' AND claimed_by_device_id=$5
+            RETURNING status,attempts
+        `,[printed,error,jobId,businessId,deviceId]);
+        if(!result.rows.length)return res.status(409).json({error:"This print job is no longer assigned to this device."});
+        res.json({success:true,status:result.rows[0].status,attempts:Number(result.rows[0].attempts)});
+    }catch(e){console.error("Counter KOT print job completion failed:",e);res.status(500).json({error:"Could not record the kitchen ticket print result."});}
 });
 
 // =====================================================
@@ -9838,7 +9972,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
-    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','qr_menu_events','qr_service_requests'
+    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','qr_menu_events','qr_service_requests','kot_device_print_hosts','kot_device_print_jobs'
 ];
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices
