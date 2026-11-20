@@ -90,6 +90,7 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
         stopKOTAlertPolling();
     }
 
+    if (typeof stopCounterKOTPrintAgent === "function") stopCounterKOTPrintAgent();
     kotAlertInitialized = false;
     knownPendingKOTIds = new Set();
 
@@ -173,7 +174,7 @@ let appSettings = {
     nonChargeableReasons: DEFAULT_NON_CHARGEABLE_REASONS.slice(),
     cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
     allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
-    printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
+    printKitchenOnOrder: false, kotPrintMode: "never", printAllTicketsFromDevice: false, billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
     qrCleanTableNotification: true, qrCleanTableSound: true, qrCleanTableBuzzer: false,
@@ -239,6 +240,8 @@ function normalizeOrderBillItems(items, order = {}) {
             unit: item?.unit || item?.measuring_unit || "ea",
             options: Array.isArray(item?.options) ? item.options : [],
             lineTotal,
+            itemDiscountAmount: Math.max(0, Number(item?.itemDiscountAmount ?? item?.item_discount_amount ?? 0)),
+            itemDiscountName: String(item?.itemDiscountName ?? item?.item_discount_name ?? ""),
             taxRate: Math.max(0, Number(item?.taxRate ?? item?.tax_rate ?? 0)),
             taxMode: String(item?.taxMode ?? item?.tax_mode ?? "exclusive").toLowerCase() === "inclusive" ? "inclusive" : "exclusive"
         };
@@ -771,7 +774,7 @@ async function loginUser(event) {
         await startAuthenticatedApp(); if(currentUser?.business_name) showProfileToast("Welcome to " + currentUser.business_name + "!");
     }catch(e){if(box) box.textContent=e.message;}
 }
-async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopDashboardAutoRefresh();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopPOSQrOrderAlerts();stopQrTableServiceAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
+async function logoutUser(){clearSessionExpiryTimer();stopSessionHeartbeat();stopDashboardAutoRefresh();stopReservationAutoRefresh();closeProfilePanel();stopKOTAlertPolling();stopCounterKOTPrintAgent();stopPOSQrOrderAlerts();stopQrTableServiceAlerts();kotAlertInitialized=false;knownPendingKOTIds=new Set();pendingKOTAlertSounds=0;pendingQrAlertSounds=0;try{await api("/auth/logout",{method:"POST"});}catch(_){} authToken="";currentUser=null;currentDevice=null;currentLicense=null;sessionStorage.removeItem("cafeAuthToken");const lp=document.getElementById("loginPassword"); if(lp) lp.value="";document.getElementById("loginScreen")?.style.setProperty("display","flex");loadLoginBusinessWelcome();}
 async function checkSession(){try {
     const r = await api("/auth/me");
 
@@ -1113,6 +1116,7 @@ async function startAuthenticatedApp(){
     startDashboardAutoRefresh();
     startPOSQrOrderAlerts();
     startQrTableServiceAlerts();
+    startCounterKOTPrintAgent();
     stopKOTAlertPolling();
     kotAlertInitialized=false;
     knownPendingKOTIds=new Set();
@@ -1365,7 +1369,7 @@ const SETTINGS_FEATURES = [
     { key: "kitchen-kot", title: "Kitchen / KOT", icon: "👨‍🍳", description: "Control the kitchen ticket workflow." },
     { key: "data-admin", title: "Data & Admin", icon: "🛡️", description: "Configure session timeout and audit logging." },
     { key: "appearance", title: "Appearance", icon: "🎨", description: "Adjust interface density, theme label and billing buttons." },
-    { key: "discount-charges", title: "Discount & Charges", icon: "％", description: "Create reusable discounts and service charge rules." }
+    { key: "discount-charges", title: "Discount & Charges", icon: "％", description: "Create item-level and order-level discounts, plus service charge rules." }
 ];
 
 function initializeSettingsModuleCards() {
@@ -1606,10 +1610,10 @@ function setBillingPaxForTable(tableNumber, value = null) {
     input.value = String(Math.max(1, Math.min(current, capacity || current)));
 }
 
-function addToCart(id,name,price,menuItem=null,variant=null,options=[],basePrice=price){
+function addToCart(id,name,price,menuItem=null,variant=null,options=[],basePrice=price,quantity=1,itemDiscountRuleId=null){
     const optionKey=(options||[]).flatMap(set=>set.options||[]).map(option=>String(option.id)).sort().join(',');
     const cartKey=`${variant?`${id}:${variant.id}`:String(id)}:${optionKey}`; const existing=cart.find(x=>String(x.cartKey)===cartKey);
-    if(existing) existing.quantity++; else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),basePrice:Number(basePrice),options:options||[],quantity:1,unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive'});
+    if(existing){existing.quantity+=Math.max(1,Number(quantity)||1);if(itemDiscountRuleId)existing.itemDiscountRuleId=Number(itemDiscountRuleId)||null;} else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),basePrice:Number(basePrice),options:options||[],quantity:Math.max(1,Number(quantity)||1),unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive',itemDiscountRuleId:Number(itemDiscountRuleId)||null});
     updateCart();
 }
 
@@ -1737,7 +1741,11 @@ function marketingDealAppliesToLine(deal, line) {
     const selectedIds=Array.isArray(deal.itemIds)?deal.itemIds.map(String):[];
     if(selectedIds.length)return selectedIds.includes(String(line.item.id));
     if (deal.itemId && String(deal.itemId) !== String(line.item.id)) return false;
-    if (deal.category) {
+    const selectedCategories = Array.isArray(deal.categories) ? deal.categories.map(value => String(value || "").trim().toLowerCase()).filter(Boolean) : [];
+    if (selectedCategories.length) {
+        const category = String(menuItem?.category || line.item.category || "").trim().toLowerCase();
+        if (!selectedCategories.includes(category)) return false;
+    } else if (deal.category) {
         const category = menuItem?.category || line.item.category || "";
         if (String(category).trim().toLowerCase() !== String(deal.category).trim().toLowerCase()) return false;
     }
@@ -1749,15 +1757,16 @@ function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))
     const type = String(deal.type || "").trim().toLowerCase();
     const eligibleIndexes = lines.map((line, index) => marketingDealAppliesToLine(deal, line) ? index : -1).filter(index => index >= 0);
     const eligibleQuantity = eligibleIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
-    const buyQuantity = Math.max(1, Number(deal.buyQuantity || 1));
+    const buyQuantity = Math.max(1, Math.floor(Number(deal.buyQuantity || 1)));
     const getQuantity = Math.max(1, Math.floor(Number(deal.getQuantity || 1)));
     const minimumQuantity = Math.max(buyQuantity, Number(deal.minGroupSize || 0));
     const selectedIds = Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : [];
     const names = selectedIds.length
         ? (Array.isArray(deal.itemNames) && deal.itemNames.length ? deal.itemNames : currentMenu.filter(item => selectedIds.includes(String(item.id))).map(item => item.name))
         : [];
+    const selectedCategories = Array.isArray(deal.categories) && deal.categories.length ? deal.categories : (deal.category ? [deal.category] : []);
     const scope = names.length ? ` for ${names.slice(0, 3).join(", ")}${names.length > 3 ? ` and ${names.length - 3} more items` : ""}`
-        : deal.category ? ` in ${deal.category}` : " from any category";
+        : selectedCategories.length ? ` in ${selectedCategories.slice(0, 3).join(", ")}${selectedCategories.length > 3 ? ` and ${selectedCategories.length - 3} more categories` : ""}` : " from any category";
     const messages = [];
     const isBundle = ["buy x get x", "buy x get y", "meal deals"].includes(type);
 
@@ -1812,12 +1821,39 @@ function marketingDiscountPlan(rule, lines) {
     if (!rule || !discountBase) return { discount: 0, discountBase, discounts };
 
     const type = String(rule.type || "").trim().toLowerCase();
-    const buyQuantity = Math.max(1, Number(rule.buyQuantity || 1));
+    const buyQuantity = Math.max(1, Math.floor(Number(rule.buyQuantity || 1)));
     const eligibleQuantity = eligibleLines.reduce((sum, line) => sum + Math.max(0, Number(line.item.quantity || 0)), 0);
-    const minimumQuantity = Math.max(buyQuantity, Number(rule.minGroupSize || 0));
-    if (isMarketingDeal && eligibleQuantity < minimumQuantity) return { discount: 0, discountBase, discounts };
+    const hasBundlePrice = isMarketingDeal && ["buy x", "buy x get x", "buy x get y", "meal deals"].includes(type) && Number(rule.bundlePrice) > 0;
+    const hasReward = isMarketingDeal && ["buy x get x", "buy x get y", "meal deals"].includes(type);
+    if (isMarketingDeal && !marketingDealCartEligibility(rule, lines).eligible) return { discount: 0, discountBase, discounts };
 
-    if (isMarketingDeal && ["buy x get x", "buy x get y", "meal deals"].includes(type)) {
+    if (hasBundlePrice) {
+        const units = [];
+        for (const index of eligibleIndexes) {
+            const line = lines[index];
+            const quantity = Math.max(0, Number(line.item.quantity || 0));
+            const wholeQuantity = Math.floor(quantity);
+            const unitNet = quantity ? Math.max(0, line.net) / quantity : 0;
+            const unitGross = unitNet * (1 + Math.max(0, Number(line.rate || 0)) / 100);
+            for (let unit = 0; unit < wholeQuantity; unit++) units.push({ index, unitNet, unitGross });
+        }
+        units.sort((a, b) => b.unitGross - a.unitGross || a.index - b.index);
+        const completeUnitCount = Math.min(units.length, Math.floor(eligibleQuantity / buyQuantity) * buyQuantity);
+        const bundlePrice = Math.max(0, Number(rule.bundlePrice));
+        for (let offset = 0; offset + buyQuantity <= completeUnitCount; offset += buyQuantity) {
+            const group = units.slice(offset, offset + buyQuantity);
+            const groupNet = group.reduce((sum, unit) => sum + unit.unitNet, 0);
+            const groupGross = group.reduce((sum, unit) => sum + unit.unitGross, 0);
+            if (groupGross <= bundlePrice || groupGross <= 0 || groupNet <= 0) continue;
+            const netDiscount = groupNet * ((groupGross - bundlePrice) / groupGross);
+            for (const unit of group) {
+                const share = groupNet ? netDiscount * (unit.unitNet / groupNet) : 0;
+                discounts[unit.index] = Math.min(lines[unit.index].net, discounts[unit.index] + share);
+            }
+        }
+    }
+
+    if (hasReward) {
         const rewardId = type === "buy x get x" ? (Array.isArray(rule.itemIds)&&rule.itemIds.length?null:rule.itemId) : (rule.rewardItemId || (type === "meal deals" ? rule.itemId : null));
         const rewardIndexes = lines.map((line, index) => {
             const itemId = line.item?.id ?? line.item?.menuId ?? line.item?.menu_id;
@@ -1835,13 +1871,15 @@ function marketingDiscountPlan(rule, lines) {
             if (freeUnits <= 0) break;
             const line = lines[index];
             const quantity = Math.max(0, Number(line.item.quantity || 0));
-            const unitNet = quantity ? line.net / quantity : 0;
-            const freeOnLine = Math.min(quantity, freeUnits);
-            discounts[index] = Math.min(line.net, unitNet * freeOnLine);
+            const unitNet = quantity ? Math.max(0, line.net) / quantity : 0;
+            const freeOnLine = Math.min(Math.floor(quantity), freeUnits);
+            discounts[index] = Math.min(line.net, discounts[index] + unitNet * freeOnLine);
             freeUnits -= freeOnLine;
         }
-        return { discount: discounts.reduce((sum, amount) => sum + amount, 0), discountBase: rewardIndexes.reduce((sum, index) => sum + lines[index].net, 0), discounts };
+        return { discount: discounts.reduce((sum, amount) => sum + amount, 0), discountBase: rewardIndexes.reduce((sum, index) => sum + lines[index].net, 0) + (hasBundlePrice ? discountBase : 0), discounts };
     }
+
+    if (hasBundlePrice) return { discount: discounts.reduce((sum, amount) => sum + amount, 0), discountBase, discounts };
 
     let discount = 0;
     if (isMarketingDeal && String(rule.valueType || "").toLowerCase() === "price") {
@@ -1879,12 +1917,16 @@ function getBillingBreakdown() {
 
     const subtotal = lines.reduce((sum, x) => sum + x.net, 0);
 
-    const discountPlan = marketingDiscountPlan(discountRule, lines);
-    const discount = discountPlan.discount;
+    const itemDiscounts = lines.map(line => getCartItemDiscountAmount(line.item));
+    const itemDiscount = itemDiscounts.reduce((sum, amount) => sum + amount, 0);
+    const remainingLines = lines.map((line, index) => ({ ...line, net: Math.max(0, line.net - itemDiscounts[index]) }));
+    const discountPlan = marketingDiscountPlan(discountRule, remainingLines);
+    const orderDiscount = discountPlan.discount;
+    const discount = itemDiscount + orderDiscount;
     const marketingEligibility = discountRule?.source === "marketing"
-        ? marketingDealCartEligibility(discountRule, lines)
+        ? marketingDealCartEligibility(discountRule, remainingLines)
         : null;
-    const marketingDealApplied = Boolean(marketingEligibility?.eligible && discount > 0);
+    const marketingDealApplied = Boolean(marketingEligibility?.eligible && orderDiscount > 0);
     let gst = 0;
     let inclusiveTax = 0;
     let exclusiveTax = 0;
@@ -1893,7 +1935,7 @@ function getBillingBreakdown() {
     const taxableBasesByRate = {};
 
     for (const [index, line] of lines.entries()) {
-        const adjustedNet = Math.max(0, line.net - Number(discountPlan.discounts[index] || 0));
+        const adjustedNet = Math.max(0, line.net - itemDiscounts[index] - Number(discountPlan.discounts[index] || 0));
         const lineTax = adjustedNet * line.rate / 100;
         gst += lineTax;
         if (line.inclusive) inclusiveTax += lineTax;
@@ -1926,11 +1968,11 @@ function getBillingBreakdown() {
     total = Math.max(0, total);
 
     return {
-        subtotal, discount, serviceCharge, gst, inclusiveTax, exclusiveTax,
+        subtotal, discount, orderDiscount, itemDiscount, itemDiscounts, serviceCharge, gst, inclusiveTax, exclusiveTax,
         total, unroundedTotal, roundingAdjustment: total - unroundedTotal, roundingMode, taxable, gstRate: null, taxesByRate, taxBreakdown,
         discountId: discountRule?.source === "marketing" ? null : discountRule?.id || null,
         chargeId: chargeRule?.id || null,
-        discountName: discountRule?.source === "marketing" ? (marketingDealApplied ? String(discountRule.name || "") : "") : (discountRule?.name || ""),
+        discountName: discountRule?.source === "marketing" ? (marketingDealApplied ? String(discountRule.name || "") : "") : (discountRule?.name || (itemDiscount>0?"Item discounts":"")),
         chargeName: chargeRule?.name || "",
         marketingDealId: marketingDealApplied ? String(discountRule.id) : null,
         marketingDealName: marketingDealApplied ? String(discountRule.name || "") : ""
@@ -2026,6 +2068,8 @@ function previewCurrentBill() {
             price: Number(item.price),
             quantity: Number(item.quantity),
             options: item.options || [],
+            itemDiscountAmount: getCartItemDiscountAmount(item),
+            itemDiscountName: getSelectedBillingAdjustment(item.itemDiscountRuleId)?.name || "",
             taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0),
             taxMode: item.taxMode || "exclusive"
         }))
@@ -2069,6 +2113,11 @@ function updateCart() {
             "cart-item";
 
 
+        const lineDiscount=getCartItemDiscountAmount(item);
+        const discountRule=getSelectedBillingAdjustment(item.itemDiscountRuleId);
+        const itemDiscountRules=availableItemDiscountRules();
+        const discountControl=itemDiscountRules.length?`<label class="cart-item-discount-control"><span>Item discount</span><select aria-label="Item discount for ${esc(item.name)}" onchange="setCartItemDiscount(${index},this.value)"><option value="">No discount</option>${itemDiscountRules.map(rule=>`<option value="${rule.id}" ${Number(item.itemDiscountRuleId)===Number(rule.id)?'selected':''}>${esc(rule.name)} · ${rule.calculation==="percent"?`${esc(rule.value)}%`:money(rule.value)}</option>`).join('')}</select></label>`:"";
+
         row.innerHTML = `
 
             <div>
@@ -2081,6 +2130,8 @@ function updateCart() {
                 <small>
                     ${money(item.price)} each
                 </small>
+                ${lineDiscount>0?`<small class="cart-item-discount-note">${esc(discountRule?.name||'Item discount')} · −${money(lineDiscount)}</small>`:''}
+                ${discountControl}
 
             </div>
 
@@ -2107,10 +2158,7 @@ function updateCart() {
 
 
             <strong>
-                ${money(
-                    item.price *
-                    item.quantity
-                )}
+                ${money(Math.max(0,item.price*item.quantity-lineDiscount))}
             </strong>
 
         `;
@@ -2291,7 +2339,8 @@ async function selectBillingSaleChannel(channelKey) {
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
         const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
         const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
-        return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
+        const itemRule=getSelectedBillingAdjustment(entry.itemDiscountRuleId);
+        return item ? { ...entry, basePrice, price: basePrice+optionPrice, itemDiscountRuleId:itemRule?.application_level==="item"?entry.itemDiscountRuleId:null } : entry;
     }).filter(Boolean);
     if (unavailable.length) showProfileToast(unavailable.length === 1 ? `${unavailable[0].name} is unavailable on ${channel.label} and was removed.` : `${unavailable.length} unavailable items were removed for ${channel.label}.`);
     updateCart();
@@ -2383,7 +2432,8 @@ function repriceCartForCurrentChannel() {
         const variant = item?.variants?.find(candidate => Number(candidate.id) === Number(entry.variantId));
         const basePrice=item?resolveMenuPrice(item,variant||null):Number(entry.basePrice??entry.price);
         const optionPrice=(entry.options||[]).flatMap(set=>set.options||[]).reduce((sum,option)=>sum+Number(option.price||0),0);
-        return item ? { ...entry, basePrice, price: basePrice+optionPrice } : entry;
+        const itemRule=getSelectedBillingAdjustment(entry.itemDiscountRuleId);
+        return item ? { ...entry, basePrice, price: basePrice+optionPrice, itemDiscountRuleId:itemRule?.application_level==="item"?entry.itemDiscountRuleId:null } : entry;
     }).filter(Boolean);
     updateCart();
 }
@@ -2418,45 +2468,119 @@ async function selectBillingMenuItem(item) {
         showProfileToast("Could not load item choices. Please try again.");
         return;
     }
-    if (Array.isArray(item?.variants) && item.variants.length) {
-        openVariantPicker(item);
-        return;
-    }
     openItemOptionPicker(item);
 }
-function openVariantPicker(item){
-    const variants=getAvailableMenuVariants(item);
-    if(!variants.length){alert("This menu item has no available variants right now.");return;}
-    const modal=document.getElementById('variantPickerModal'), body=document.getElementById('variantPickerBody');
-    if(!modal||!body)return;
-    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}</strong><span>${esc(menuTaxLabel(item))}</span></div><p class="variant-picker-hint">Choose a size or variant to add it to the bill.</p><div class="variant-choice-grid">${variants.map(v=>`<button class="variant-choice" type="button" data-variant-id="${esc(v.id)}"><span><strong>${esc(v.name)}</strong><small>${esc(v.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,v))}</b></button>`).join('')}</div>`;
-    body.querySelectorAll("[data-variant-id]").forEach(button => {
-        button.addEventListener("click", () => chooseVariant(item.id, button.dataset.variantId));
-    });
+function itemOptionSets(item,variant=null){const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));const ids=[...(Array.isArray(item?.option_set_ids)?item.option_set_ids:[]),...(Array.isArray(variant?.option_set_ids)?variant.option_set_ids:[])];return [...new Set(ids.map(String))].map(id=>byId.get(id)).filter(Boolean);}
+function openItemOptionPickerLegacy(item,variant=null){
+    const variants=getAvailableMenuVariants(item),chosen=variant||((variants.length===1)?variants[0]:null),modal=document.getElementById('itemOptionsModal');
+    if(!modal)return;
+    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';
+    const instruction=document.getElementById('itemCustomizerInstruction');if(instruction){instruction.value='';instruction.hidden=true;}
+    const instructionToggle=document.getElementById('itemCustomizerInstructionToggle');if(instructionToggle){instructionToggle.textContent='＋  Add Cooking Instruction';instructionToggle.setAttribute('aria-expanded','false');}
+    const backOrder=document.getElementById('itemCustomizerBackOrder');if(backOrder)backOrder.checked=false;
+    const detailsToggle=document.querySelector('.item-customizer-more-details');if(detailsToggle)detailsToggle.setAttribute('aria-expanded','false');
+    const body=document.getElementById('itemOptionsBody');if(body)body.innerHTML='';
+    renderItemOptionPicker(item);
     modal.style.display='flex';
 }
-function closeVariantPicker(){document.getElementById('variantPickerModal')?.style.setProperty('display','none');}
-function chooseVariant(menuId,variantId){const item=currentMenu.find(x=>Number(x.id)===Number(menuId));const v=getAvailableMenuVariants(item).find(x=>Number(x.id)===Number(variantId));if(!item||!v)return;closeVariantPicker();openItemOptionPicker(item,v);}
-function itemOptionSets(item,variant=null){const byId=new Map(menuOptionSets.map(set=>[String(set.id),set]));const ids=[...(Array.isArray(item?.option_set_ids)?item.option_set_ids:[]),...(Array.isArray(variant?.option_set_ids)?variant.option_set_ids:[])];return [...new Set(ids.map(String))].map(id=>byId.get(id)).filter(Boolean);}
-function openItemOptionPicker(item,variant=null){
-    const sets=itemOptionSets(item,variant),basePrice=resolveMenuPrice(item,variant||null),modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
-    if(!sets.length){addToCart(item.id,variant?`${item.name} — ${variant.name}`:item.name,basePrice,item,variant,[],basePrice);return;}
-    if(!modal||!body)return;
-    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(variant?.id||'');
-    const optionSetMarkup=sets.map(set=>{
+function closeItemOptions(){document.getElementById('itemOptionsModal')?.style.setProperty('display','none');}
+function renderItemOptionPickerLegacy(item){
+    const modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');
+    if(!modal||!body||!item)return;
+    const variants=getAvailableMenuVariants(item),variant=variants.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null;
+    const selectedOptions=new Set([...body.querySelectorAll('input:checked')].map(input=>String(input.dataset.optionId)));
+    const sets=itemOptionSets(item,variant),basePrice=resolveMenuPrice(item,variant),image=item.image_url||item.imageUrl||'';
+    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;
+    const variantsMarkup=variants.length>1?`<fieldset class="item-option-set item-variant-section"><legend><span class="item-customizer-set-title">Quantity <small class="required">REQUIRED</small></span><span class="item-option-chevron" aria-hidden="true">⌃</span></legend><div class="item-variant-options">${variants.map(entry=>`<label class="item-variant-choice ${String(entry.id)===String(variant?.id)?'is-selected':''}"><input type="radio" name="itemCustomizerVariant" value="${esc(entry.id)}" ${String(entry.id)===String(variant?.id)?'checked':''}><span><strong>${esc(entry.name)}</strong><small>${esc(entry.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,entry))}</b></label>`).join('')}</div></fieldset>`:'';
+    const optionMarkup=sets.length?sets.map(set=>{
         const min=Number(set.minSelections||0),max=Number(set.maxSelections||1);
         const guidance=min?`Required · choose ${min===max?min:`${min}–${max}`}`:`Optional · up to ${max} choice${max===1?'':'s'}`;
-        return `<fieldset class="item-option-set"><legend><span>${esc(set.name)}</span><small class="${min?'required':'optional'}">${guidance}</small></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><input type="${max===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}"><span>${esc(option.name)}</span><strong class="${Number(option.price||0)>0?'has-extra':'included'}">${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</strong></label>`).join('')}</div></fieldset>`;
-    }).join('');
-    body.innerHTML=`<div class="variant-picker-parent"><strong>${esc(item.name)}${variant?` — ${esc(variant.name)}`:''}</strong><span>${money(basePrice)}</span></div>${optionSetMarkup}`;
-    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;modal.style.display='flex';
+        return `<fieldset class="item-option-set"><legend><span>${esc(set.name)}</span><small class="${min?'required':'optional'}">${guidance}</small></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><input type="${max===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}" ${selectedOptions.has(String(option.id))?'checked':''}><span>${esc(option.name)}</span><strong class="${Number(option.price||0)>0?'has-extra':'included'}">${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</strong></label>`).join('')}</div></fieldset>`;
+    }).join(''):`<div class="item-customizer-empty">${variants.length>1&&!variant?'Choose a size to see its available options.':'This item has no add-ons. You can add it as is.'}</div>`;
+    const title=document.getElementById('itemOptionsTitle');if(title)title.textContent=`Customize ${item.name}`;
+    body.innerHTML=`<div class="item-customizer-product"><div class="item-customizer-image">${image?`<img src="${esc(image)}" alt="${esc(item.name)}">`:`<span>${menuIcon(item.category)||'✦'}</span>`}</div><div><span class="menu-eyebrow">${esc(item.category||'MENU ITEM')}</span><h3>${esc(item.name)}</h3>${variant?`<small class="item-customizer-variant-label">${esc(variant.name)}${variant.unit||item.unit?` · ${esc(variant.unit||item.unit)}`:''}</small>`:''}<p>${esc(item.description||'Choose a size and any add-ons for this item.')}</p>${renderMenuItemTagBadges(item.tags,"item-customizer-tags")}<strong>${variant?money(basePrice):variants.length>1?'Choose a size':money(basePrice)}</strong></div></div>${variantsMarkup}${sets.length?`<div class="item-customizer-section item-customizer-option-section"><div class="item-customizer-section-heading"><strong>Customize your item</strong><small>Pick the options you want</small></div>${optionMarkup}</div>`:optionMarkup}`;
+    body.onchange=event=>{
+        const variantInput=event.target.closest('input[name="itemCustomizerVariant"]');
+        if(variantInput){modal.dataset.variantId=String(variantInput.value);renderItemOptionPicker(item);return;}
+        updateItemOptionsTotal();
+    };
+    document.getElementById('itemOptionsQuantity').textContent=String(Math.max(1,Number(modal.dataset.quantity)||1));
+    const addButton=document.getElementById('confirmItemOptionsButton');
+    if(addButton)addButton.disabled=variants.length>1&&!variant;
+    updateItemOptionsTotal();
 }
-function closeItemOptions(){document.getElementById('itemOptionsModal')?.style.setProperty('display','none');}
-function confirmItemOptions(){
-    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked')],sets=itemOptionSets(item,variant),selections=[];
+function adjustItemOptionsQuantityLegacy(change){
+    const modal=document.getElementById('itemOptionsModal');if(!modal)return;
+    modal.dataset.quantity=String(Math.max(1,Math.min(999,(Number(modal.dataset.quantity)||1)+Number(change||0))));
+    const quantity=document.getElementById('itemOptionsQuantity');if(quantity)quantity.textContent=modal.dataset.quantity;
+    updateItemOptionsTotal();
+}
+function updateItemOptionsTotalLegacy(){
+    const modal=document.getElementById('itemOptionsModal'),total=document.getElementById('itemOptionsTotal');if(!modal||!total)return;
+    const base=Number(modal.dataset.basePrice||0),extra=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')].reduce((sum,input)=>{
+        const option=itemOptionSets(currentMenu.find(item=>Number(item.id)===Number(modal.dataset.menuId)),currentMenu.find(item=>Number(item.id)===Number(modal.dataset.menuId))?.variants?.find(v=>String(v.id)===String(modal.dataset.variantId))).flatMap(set=>set.options||[]).find(entry=>String(entry.id)===String(input.dataset.optionId));
+        return sum+Number(option?.price||0);
+    },0);
+    total.textContent=money((base+extra)*Math.max(1,Number(modal.dataset.quantity)||1));
+}
+function confirmItemOptionsLegacy(){
+    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')],sets=itemOptionSets(item,variant),selections=[];
+    if(getAvailableMenuVariants(item).length>1&&!variant)return alert('Choose a size or variant before adding this item.');
     for(const set of sets){const chosen=selected.filter(input=>String(input.dataset.setId)===String(set.id)),min=Number(set.minSelections||0),max=Number(set.maxSelections||1);if(chosen.length<min||chosen.length>max)return alert(`Choose ${min===max?min:`${min} to ${max}`} option${max===1?'':'s'} for ${set.name}.`);if(chosen.length)selections.push({setId:String(set.id),setName:set.name,options:chosen.map(input=>{const option=(set.options||[]).find(value=>String(value.id)===input.dataset.optionId);return {id:String(option.id),name:option.name,price:Number(option.price||0)};})});}
     const basePrice=Number(modal.dataset.basePrice||0),extra=selections.flatMap(set=>set.options).reduce((sum,option)=>sum+Number(option.price||0),0);
-    addToCart(menuId,modal.dataset.itemName,basePrice+extra,item,variant,selections,basePrice);closeItemOptions();
+    addToCart(menuId,modal.dataset.itemName,basePrice+extra,item,variant,selections,basePrice,Number(modal.dataset.quantity)||1);closeItemOptions();
+}
+
+function openItemOptionPicker(item,variant=null){
+    const variants=getAvailableMenuVariants(item),chosen=variant||((variants.length===1)?variants[0]:null),modal=document.getElementById('itemOptionsModal');
+    if(!modal)return;
+    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';
+    const instruction=document.getElementById('itemCustomizerInstruction');if(instruction){instruction.value='';instruction.hidden=true;}
+    const instructionToggle=document.getElementById('itemCustomizerInstructionToggle');if(instructionToggle){instructionToggle.textContent='＋  Add Cooking Instruction';instructionToggle.setAttribute('aria-expanded','false');}
+    const backOrder=document.getElementById('itemCustomizerBackOrder');if(backOrder)backOrder.checked=false;
+    const detailsToggle=document.querySelector('.item-customizer-more-details');if(detailsToggle)detailsToggle.setAttribute('aria-expanded','false');
+    const discount=document.getElementById('itemCustomizerDiscount');if(discount)discount.hidden=true;
+    const body=document.getElementById('itemOptionsBody');if(body)body.innerHTML='';
+    renderItemOptionPicker(item);modal.style.display='flex';
+}
+function renderItemOptionPicker(item){
+    const modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');if(!modal||!body||!item)return;
+    const variants=getAvailableMenuVariants(item),variant=variants.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null,sets=itemOptionSets(item,variant),basePrice=resolveMenuPrice(item,variant),image=item.image_url||item.imageUrl||'';
+    const selectedOptions=new Set([...body.querySelectorAll('input:checked[data-option-id]')].map(input=>String(input.dataset.optionId)));
+    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;
+    const title=document.getElementById('itemOptionsTitle');if(title)title.textContent=`Customise ${item.name}`;
+    const mark=document.getElementById('itemOptionsNature');if(mark){const tags=(Array.isArray(item.tags)?item.tags:[]).map(tag=>String(tag).toLowerCase().replace(/[\s_-]+/g,'')),nonVeg=tags.some(tag=>tag.includes('nonveg')||tag.includes('egg'))||String(item.nature||'').toLowerCase().includes('non-veg'),veg=tags.some(tag=>tag==='veg'||tag==='vegetarian');mark.hidden=!(nonVeg||veg);mark.classList.toggle('is-non-veg',nonVeg);mark.setAttribute('aria-label',nonVeg?'Non-vegetarian item':'Vegetarian item');}
+    const variantsMarkup=variants.length>1?`<fieldset class="item-option-set item-variant-section"><legend><span class="item-customizer-set-title">Quantity <small class="required">REQUIRED</small></span><span class="item-option-chevron" aria-hidden="true">⌃</span></legend><div class="item-variant-options">${variants.map(entry=>`<label class="item-variant-choice ${String(entry.id)===String(variant?.id)?'is-selected':''}"><input type="radio" name="itemCustomizerVariant" value="${esc(entry.id)}" ${String(entry.id)===String(variant?.id)?'checked':''}><span><strong>${esc(entry.name)}</strong><small>${esc(entry.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,entry))}</b></label>`).join('')}</div></fieldset>`:'';
+    const optionMarkup=sets.map(set=>{const min=Number(set.minSelections||0),max=Number(set.maxSelections||1),selectedCount=(set.options||[]).filter(option=>selectedOptions.has(String(option.id))).length;return `<fieldset class="item-option-set" data-set-id="${esc(set.id)}" data-max-selections="${max}"><legend><span class="item-customizer-set-title">${esc(set.name)} <small class="item-option-count">${selectedCount}/${max}</small></span><small class="${min?'required':'optional'}">${min?'REQUIRED':'OPTIONAL'}</small><span class="item-option-chevron" aria-hidden="true">⌃</span></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><span class="item-customizer-option-mark" aria-hidden="true"></span><span class="item-customizer-option-copy">${esc(option.name)}<small>${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</small></span><input type="${max===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}" ${selectedOptions.has(String(option.id))?'checked':''}></label>`).join('')}</div></fieldset>`;}).join('');
+    const detailsOpen=modal.dataset.detailsOpen==='true',selectedAddonTotal=[...body.querySelectorAll('input:checked[data-option-id]')].reduce((sum,input)=>sum+Number(sets.flatMap(set=>set.options||[]).find(option=>String(option.id)===String(input.dataset.optionId))?.price||0),0);
+    body.innerHTML=`<div id="itemCustomizerDetails" class="item-customizer-details" ${detailsOpen?'':'hidden'}><div class="item-customizer-image">${image?`<img src="${esc(image)}" alt="${esc(item.name)}">`:`<span>${menuIcon(item.category)||'✦'}</span>`}</div><div><span class="menu-eyebrow">${esc(item.category||'MENU ITEM')}</span><p>${esc(item.description||'No additional item details.')}</p></div></div><div class="item-customizer-rate-row"><span>Rate: <strong id="itemOptionsRate">${money(basePrice)}</strong></span><span>Item Price: <strong id="itemOptionsUnitPrice">${variants.length>1&&!variant?'Choose a size':money(basePrice+selectedAddonTotal)}</strong></span></div>${variantsMarkup}${optionMarkup}`;
+    const discountSelect=document.getElementById('itemCustomizerDiscount');if(discountSelect){const rules=availableItemDiscountRules();discountSelect.innerHTML=`<option value="">No item discount</option>${rules.map(rule=>`<option value="${esc(rule.id)}">${esc(rule.name)} · ${rule.calculation==='percent'?`${esc(rule.value)}%`:money(rule.value)}</option>`).join('')}`;discountSelect.value=modal.dataset.itemDiscountRuleId||'';discountSelect.onchange=()=>{modal.dataset.itemDiscountRuleId=discountSelect.value;updateItemOptionsTotal();};}
+    body.onchange=event=>{if(event.target.matches('input[name="itemCustomizerVariant"]')){modal.dataset.variantId=String(event.target.value);renderItemOptionPicker(item);return;}body.querySelectorAll('.item-option-set[data-set-id]').forEach(section=>{const chosen=section.querySelectorAll('input[data-set-id]:checked').length,count=section.querySelector('.item-option-count');if(count)count.textContent=`${chosen}/${section.dataset.maxSelections||1}`;});updateItemOptionsTotal();};
+    body.onclick=event=>{const caret=event.target.closest('.item-option-chevron');if(!caret)return;const section=caret.closest('.item-option-set');if(!section)return;section.classList.toggle('is-collapsed');caret.textContent=section.classList.contains('is-collapsed')?'⌄':'⌃';};
+    const instruction=document.getElementById('itemCustomizerInstruction');if(instruction){instruction.value=modal.dataset.cookingInstruction||'';instruction.oninput=()=>{modal.dataset.cookingInstruction=instruction.value.slice(0,250);};}
+    document.getElementById('itemOptionsQuantity').textContent=String(Math.max(1,Number(modal.dataset.quantity)||1));
+    const addButton=document.getElementById('confirmItemOptionsButton');if(addButton)addButton.disabled=variants.length>1&&!variant;
+    updateItemOptionsTotal();
+}
+function toggleItemCustomizerDetails(){const modal=document.getElementById('itemOptionsModal'),details=document.getElementById('itemCustomizerDetails'),button=document.querySelector('.item-customizer-more-details');if(!modal||!details||!button)return;details.hidden=!details.hidden;modal.dataset.detailsOpen=String(!details.hidden);button.setAttribute('aria-expanded',String(!details.hidden));}
+function toggleItemCustomizerInstruction(){const input=document.getElementById('itemCustomizerInstruction'),button=document.getElementById('itemCustomizerInstructionToggle');if(!input||!button)return;input.hidden=!input.hidden;button.setAttribute('aria-expanded',String(!input.hidden));button.textContent=input.hidden?'＋  Add Cooking Instruction':'−  Hide Cooking Instruction';if(!input.hidden)input.focus();}
+function toggleItemCustomizerDiscount(){const select=document.getElementById('itemCustomizerDiscount');if(!select)return;if(!availableItemDiscountRules().length){showProfileToast('No item level discounts are set up for this sale channel.');return;}select.hidden=!select.hidden;if(!select.hidden)select.focus();}
+function adjustItemOptionsQuantity(change){const modal=document.getElementById('itemOptionsModal');if(!modal)return;modal.dataset.quantity=String(Math.max(1,Math.min(999,(Number(modal.dataset.quantity)||1)+Number(change||0))));const quantity=document.getElementById('itemOptionsQuantity');if(quantity)quantity.textContent=modal.dataset.quantity;updateItemOptionsTotal();}
+function updateItemOptionsTotal(){
+    const modal=document.getElementById('itemOptionsModal'),total=document.getElementById('itemOptionsTotal');if(!modal||!total)return;
+    const item=currentMenu.find(entry=>Number(entry.id)===Number(modal.dataset.menuId)),variant=item?.variants?.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null,sets=itemOptionSets(item,variant),base=Number(modal.dataset.basePrice||0),extra=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')].reduce((sum,input)=>sum+Number(sets.flatMap(set=>set.options||[]).find(option=>String(option.id)===String(input.dataset.optionId))?.price||0),0),quantity=Math.max(1,Number(modal.dataset.quantity)||1),gross=(base+extra)*quantity,rate=appSettings.gstCalculationEnabled===false?0:Math.max(0,Number(item?.tax_rate??appSettings.gstRate??0)),net=appSettings.gstCalculationEnabled!==false&&item?.tax_mode==='inclusive'&&rate?gross/(1+rate/100):gross,rule=getSelectedBillingAdjustment(modal.dataset.itemDiscountRuleId),rawDiscount=rule?.calculation==='percent'?net*Math.max(0,Number(rule.value||0))/100:Math.max(0,Number(rule?.value||0))*quantity;
+    total.textContent=money(Math.max(0,gross-Math.min(net,rawDiscount)));
+    const rateLabel=document.getElementById('itemOptionsRate');if(rateLabel)rateLabel.textContent=money(base);
+    const unitLabel=document.getElementById('itemOptionsUnitPrice');if(unitLabel)unitLabel.textContent=Array.isArray(item?.variants)&&item.variants.length>1&&!variant?'Choose a size':money(base+extra);
+}
+function confirmItemOptions(){
+    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')],sets=itemOptionSets(item,variant),selections=[];
+    if(getAvailableMenuVariants(item).length>1&&!variant)return alert('Choose a size or variant before adding this item.');
+    for(const set of sets){const chosen=selected.filter(input=>String(input.dataset.setId)===String(set.id)),min=Number(set.minSelections||0),max=Number(set.maxSelections||1);if(chosen.length<min||chosen.length>max)return alert(`Choose ${min===max?min:`${min} to ${max}`} option${max===1?'':'s'} for ${set.name}.`);if(chosen.length)selections.push({setId:String(set.id),setName:set.name,options:chosen.map(input=>{const option=(set.options||[]).find(value=>String(value.id)===input.dataset.optionId);return {id:String(option.id),name:option.name,price:Number(option.price||0)};})});}
+    const instruction=String(document.getElementById('itemCustomizerInstruction')?.value||'').trim().slice(0,250);if(instruction)selections.push({setId:'__slash_custom_instruction__',setName:'Cooking Instruction',options:[{id:`instruction_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`,name:instruction,price:0}]});
+    if(document.getElementById('itemCustomizerBackOrder')?.checked)selections.push({setId:'__slash_back_order__',setName:'Order Handling',options:[{id:'back_order',name:'Back Order',price:0}]});
+    const basePrice=Number(modal.dataset.basePrice||0),extra=selections.flatMap(set=>set.options).reduce((sum,option)=>sum+Number(option.price||0),0);
+    addToCart(menuId,modal.dataset.itemName,basePrice+extra,item,variant,selections,basePrice,Number(modal.dataset.quantity)||1,modal.dataset.itemDiscountRuleId);closeItemOptions();
 }
 
 async function openBillingCustomerPanel() {
@@ -2582,9 +2706,12 @@ function populateMenuCategorySelect(selected=''){
 function renderMenuCategoryMaster(){
     const grid=document.getElementById('menuCategoryMasterGrid');
     const list=document.getElementById('menuCategoryMasterList');
-    const html=(menuCategories||[]).length?menuCategories.map(c=>`<div class="menu-category-master-row"><div class="menu-category-master-identity"><span class="menu-category-master-thumb">${c.image_url?`<img src="${esc(c.image_url)}" alt="">`:'▦'}</span><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'<div class="empty">No menu categories created yet.</div>';
-    if(grid)grid.innerHTML=html;
-    if(list)list.innerHTML=html;
+    const renderRows=items=>items.length?items.map(c=>`<div class="menu-category-master-row"><div class="menu-category-master-identity"><span class="menu-category-master-thumb">${c.image_url?`<img src="${esc(c.image_url)}" alt="">`:'▦'}</span><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'';
+    const all=menuCategories||[];
+    const term=String(document.getElementById('menuCategorySearch')?.value||'').trim().toLowerCase();
+    const filtered=all.filter(category=>!term||String(category.name||'').toLowerCase().includes(term));
+    if(grid)grid.innerHTML=all.length?(filtered.length?renderRows(filtered):'<div class="empty">No categories match your search.</div>'):'<div class="empty">No menu categories created yet.</div>';
+    if(list)list.innerHTML=all.length?renderRows(all):'<div class="empty">No menu categories created yet.</div>';
 }
 function openMenuCategoryModal(category=null){
     document.getElementById('menuCategoryEditingId').value=category?.id||'';
@@ -2631,6 +2758,12 @@ async function saveMenuCategory(){
 async function toggleMenuCategory(id){const c=menuCategories.find(x=>Number(x.id)===Number(id));if(!c)return;try{await api(`/menu/categories/${id}`,{method:'PUT',body:JSON.stringify({name:c.name,sortOrder:c.sort_order,active:!c.active})});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
 async function deleteMenuCategory(id){if(!confirm('Delete this menu category?'))return;try{await api(`/menu/categories/${id}`,{method:'DELETE'});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
 
+function billingCategoryDisplayName(value){
+    return String(value||"").trim().toLocaleLowerCase().replace(/(^|[\s-])([a-z])/g,(_,prefix,letter)=>`${prefix}${letter.toLocaleUpperCase()}`);
+}
+function billingCategoryHue(value){
+    let hash=0;for(const character of String(value||""))hash=(hash*31+character.charCodeAt(0))%360;return hash;
+}
 async function loadMenu() {
     try {
         await loadMenuCategories();
@@ -2639,32 +2772,24 @@ async function loadMenu() {
         const grid = document.querySelector("#new-order .menu-grid");
         if (!grid) return;
 
-        const categories = menuCategories.filter(c=>c.active!==false).map(c=>c.name).filter(Boolean);
+        const categories = [...new Set([
+            ...menuCategories.filter(c=>c.active!==false).map(c=>c.name).filter(Boolean),
+            ...currentMenu.filter(item=>item.available!==false).map(item=>String(item.category||"Uncategorized").trim()).filter(Boolean)
+        ])];
 
         if (sidebar) {
     sidebar.innerHTML = "";
-
-    // All Items button
-    const allButton = document.createElement("button");
-    allButton.type = "button";
-    allButton.className = "category-btn active";
-    allButton.innerHTML = `<span>All Items</span>`;
-
-    allButton.addEventListener("click", function () {
-        filterCategory("All", allButton);
-    });
-
-    sidebar.appendChild(allButton);
-
-    // Database categories
-    categories.forEach(function (category) {
+    categories.forEach(function (category, index) {
         const button = document.createElement("button");
 
         button.type = "button";
-        button.className = "category-btn";
+        button.className = `category-btn${index===0?" active":""}`;
 
+        const displayCategory=billingCategoryDisplayName(category);
+        const categoryHue=billingCategoryHue(category);
+        button.setAttribute("aria-label",displayCategory);
         button.innerHTML =
-            `<span class="category-dot"></span><span>${esc(category)}</span>`;
+            `<span class="billing-category-initial" style="--category-hue:${categoryHue}" aria-hidden="true">${esc(displayCategory.charAt(0).toLocaleUpperCase()||"•")}</span><span class="billing-category-name">${esc(displayCategory)}</span>`;
 
         button.addEventListener("click", function () {
             filterCategory(category, button);
@@ -2683,7 +2808,7 @@ async function loadMenu() {
         channelMenu.forEach(item => {
             const card = document.createElement("div");
             card.className = "food-card modern-food-card";
-            card.dataset.category = String(item.category || "").trim();
+            card.dataset.category = String(item.category || "Uncategorized").trim();
             const variants = getAvailableMenuVariants(item);
             const hasVariants = Array.isArray(item.variants) && item.variants.length > 0;
             const variantsUnavailable = hasVariants && variants.length === 0;
@@ -2707,7 +2832,6 @@ async function loadMenu() {
                 <div class="food-card-content">
                     <h3>${esc(item.name)}</h3>
                     <p class="food-meta">${esc(item.category || "Uncategorized")} · ${esc(item.unit || "ea")}</p>
-                    ${renderMenuItemTagBadges(item.tags,"food-card-tags")}
                     <div class="food-card-bottom"><strong>${variants.length ? `From ${money(startingPrice)}` : variantsUnavailable ? "Unavailable" : money(startingPrice)}</strong><button type="button" ${variantsUnavailable ? "disabled" : ""}>${hasVariants ? "Choose" : "Add"}</button></div>
                 </div>`;
             const addBtn = card.querySelector("button");
@@ -2717,6 +2841,9 @@ async function loadMenu() {
             };
             grid.appendChild(card);
         });
+        const initialCategory=categories.find(category=>channelMenu.some(item=>String(item.category||"Uncategorized").trim().toLowerCase()===String(category).trim().toLowerCase()))||categories[0]||"All";
+        const initialButton=sidebar?.querySelector(`.category-btn:nth-child(${Math.max(1,categories.indexOf(initialCategory)+1)})`);
+        filterCategory(initialCategory,initialButton||null);
     } catch (e) {
         console.error("Load menu failed:", e);
     }
@@ -3016,19 +3143,19 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const orderPayload = {
             orderType, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null,
-            discount: b.discount, serviceCharge: b.serviceCharge,
+            discount: b.orderDiscount, serviceCharge: b.serviceCharge,
             discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
             discountAdjustmentName: b.discountId ? b.discountName : null,
             chargeAdjustmentName: b.chargeId ? b.chargeName : null,
             marketingDealId: b.marketingDealId, marketingDealName: b.marketingDealName,
             notes: document.getElementById("billingOrderNotes")?.value.trim() || null,
-            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, basePrice: item.basePrice ?? item.price, options: item.options || [], quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode })),
+            items: cart.map(item => ({ menuId: item.id, variantId: item.variantId || null, name: item.name, price: item.price, basePrice: item.basePrice ?? item.price, options: item.options || [], quantity: item.quantity, unit: item.unit, taxRate: item.taxRate, taxMode: item.taxMode, itemDiscountRuleId: item.itemDiscountRuleId || null })),
             itemCancellationReasons: cartItemCancellationReasons.slice()
         };
         let order;
         let orderNumber;
         const isNewOrder = !currentOpenOrderId;
-        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), unit: item.unit || "ea", options: item.options || [], taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0), taxMode: item.taxMode || "exclusive" }));
+        const billItems = cart.map(item => ({ name: item.name, price: Number(item.price), quantity: Number(item.quantity), unit: item.unit || "ea", options: item.options || [], itemDiscountAmount: getCartItemDiscountAmount(item), itemDiscountName: getSelectedBillingAdjustment(item.itemDiscountRuleId)?.name || "", taxRate: Number(item.taxRate ?? appSettings.gstRate ?? 0), taxMode: item.taxMode || "exclusive" }));
         const kotEnabled = appSettings.kotEnabled !== false;
         const checkoutPayload = {
             payments: paymentsToRecord,
@@ -3072,7 +3199,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         if (tableInput) tableInput.value = "";
         updateCart();
         if (kotEnabled && appSettings.kotPrintMode === "checkout" && !paymentOptions.keepOpen && !isQrExistingOrder) {
-            Promise.resolve().then(() => printKOT(order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
+            Promise.resolve().then(() => printKOT(order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
         }
         window.currentBillData = {
             orderId: completedOrder.id || order.id,
@@ -3150,7 +3277,8 @@ async function saveOpenOrder() {
         quantity: item.quantity,
         unit: item.unit,
         taxRate: item.taxRate,
-        taxMode: item.taxMode
+        taxMode: item.taxMode,
+        itemDiscountRuleId: item.itemDiscountRuleId || null
     }));
     const customerName = document.getElementById("billingCustomerNameQuick")?.value.trim() || "";
     const customerPhone = document.getElementById("billingCustomerPhoneQuick")?.value.trim() || "";
@@ -3179,7 +3307,7 @@ async function saveOpenOrder() {
                     orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
                     paymentMethod: openOrderData?.order?.payment_method || null,
                     customerId: billingCustomer?.id || openOrderData?.order?.customer_id || null,
-                    discount: b.discount,
+                    discount: b.orderDiscount,
                     serviceCharge: b.serviceCharge,
                     discountAdjustmentId: b.discountId,
                     chargeAdjustmentId: b.chargeId,
@@ -3201,7 +3329,7 @@ async function saveOpenOrder() {
             await loadTables(); await updateDashboard(); await updateOrdersTable();
             const savedStatus = String(result.order.status || "").toLowerCase();
             showProfileToast(savedStatus === "completed" ? "Bill changes saved successfully." : "Order saved successfully.");
-            if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
+            if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
             return;
         }
 
@@ -3212,7 +3340,7 @@ async function saveOpenOrder() {
                 orderNumber, orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
                 gst: b.gst, total: b.total, paymentMethod: null,
                 customerId: billingCustomer?.id || null,
-                discount: b.discount, serviceCharge: b.serviceCharge,
+                discount: b.orderDiscount, serviceCharge: b.serviceCharge,
                 discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
                 discountAdjustmentName: b.discountId ? b.discountName : null,
                 chargeAdjustmentName: b.chargeId ? b.chargeName : null,
@@ -3229,7 +3357,7 @@ async function saveOpenOrder() {
         updateCart();
         await loadTables(); await updateDashboard(); await updateOrdersTable();
         showProfileToast("Order saved successfully.");
-        if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id)).catch(error => console.warn("Kitchen ticket print failed:", error));
+        if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
     } catch (error) {
         console.error(error);
         alert("Failed to save open order: " + error.message);
@@ -3256,7 +3384,8 @@ async function payOpenOrder(orderId) {
             savedQuantity: Number(item.quantity),
             unit: item.unit || 'ea',
             taxRate: Number(item.tax_rate ?? 5),
-            taxMode: item.tax_mode === 'inclusive' ? 'inclusive' : 'exclusive'
+            taxMode: item.tax_mode === 'inclusive' ? 'inclusive' : 'exclusive',
+            itemDiscountRuleId: Number(item.item_discount_rule_id)||null
         }));
         orderType = order.order_type || "Dine-in";
         setOrderType(orderType);
@@ -3636,7 +3765,7 @@ window.openBillPreview = function(data) {
             const unit = String(item.unit || "ea").trim();
             const name = appSettings.uppercaseItems ? String(item.name || "-").toUpperCase() : String(item.name || "-");
             row.className = "bill-print-item-row";
-            row.innerHTML = `<td colspan="3"><strong>${index + 1}. ${esc(name)}</strong><small>${qty} @ ${esc(money(price))}/${esc(unit)}</small>${optionText ? `<small class="bill-print-item-options">${esc(optionText)}</small>` : ""}</td><td class="bill-print-item-total">${esc(money(lineTotal))}</td>`;
+            row.innerHTML = `<td colspan="3"><strong>${index + 1}. ${esc(name)}</strong><small>${qty} @ ${esc(money(price))}/${esc(unit)}</small>${Number(item.itemDiscountAmount||0)>0?`<small class="bill-print-item-discount">${esc(item.itemDiscountName||"Item discount")} · −${esc(money(item.itemDiscountAmount))}</small>`:""}${optionText ? `<small class="bill-print-item-options">${esc(optionText)}</small>` : ""}</td><td class="bill-print-item-total">${esc(money(lineTotal))}</td>`;
             body.appendChild(row);
         });
     }
@@ -4093,7 +4222,7 @@ function renderQrOrderWorkflow(order) {
 async function updateQrOrderWorkflow(orderId, status) {
     try {
         await api(`/orders/${Number(orderId)}/qr-status`, { method: "PUT", body: JSON.stringify({ status }) });
-        if (status === "Preparing" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId);
+        if (status === "Preparing" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId,undefined,undefined,{auto:true});
         await updateOrdersTable(true, false);
         await viewOrder(orderId);
         if (appSettings.kotEnabled !== false && hasPermission("kitchen", "view")) await loadKOT(false);
@@ -5514,9 +5643,52 @@ let kotGroups=[];
 let kotGroupSelectedTargets={categories:new Set(),items:new Set()};
 let kotGroupWorkingTargets=null;
 let kotGroupTargetType="categories";
+let kotDevicePrintStatus={enabled:false,hostActive:false,isThisDeviceHost:false};
+
+function renderCounterKOTPrintSetting(){
+    const toggle=document.getElementById("kotDevicePrintEnabled");
+    const status=document.getElementById("kotDevicePrintStatus");
+    if(toggle){toggle.checked=kotDevicePrintStatus.enabled;toggle.disabled=!hasPermission("kot_groups","edit");}
+    if(status){
+        status.textContent=!hasPermission("kot_groups","edit")
+            ? "You need KOT group edit access to change this setting."
+            : !kotDevicePrintStatus.enabled
+                ? "Off · tickets print from the device that creates the order."
+                : kotDevicePrintStatus.isThisDeviceHost
+                    ? "On · this Windows POS is receiving tickets. Keep it open and signed in."
+                    : kotDevicePrintStatus.hostActive
+                        ? "On · a counter POS is currently receiving tickets."
+                        : "On · waiting for a Windows counter POS to come online.";
+    }
+}
+
+async function loadCounterKOTPrintSetting(){
+    try{
+        kotDevicePrintStatus=await api("/kot-device-print-settings");
+        appSettings.printAllTicketsFromDevice=kotDevicePrintStatus.enabled===true;
+    }catch(error){
+        console.warn("Counter ticket printing setting unavailable:",error.message);
+    }
+    renderCounterKOTPrintSetting();
+}
+
+async function saveCounterKOTPrintSetting(enabled){
+    const toggle=document.getElementById("kotDevicePrintEnabled");
+    if(toggle)toggle.disabled=true;
+    try{
+        kotDevicePrintStatus=await api("/kot-device-print-settings",{method:"PUT",body:JSON.stringify({enabled:Boolean(enabled)})});
+        appSettings.printAllTicketsFromDevice=kotDevicePrintStatus.enabled===true;
+        try{localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));}catch(_){}
+        showProfileToast(enabled?"Counter ticket printing is on.":"Counter ticket printing is off.");
+    }catch(error){
+        if(toggle)toggle.checked=!enabled;
+        showProfileToast(error.message||"Could not update counter ticket printing.");
+    }finally{renderCounterKOTPrintSetting();}
+}
 
 async function loadKOTGroups(){
     try{
+        loadCounterKOTPrintSetting();
         kotGroups=await api("/kot-groups");
         const c=document.getElementById("kotGroupsContainer");
         setText("kotGroupCount",kotGroups.length);
@@ -5643,6 +5815,8 @@ function confirmKOTGroupTargetPicker(){
 
 let kotState={tab:"pending",range:"today",from:"",to:"",items:[]};
 let kotAlertTimer=null;
+let counterKOTPrintTimer=null;
+let counterKOTPrintBusy=false;
 let kotAlertInitialized=false;
 let knownPendingKOTIds=new Set();
 let kotAlertAudioContext=null;
@@ -5763,12 +5937,13 @@ function showKOTArrivalToast(count){
 }
 
 async function autoPrintQrFollowupTicket(ticket){
+    if(appSettings.printAllTicketsFromDevice===true)return;
     const rows=await api(`/kot?orderId=${encodeURIComponent(ticket.orderId)}&print=1`);
     const batch=(rows||[]).filter(item=>Number(item.ticket_number||1)===Number(ticket.ticketNumber));
     // Background polls cannot open browser print dialogs or Bluetooth pickers.
     // Auto-send only when every station has a configured local/network printer.
     if(!batch.length||batch.some(item=>!Number(item.printer_id)||!["local","network"].includes(String(item.printer_connection_type||""))))return;
-    await printKOT(ticket.orderId,undefined,ticket.ticketNumber);
+    await printKOT(ticket.orderId,undefined,ticket.ticketNumber,{auto:true});
 }
 
 function inspectNewKOTAlerts(items){
@@ -5819,6 +5994,37 @@ function startKOTAlertPolling(){
 
 function stopKOTAlertPolling(){
     if(kotAlertTimer){clearInterval(kotAlertTimer);kotAlertTimer=null;}
+}
+
+async function pollCounterKOTPrintJobs(){
+    if(counterKOTPrintBusy||!window.cafePOSDesktop||!currentUser||!hasPermission("kitchen","print"))return;
+    counterKOTPrintBusy=true;
+    try{
+        const response=await api("/kot-print-jobs/claim",{method:"POST",body:JSON.stringify({})});
+        const job=response?.job;
+        if(!job)return;
+        try{
+            await printKOT(Number(job.order_id),undefined,Number(job.ticket_number),{quiet:true});
+            await api(`/kot-print-jobs/${Number(job.id)}/complete`,{method:"POST",body:JSON.stringify({success:true})});
+            showProfileToast(`Kitchen ticket #${Number(job.ticket_number)} sent from the counter POS.`);
+        }catch(error){
+            try{await api(`/kot-print-jobs/${Number(job.id)}/complete`,{method:"POST",body:JSON.stringify({success:false,error:error.message||"Printer failed"})});}catch(ackError){console.warn("Could not record counter print failure:",ackError.message);}
+            showProfileToast(`Counter ticket print failed: ${error.message||"Check the assigned printer."}`);
+        }
+    }catch(error){
+        if(!/permission denied/i.test(error.message||""))console.warn("Counter KOT print poll failed:",error.message);
+    }finally{counterKOTPrintBusy=false;}
+}
+
+function startCounterKOTPrintAgent(){
+    stopCounterKOTPrintAgent();
+    if(!window.cafePOSDesktop||!currentUser||!hasPermission("kitchen","print"))return;
+    pollCounterKOTPrintJobs();
+    counterKOTPrintTimer=setInterval(pollCounterKOTPrintJobs,3000);
+}
+
+function stopCounterKOTPrintAgent(){
+    if(counterKOTPrintTimer){clearInterval(counterKOTPrintTimer);counterKOTPrintTimer=null;}
 }
 
 function formatKOTAge(value, now = Date.now()) {
@@ -5912,7 +6118,7 @@ async function printOpenOrder(orderId){
         const paymentSummary=data.paymentSummary||null;
         const order=data.order||{};
         if(String(order.status||"").toLowerCase()==="completed")return alert("This order is already closed. Use the closed bill print action.");
-        const bill={orderId:Number(orderId),billingSettingsSnapshot:order.billing_settings_snapshot||null,isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",cashierName:order.cashier_name||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),unit:item.unit||"ea",options:item.options||[],taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
+        const bill={orderId:Number(orderId),billingSettingsSnapshot:order.billing_settings_snapshot||null,isOpenOrder:true,orderNumber:order.order_number,invoiceNumber:"",date:order.created_at?formatPOSDateTime(order.created_at):formatPOSDateTime(),orderType:order.order_type,tableNumber:order.table_number,subtotal:Number(order.subtotal||0),discount:Number(order.discount||0),discountName:order.discount_adjustment_name||order.marketing_deal_name||"",serviceCharge:Number(order.service_charge||0),chargeName:order.charge_adjustment_name||"",gst:Number(order.gst||0),total:Number(order.total||0),paymentMethod:order.payment_method||"Unpaid",amountCollected:Number(paymentSummary?.amountCollected||0),amountDue:Number(paymentSummary?.amountDue??order.total??0),customerName:order.customer_name||"",customerPhone:order.customer_phone||"",customerEmail:order.customer_email||"",cashierName:order.cashier_name||"",items:(data.items||[]).map(item=>({name:item.item_name,price:Number(item.price||0),quantity:Number(item.quantity||0),unit:item.unit||"ea",options:item.options||[],itemDiscountAmount:Number(item.item_discount_amount||0),itemDiscountName:item.item_discount_name||"",taxRate:Number(item.tax_rate||0),taxMode:item.tax_mode||"exclusive"}))};
         window.openBillPreview(bill);
         await window.printThermalBill({ manual: true });
     }catch(error){alert("Unable to print open order: "+error.message);}
@@ -6036,7 +6242,15 @@ async function reprintKOTGroup(orderId, groupId, ticketNumber){
     await printKOT(orderId, groupId, ticketNumber);
 }
 
-async function printKOT(orderId, onlyGroupId, ticketNumber){
+async function printKOT(orderId, onlyGroupId, ticketNumber, options={}){
+    if(options.auto){
+        if(appSettings.printAllTicketsFromDevice===true)return {success:true,queued:true};
+        try{
+            const printMode=await api("/kot-printing-mode");
+            appSettings.printAllTicketsFromDevice=printMode.printAllTicketsFromDevice===true;
+            if(appSettings.printAllTicketsFromDevice)return {success:true,queued:true};
+        }catch(_){/* If the optional print-routing endpoint is unavailable, keep existing local printing. */}
+    }
     try{
         let tickets=await api(`/kot?orderId=${encodeURIComponent(Number(orderId))}&print=1`);
         if (ticketNumber !== undefined) tickets = tickets.filter(ticket => Number(ticket.ticket_number || 1) === Number(ticketNumber));
@@ -6045,7 +6259,7 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
                 ? !Number(ticket.kot_group_id)
                 : Number(ticket.kot_group_id) === Number(onlyGroupId));
         }
-        if(!tickets.length)return alert("KOT not found.");
+        if(!tickets.length){if(options.quiet)throw new Error("No KOT ticket was found for this print job.");alert("KOT not found.");return {success:false};}
         const buckets=new Map();
         tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
         for(const [groupId,groupTickets] of buckets){
@@ -6070,8 +6284,10 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
             }else if(printerId&&first.printer_connection_type==="network"){
                 await api(`/printers/${printerId}/print?source=kot`,{method:"POST",body:JSON.stringify({receipt:text,settings:appSettings})});
             }else if(printerId&&first.printer_connection_type==="bluetooth"){
+                if(options.quiet)throw new Error(`Bluetooth printer “${first.printer_name||""}” needs an interactive connection. Assign a local or network printer for automatic counter printing.`);
                 await sendBluetoothPrinterText({name:first.printer_name,bluetooth_name:first.printer_bluetooth_name,service_uuid:first.printer_service_uuid,characteristic_uuid:first.printer_characteristic_uuid},text);
             }else{
+                if(options.quiet)throw new Error(`No local or network printer is assigned to the “${groupName}” KOT group.`);
                 const win=window.open("","_blank","width=420,height=700");
                 if(!win)return alert("Please allow pop-ups to print KOT.");
                 const noteHtml=first.order_notes?'<p class="order-note"><strong>Order note:</strong> '+esc(first.order_notes)+'</p>':'';const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="item ${fullyCancelled?"cancelled":""}"><span>${fullyCancelled?`<del>${esc(item.item_name||"Item")}</del>`:esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("");
@@ -6079,14 +6295,17 @@ async function printKOT(orderId, onlyGroupId, ticketNumber){
                 win.document.close();
             }
         }
-        showProfileToast("KOT sent to the assigned group printers.");
+        if(!options.quiet)showProfileToast("KOT sent to the assigned group printers.");
+        return {success:true};
     }catch(error){
+        if(options.quiet)throw error;
         if(isBluetoothSelectionCancelled(error)){
             showProfileToast("Bluetooth printer selection was cancelled. Choose a printer to send the KOT.");
-            return;
+            return {success:false,error};
         }
         console.error("Print KOT failed:",error);
         alert("Unable to print KOT: "+(error?.message||"Windows could not send the print job. Check that the printer is installed and online, then retry."));
+        return {success:false,error};
     }
 }
 
@@ -7115,6 +7334,7 @@ function normalizeBillingAdjustments(items) {
         ...item,
         kind: item.kind || item.type || "discount",
         calculation: item.calculation || (item.value_type === "percent" ? "percent" : "fixed"),
+        application_level: String(item.application_level || item.applicationLevel || "order").toLowerCase() === "item" ? "item" : "order",
         applies_to: String(item.applies_to || "all").toLowerCase().replace(/[\s-]+/g, "_")
     }));
 }
@@ -7135,13 +7355,15 @@ function renderBillingAdjustmentSelectors() {
         discount.innerHTML = `<option value="">No discount</option>` +
             marketingDeals.filter(deal => deal.active !== false).map(deal => {
                 const unavailable = marketingDealUnavailableReason(deal);
-                const offer = String(deal.type || "").trim().toLowerCase() === "discount"
+                const offer = Number(deal.bundlePrice) > 0
+                    ? esc(marketingDealOfferLabel(deal))
+                    : String(deal.type || "").trim().toLowerCase() === "discount"
                     ? (deal.valueType === "percentage" ? `${esc(deal.value)}%` : money(deal.value))
                     : esc(deal.type || "Marketing deal");
                 const note = unavailable ? ` · ${esc(unavailable)}` : " · Marketing";
                 return `<option value="marketing:${esc(deal.id)}" ${unavailable ? "disabled" : ""}>${esc(deal.name)} · ${offer}${note}</option>`;
             }).join("") +
-            billingAdjustments.filter(x => x.kind === "discount" && visibleRule(x)).map(x =>
+            billingAdjustments.filter(x => x.kind === "discount" && x.application_level !== "item" && visibleRule(x)).map(x =>
                 `<option value="${x.id}">${esc(x.name)} · ${x.calculation === "percent" ? esc(x.value) + "%" : money(x.value)}</option>`
             ).join("");
         if ([...discount.options].some(o => o.value === selected)) discount.value = selected;
@@ -7156,6 +7378,27 @@ function renderBillingAdjustmentSelectors() {
         if ([...charge.options].some(o => o.value === selected)) charge.value = selected;
     }
     updateBill();
+    if (cart.length) updateCart();
+}
+
+function availableItemDiscountRules(){
+    const channel=currentSaleChannelKey();
+    return billingAdjustments.filter(rule=>rule.kind==="discount"&&rule.application_level==="item"&&rule.active!==false&&(String(rule.applies_to||"all")==="all"||String(rule.applies_to||"")===channel));
+}
+
+function getCartItemDiscountAmount(item){
+    const rule=getSelectedBillingAdjustment(item?.itemDiscountRuleId);
+    if(!rule||rule.kind!=="discount"||rule.application_level!=="item")return 0;
+    const gross=Number(item.price||0)*Number(item.quantity||0),rate=appSettings.gstCalculationEnabled===false?0:Math.max(0,Number(item.taxRate??appSettings.gstRate??0));
+    const net=appSettings.gstCalculationEnabled!==false&&item.taxMode==="inclusive"&&rate?gross/(1+rate/100):gross;
+    const amount=rule.calculation==="percent"?net*Math.max(0,Number(rule.value||0))/100:Math.max(0,Number(rule.value||0))*Number(item.quantity||0);
+    return Math.round(Math.min(net,amount)*100)/100;
+}
+
+function setCartItemDiscount(index,ruleId){
+    const item=cart[Number(index)];if(!item)return;
+    item.itemDiscountRuleId=Number(ruleId)||null;
+    updateCart();
 }
 
 function openBillingAdjustmentsDialog(){
@@ -7171,6 +7414,7 @@ function clearBillingAdjustmentsDialog(){
     const charge=document.getElementById("billingChargeSelect");
     if(discount)discount.value="";
     if(charge)charge.value="";
+    cart.forEach(item=>{item.itemDiscountRuleId=null;});
     updateCart();
     updateBillingAdjustmentSummary();
 }
@@ -7188,7 +7432,8 @@ function updateBillingAdjustmentSummary(){
     const dealSummary=selectedDeal
         ? (unavailableReason?`Unavailable: ${selectedDeal.name}`:eligibility?.eligible?`Discount: ${selectedDeal.name}`:`Deal criteria pending: ${selectedDeal.name}`)
         : discount?`Discount: ${discount.name}`:"";
-    const summary=[dealSummary,charge?`Charge: ${charge.name}`:""].filter(Boolean).join(" · ")||"No adjustments selected";
+    const itemDiscountCount=cart.filter(item=>getCartItemDiscountAmount(item)>0).length;
+    const summary=[dealSummary,itemDiscountCount?`Item discounts: ${itemDiscountCount}`:"",charge?`Charge: ${charge.name}`:""].filter(Boolean).join(" · ")||"No adjustments selected";
     setText("billingAdjustmentsSummary",summary);
     const ruleText=rule=>rule?`${rule.name} · ${rule.calculation==="percent"||rule.valueType==="percentage"?`${Number(rule.value||0)}%`:money(rule.value)}`:"";
     const help=document.getElementById("billingDiscountRuleHelp");
@@ -7239,7 +7484,8 @@ async function editOpenOrder(orderId) {
             savedQuantity: Number(item.quantity),
             unit: item.unit || "ea",
             taxRate: Number(item.tax_rate ?? 5),
-            taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive"
+            taxMode: item.tax_mode === "inclusive" ? "inclusive" : "exclusive",
+            itemDiscountRuleId: Number(item.item_discount_rule_id)||null
         }));
         orderType = data.order.order_type || "Dine-in";
         setOrderType(orderType);
@@ -7275,12 +7521,22 @@ function openBillingAdjustmentModal(id=null) {
     document.getElementById("billingAdjustmentEditingId").value=item?.id||"";
     document.getElementById("billingAdjustmentName").value=item?.name||"";
     document.getElementById("billingAdjustmentKind").value=item?.kind||"discount";
+    document.getElementById("billingAdjustmentLevel").value=item?.application_level||"order";
     document.getElementById("billingAdjustmentCalculation").value=item?.calculation||"percent";
     document.getElementById("billingAdjustmentValue").value=item?.value??"";
     document.getElementById("billingAdjustmentModalTitle").textContent = item ? "Edit Discount / Charge" : "Create Discount / Charge";
     renderBillingAdjustmentAppliesOptions(item?.applies_to||"all");
     document.getElementById("billingAdjustmentDescription").value=item?.description||"";
+    syncBillingAdjustmentLevelControl();
     document.getElementById("billingAdjustmentModal").style.display="flex";
+}
+
+function syncBillingAdjustmentLevelControl(){
+    const kind=document.getElementById("billingAdjustmentKind")?.value||"discount";
+    const field=document.getElementById("billingAdjustmentLevelField");
+    const level=document.getElementById("billingAdjustmentLevel");
+    if(field)field.hidden=kind!=="discount";
+    if(level)level.disabled=kind!=="discount";
 }
 
 function closeBillingAdjustmentModal(){document.getElementById("billingAdjustmentModal")?.style.setProperty("display","none");}
@@ -7298,6 +7554,7 @@ async function saveBillingAdjustment(){
     const payload={
         name:document.getElementById("billingAdjustmentName")?.value.trim(),
         type:document.getElementById("billingAdjustmentKind")?.value,
+        applicationLevel:document.getElementById("billingAdjustmentLevel")?.value||"order",
         valueType:document.getElementById("billingAdjustmentCalculation")?.value==="percent"?"percent":"amount",
         value:Number(document.getElementById("billingAdjustmentValue")?.value||0),
         appliesTo:document.getElementById("billingAdjustmentApplies")?.value||"all",
@@ -7322,6 +7579,7 @@ function renderBillingAdjustmentMaster() {
         <tr>
             <td><strong>${esc(x.name)}</strong><br><small>${esc(x.description||"")}</small></td>
             <td>${x.kind==="discount"?"Discount":"Charge"}</td>
+            <td>${x.kind==="discount"?(x.application_level==="item"?"Item":"Order"):"Order"}</td>
             <td>${x.calculation==="percent"?esc(x.value)+"%":money(x.value)}</td>
             <td>${esc(x.applies_to==="all"?"All Channels":getSaleChannel(x.applies_to)?.label||x.applies_to)}</td>
             <td><span class="adjustment-status ${x.active?"active":"inactive"}">${x.active?"Active":"Inactive"}</span></td>
@@ -7330,7 +7588,7 @@ function renderBillingAdjustmentMaster() {
                 <button onclick="toggleBillingAdjustment(${x.id})">${x.active?"Disable":"Enable"}</button>
                 <button onclick="deleteBillingAdjustment(${x.id})">🗑️ Delete</button>
             </td>
-        </tr>`).join("") : `<tr><td colspan="6" class="empty">No discounts or charges created yet.</td></tr>`;
+        </tr>`).join("") : `<tr><td colspan="7" class="empty">No discounts or charges created yet.</td></tr>`;
 }
 
 async function toggleBillingAdjustment(id){try{await api(`/billing-adjustments/${id}/toggle`,{method:"PUT"});await loadBillingAdjustmentMaster();}catch(e){alert(e.message);}}
@@ -7409,7 +7667,10 @@ function renderMarketingDeals() {
     if (!grid) return;
     const term = String(document.getElementById("marketingDealSearch")?.value || "").trim().toLowerCase();
     const type = document.getElementById("marketingDealTypeFilter")?.value || "";
-    const shown = marketingDeals.filter(deal => (!term || `${deal.name || ""} ${deal.type || ""} ${deal.category || ""}`.toLowerCase().includes(term)) && (!type || deal.type === type));
+    const shown = marketingDeals.filter(deal => {
+        const categories = Array.isArray(deal.categories) && deal.categories.length ? deal.categories.join(" ") : deal.category || "";
+        return (!term || `${deal.name || ""} ${deal.type || ""} ${categories}`.toLowerCase().includes(term)) && (!type || deal.type === type);
+    });
     const activeCount = document.getElementById("marketingActiveCount");
     if (activeCount) activeCount.textContent = String(marketingDeals.filter(deal => deal.active !== false).length);
     const channelCount = document.getElementById("marketingChannelCount");
@@ -7423,38 +7684,108 @@ function renderMarketingDeals() {
         const dealDays = Array.isArray(deal.days) && deal.days.length ? deal.days : MARKETING_WEEKDAYS.map(day => day.key);
         const daySummary = dealDays.length === 7 ? "Every day" : MARKETING_WEEKDAYS.filter(day => dealDays.includes(day.key)).map(day => day.label).join(", ");
         const hourSummary = deal.startTime && deal.endTime ? deal.startTime + "–" + deal.endTime : "All day";
-        const offer = deal.type && deal.type.startsWith("Buy") ? `Buy ${Number(deal.buyQuantity || 1)} · Get ${Number(deal.getQuantity || 1)}` : deal.value ? `${deal.valueType === "percentage" ? `${deal.value}% off` : money(deal.value)}` : "Custom offer";
+        const offer = Number(deal.bundlePrice) > 0
+            ? marketingDealOfferLabel(deal)
+            : deal.type && deal.type.startsWith("Buy") ? `Buy ${Number(deal.buyQuantity || 1)} · Get ${Number(deal.getQuantity || 1)}` : deal.value ? `${deal.valueType === "percentage" ? `${deal.value}% off` : money(deal.value)}` : "Custom offer";
         const channels = (deal.channels || []).map(key => POS_CHANNELS.find(channel => channel.key === key)?.label).filter(Boolean).join(", ") || "All channels";
+        const categorySummary = Array.isArray(deal.categories) && deal.categories.length ? deal.categories.join(", ") : deal.category || "All categories";
         const itemSummary=deal.itemName||(deal.itemNames||[]).join(", ");
         const safeDealId = esc(JSON.stringify(String(deal.id || "")));
-        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(deal.category || "All categories")}${itemSummary ? ` · ${esc(itemSummary)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🗓️ ${esc(daySummary)} · ${esc(hourSummary)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm(${safeDealId})">Edit</button><button type="button" onclick="toggleMarketingDeal(${safeDealId})">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal(${safeDealId})">Delete</button></div></article>`;
+        return `<article class="marketing-deal-card ${deal.active === false ? "inactive" : ""}"><div class="marketing-deal-card-top"><span class="marketing-deal-type">${esc(deal.type || "Deal")}</span><span class="marketing-deal-status">${deal.active === false ? "Inactive" : "Active"}</span></div><h3>${esc(deal.name || "Untitled deal")}</h3><p>${esc(categorySummary)}${itemSummary ? ` · ${esc(itemSummary)}` : ""}</p><div class="marketing-deal-offer">${esc(offer)}</div><div class="marketing-deal-meta"><span>📅 ${esc(schedule)}</span><span>🗓️ ${esc(daySummary)} · ${esc(hourSummary)}</span><span>🛒 ${esc(channels)}</span></div><div class="marketing-deal-actions"><button type="button" onclick="openMarketingDealForm(${safeDealId})">Edit</button><button type="button" onclick="toggleMarketingDeal(${safeDealId})">${deal.active === false ? "Enable" : "Disable"}</button><button type="button" onclick="deleteMarketingDeal(${safeDealId})">Delete</button></div></article>`;
     }).join("");
 }
 function populateMarketingDealOptions(selected = {}) {
-    const categories = [...new Set(currentMenu.map(item => String(item.category || "").trim()).filter(Boolean))].sort();
-    const categorySelect = document.getElementById("marketingDealCategory");
-    if (categorySelect) categorySelect.innerHTML = '<option value="">All categories</option>' + categories.map(category => `<option value="${esc(category)}">${esc(category)}</option>`).join("");
-    const itemSelect = document.getElementById("marketingDealItem");
+    const categoryOptions = document.getElementById("marketingDealCategoryOptions");
+    const itemOptions = document.getElementById("marketingDealItemOptions");
     const rewardSelect = document.getElementById("marketingRewardItem");
-    const previouslySelected = new Set([...((itemSelect?.selectedOptions)||[])].map(option=>option.value));
-    const category = Object.prototype.hasOwnProperty.call(selected,"category")
-        ? String(selected.category || "")
-        : String(categorySelect?.value || "");
-    const eligibleItems = category
-        ? currentMenu.filter(item => String(item.category || "").trim().toLowerCase() === category.trim().toLowerCase())
+    const existingCategories = [...(categoryOptions?.querySelectorAll('input:checked') || [])].map(input => input.value);
+    const existingItems = [...(itemOptions?.querySelectorAll('input:checked') || [])].map(input => input.value);
+    const hasSelectedCategories = Object.prototype.hasOwnProperty.call(selected, "categories") || Object.prototype.hasOwnProperty.call(selected, "category");
+    const selectedCategories = hasSelectedCategories
+        ? (Array.isArray(selected.categories) ? selected.categories : (selected.category ? [selected.category] : [])).map(value => String(value || "").trim()).filter(Boolean)
+        : existingCategories;
+    const selectedIds = Array.isArray(selected.itemIds)
+        ? selected.itemIds
+        : selected.itemId ? [selected.itemId] : existingItems;
+    const chosenCategories = new Set(selectedCategories.map(value => value.toLowerCase()));
+    const chosenItems = new Set((Array.isArray(selectedIds) ? selectedIds : []).map(String));
+    const categories = [...new Set([
+        ...(menuCategories || []).filter(category => category.active !== false).map(category => String(category.name || "").trim()),
+        ...currentMenu.map(item => String(item.category || "").trim()),
+        ...selectedCategories
+    ].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    if (categoryOptions) {
+        categoryOptions.innerHTML = categories.length ? categories.map(category => {
+            const value = esc(category);
+            const count = currentMenu.filter(item => String(item.category || "").trim().toLowerCase() === category.toLowerCase()).length;
+            return `<label class="marketing-picker-option"><input type="checkbox" value="${value}" ${chosenCategories.has(category.toLowerCase()) ? "checked" : ""} onchange="handleMarketingDealCategoriesChange()"><span><strong>${value}</strong><small>${count} ${count === 1 ? "item" : "items"}</small></span></label>`;
+        }).join("") : '<div class="marketing-picker-empty">No categories available.</div>';
+    }
+    const eligibleItems = selectedCategories.length
+        ? currentMenu.filter(item => chosenCategories.has(String(item.category || "").trim().toLowerCase()))
         : currentMenu;
-    const selectedIds = selected.itemIds || (selected.itemId ? [selected.itemId] : null) || [...previouslySelected];
-    const chosen = new Set(selectedIds.map(String));
-    if (itemSelect) {
-        itemSelect.innerHTML = eligibleItems.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
-        [...itemSelect.options].forEach(option=>option.selected=chosen.has(option.value));
+    if (itemOptions) {
+        itemOptions.innerHTML = eligibleItems.length ? eligibleItems.map(item => {
+            const value = esc(item.id);
+            const name = esc(item.name);
+            const category = esc(item.category || "Uncategorized");
+            return `<label class="marketing-picker-option"><input type="checkbox" value="${value}" ${chosenItems.has(String(item.id)) ? "checked" : ""} onchange="updateMarketingDealPickerSummary()"><span><strong>${name}</strong><small>${category}</small></span></label>`;
+        }).join("") : '<div class="marketing-picker-empty">No menu items in these categories.</div>';
     }
     if (rewardSelect) {
         const previousReward = selected.rewardItemId || rewardSelect.value || "";
-        rewardSelect.innerHTML = '<option value="">Same item</option>' + eligibleItems.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
-        rewardSelect.value = eligibleItems.some(item => String(item.id) === String(previousReward)) ? String(previousReward) : "";
+        rewardSelect.innerHTML = '<option value="">Same item</option>' + currentMenu.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
+        rewardSelect.value = currentMenu.some(item => String(item.id) === String(previousReward)) ? String(previousReward) : "";
     }
-    if (categorySelect) categorySelect.value = category;
+    filterMarketingDealCategories(document.getElementById("marketingDealCategorySearch")?.value || "");
+    filterMarketingDealItems(document.getElementById("marketingDealItemSearch")?.value || "");
+}
+function handleMarketingDealCategoriesChange() {
+    const categories = [...(document.querySelectorAll("#marketingDealCategoryOptions input:checked"))].map(input => input.value);
+    const itemIds = [...(document.querySelectorAll("#marketingDealItemOptions input:checked"))].map(input => input.value);
+    populateMarketingDealOptions({ categories, itemIds });
+}
+function updateMarketingDealPickerSummary() {
+    const categories = [...document.querySelectorAll("#marketingDealCategoryOptions input:checked")];
+    const items = [...document.querySelectorAll("#marketingDealItemOptions input:checked")];
+    const categorySummary = document.getElementById("marketingDealCategorySummary");
+    const itemSummary = document.getElementById("marketingDealItemSummary");
+    if (categorySummary) categorySummary.textContent = categories.length ? `${categories.length} ${categories.length === 1 ? "category" : "categories"} selected` : "Leave blank to include every category.";
+    if (itemSummary) itemSummary.textContent = items.length ? `${items.length} ${items.length === 1 ? "item" : "items"} selected` : "Leave blank to include all items in the selected categories.";
+}
+function filterMarketingDealCategories(value = "") {
+    const term = String(value || "").trim().toLowerCase();
+    const labels = [...document.querySelectorAll("#marketingDealCategoryOptions .marketing-picker-option")];
+    let visible = 0;
+    labels.forEach(label => { const matches = !term || label.textContent.toLowerCase().includes(term); label.hidden = !matches; if (matches) visible++; });
+    const summary = document.getElementById("marketingDealCategorySummary");
+    if (summary) summary.textContent = labels.length && !visible ? "No categories match your search." : [...document.querySelectorAll("#marketingDealCategoryOptions input:checked")].length ? `${document.querySelectorAll("#marketingDealCategoryOptions input:checked").length} selected` : "Leave blank to include every category.";
+}
+function filterMarketingDealItems(value = "") {
+    const term = String(value || "").trim().toLowerCase();
+    const labels = [...document.querySelectorAll("#marketingDealItemOptions .marketing-picker-option")];
+    let visible = 0;
+    labels.forEach(label => { const matches = !term || label.textContent.toLowerCase().includes(term); label.hidden = !matches; if (matches) visible++; });
+    const summary = document.getElementById("marketingDealItemSummary");
+    if (summary) {
+        const selected = document.querySelectorAll("#marketingDealItemOptions input:checked").length;
+        summary.textContent = labels.length && !visible ? "No menu items match your search." : selected ? `${selected} selected` : "Leave blank to include all items in the selected categories.";
+    }
+}
+function marketingDealOfferLabel(deal) {
+    const type = String(deal?.type || "").trim().toLowerCase();
+    const buy = Math.max(1, Math.floor(Number(deal?.buyQuantity || 1)));
+    const get = Math.max(1, Math.floor(Number(deal?.getQuantity || 1)));
+    const bundlePrice = Number(deal?.bundlePrice || 0);
+    if (bundlePrice > 0) {
+        const priceLabel = money(bundlePrice);
+        const rewardName = String(deal?.rewardItemName || currentMenu.find(item => String(item.id) === String(deal?.rewardItemId))?.name || "").trim();
+        const rewardLabel = rewardName ? (get === 1 ? `Get ${rewardName} free` : `Get ${get} × ${rewardName} free`) : `Get ${get} free`;
+        return ["buy x get x", "buy x get y", "meal deals"].includes(type)
+            ? `Buy ${buy} for ${priceLabel} · ${rewardLabel}`
+            : `Buy ${buy} for ${priceLabel}`;
+    }
+    return deal?.type || "Marketing deal";
 }
 async function openMarketingDealForm(id = null) {
     if (!currentMenu.length) {
@@ -7467,9 +7798,10 @@ async function openMarketingDealForm(id = null) {
     document.getElementById("marketingDealName").value = deal?.name || "";
     document.getElementById("marketingDealDescription").value = deal?.description || "";
     document.getElementById("marketingDealType").value = deal?.type || "Discount";
-    populateMarketingDealOptions(deal || {category:"",itemIds:[]});
+    populateMarketingDealOptions(deal ? { ...deal, categories: Array.isArray(deal.categories) && deal.categories.length ? deal.categories : (deal.category ? [deal.category] : []) } : {categories:[],itemIds:[]});
     document.getElementById("marketingBuyQuantity").value = deal?.buyQuantity || 1;
     document.getElementById("marketingGetQuantity").value = deal?.getQuantity || 1;
+    document.getElementById("marketingBundlePrice").value = deal?.bundlePrice ?? "";
     document.getElementById("marketingValueType").value = deal?.valueType || "amount";
     document.getElementById("marketingDealValue").value = deal?.value ?? "";
     document.getElementById("marketingDealStart").value = deal?.startDate || "";
@@ -7495,17 +7827,28 @@ async function openMarketingDealForm(id = null) {
 function closeMarketingDealForm() { document.getElementById("marketingDealModal")?.style.setProperty("display", "none"); }
 function updateMarketingDealFields() {
     const type = document.getElementById("marketingDealType")?.value || "Discount";
-    const buy = type.startsWith("Buy");
+    const normalizedType = type.trim().toLowerCase();
+    const buy = type.startsWith("Buy") || type === "Meal Deals";
     const get = type.includes("Get") || type === "Meal Deals";
+    const supportsBundlePrice = ["buy x", "buy x get x", "buy x get y", "meal deals"].includes(normalizedType);
+    const bundlePrice = Number(document.getElementById("marketingBundlePrice")?.value || 0);
     document.getElementById("marketingBuyQuantityField").style.display = buy ? "" : "none";
     document.getElementById("marketingGetQuantityField").style.display = get ? "" : "none";
     document.getElementById("marketingRewardItemField").style.display = (type === "Buy X Get Y" || type === "Meal Deals") ? "" : "none";
+    document.getElementById("marketingBundlePriceField").style.display = supportsBundlePrice ? "" : "none";
+    document.getElementById("marketingValueTypeField").style.display = supportsBundlePrice && bundlePrice > 0 ? "none" : "";
+    document.getElementById("marketingDealValueField").style.display = supportsBundlePrice && bundlePrice > 0 ? "none" : "";
 }
 async function saveMarketingDeal() {
     const name = document.getElementById("marketingDealName").value.trim();
     if (!name) return alert("Enter a name for this deal.");
     const type = document.getElementById("marketingDealType").value;
     if (!MARKETING_DEAL_TYPES.includes(type)) return alert("Choose a valid deal type.");
+    const normalizedType = type.trim().toLowerCase();
+    const bundlePriceRaw = String(document.getElementById("marketingBundlePrice").value || "").trim();
+    const supportsBundlePrice = ["buy x", "buy x get x", "buy x get y", "meal deals"].includes(normalizedType);
+    const bundlePrice = bundlePriceRaw ? Number(bundlePriceRaw) : null;
+    if (supportsBundlePrice && bundlePriceRaw && (!Number.isFinite(bundlePrice) || bundlePrice <= 0)) return alert("Enter a bundle price greater than zero.");
     const selectedDays = [...document.querySelectorAll("#marketingDealDays input:checked")].map(input => input.value);
     if (!selectedDays.length) return alert("Choose at least one deal day.");
     const startTime = document.getElementById("marketingDealStartTime").value || null;
@@ -7513,18 +7856,24 @@ async function saveMarketingDeal() {
     if (Boolean(startTime) !== Boolean(endTime)) return alert("Set both the start and end time, or leave both empty for all-day deals.");
     if (startTime && startTime === endTime) return alert("Deal start and end times must be different.");
     const prior = editingMarketingDealId === null ? null : marketingDeals.find(item => String(item.id) === String(editingMarketingDealId));
-    const selectedItemIds=[...document.getElementById("marketingDealItem").selectedOptions].map(option=>option.value).filter(Boolean);
+    const selectedCategories=[...document.querySelectorAll("#marketingDealCategoryOptions input:checked")].map(input=>input.value).filter(Boolean);
+    const selectedItemIds=[...document.querySelectorAll("#marketingDealItemOptions input:checked")].map(input=>input.value).filter(Boolean);
     const selectedItems=currentMenu.filter(item=>selectedItemIds.includes(String(item.id)));
+    const rewardItemId = document.getElementById("marketingRewardItem").value || null;
+    const rewardItemName = currentMenu.find(item => String(item.id) === String(rewardItemId))?.name || prior?.rewardItemName || null;
     const deal = {
         id: prior?.id || String(Date.now()), name, description: document.getElementById("marketingDealDescription").value.trim().slice(0, 240), type,
-        category: document.getElementById("marketingDealCategory").value,
+        category: selectedCategories[0] || "",
+        categories: selectedCategories,
         itemIds: selectedItemIds,
         itemNames: selectedItems.map(item=>item.name),
         itemId: selectedItemIds[0] || null,
         itemName: selectedItems.map(item=>item.name).join(", "),
-        buyQuantity: Math.max(1, Number(document.getElementById("marketingBuyQuantity").value || 1)),
-        getQuantity: Math.max(1, Number(document.getElementById("marketingGetQuantity").value || 1)),
-        rewardItemId: document.getElementById("marketingRewardItem").value || null,
+        buyQuantity: Math.max(1, Math.floor(Number(document.getElementById("marketingBuyQuantity").value || 1))),
+        getQuantity: Math.max(1, Math.floor(Number(document.getElementById("marketingGetQuantity").value || 1))),
+        rewardItemId,
+        rewardItemName,
+        bundlePrice: supportsBundlePrice ? bundlePrice : null,
         valueType: document.getElementById("marketingValueType").value,
         value: Math.max(0, Number(document.getElementById("marketingDealValue").value || 0)),
         startDate: document.getElementById("marketingDealStart").value || null,
@@ -7809,6 +8158,13 @@ async function loadSettings() {
         }
     } catch (error) {
         console.warn("Settings API unavailable:", error.message);
+    }
+
+    try {
+        const printMode=await api("/kot-printing-mode");
+        appSettings.printAllTicketsFromDevice=printMode.printAllTicketsFromDevice===true;
+    }catch(error){
+        console.warn("Counter ticket printing mode unavailable:",error.message);
     }
 
     // Migrate older local caches that kept QR hero data in general POS settings.
@@ -10182,10 +10538,10 @@ function printerReceiptText(data,paperWidth="80"){
     if(legalName)center(legalName).forEach(line=>lines.push(line));
     wrap(appSettings.address||"").forEach(line=>lines.push(...center(line)));
     if(appSettings.phone)center("Phone: "+appSettings.phone).forEach(line=>lines.push(line));
-    if(appSettings.gstin)center("GST#: "+appSettings.gstin).forEach(line=>lines.push(line));
-    if(appSettings.fssai)center("FSSAI#: "+appSettings.fssai).forEach(line=>lines.push(line));
     const customHeader=clean(appSettings.header||"");
     if(customHeader&&customHeader!=="Cafe Management System")customHeader.split(/\r?\n/).forEach(value=>center(value).forEach(line=>lines.push(line)));
+    if(appSettings.gstin)center("GST#: "+appSettings.gstin).forEach(line=>lines.push(line));
+    if(appSettings.fssai)center("FSSAI#: "+appSettings.fssai).forEach(line=>lines.push(line));
     center(data.isOpenOrder?"Order":"Invoice").forEach(line=>lines.push(line));
     if(data.tokenNumber)add("Token No: "+data.tokenNumber);
     add(data.customerName||"Guest");
@@ -10205,6 +10561,7 @@ function printerReceiptText(data,paperWidth="80"){
         const qty=Number(item.quantity||0),price=Number(item.price||0),unit=clean(item.unit||"ea");
         const lineTotal=Number(item.lineTotal)>0||price===0?Number(item.lineTotal||0):qty*price;
         lines.push(...pair("  "+qty+" @ "+moneyValue(price)+"/"+unit,moneyValue(lineTotal)));
+        if(Number(item.itemDiscountAmount||0)>0)add("  "+clean(item.itemDiscountName||"Item discount")+" -"+moneyValue(item.itemDiscountAmount));
         const options=formatItemOptionNames(item.options);if(options)add("  "+options);
     });
     lines.push(divider,...pair("Sub Total",moneyValue(data.subtotal||0)));

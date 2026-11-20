@@ -1271,6 +1271,9 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_rate NUMERIC(6,2) NOT NULL DEFAULT 5`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS tax_mode VARCHAR(20) NOT NULL DEFAULT 'exclusive'`);
     await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS options JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_discount_rule_id INTEGER`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_discount_amount NUMERIC(12,2) NOT NULL DEFAULT 0`);
+    await pool.query(`ALTER TABLE order_items ADD COLUMN IF NOT EXISTS item_discount_name VARCHAR(150)`);
 
     await pool.query(`CREATE TABLE IF NOT EXISTS kot_groups (id SERIAL PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, description TEXT, station VARCHAR(60) NOT NULL DEFAULT 'Kitchen', sort_order INTEGER NOT NULL DEFAULT 0, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
     await pool.query(`CREATE TABLE IF NOT EXISTS kot_device_print_hosts (
@@ -1295,7 +1298,8 @@ async function ensureBusinessTables() {
         printed_at TIMESTAMPTZ,
         UNIQUE (business_id, order_id, ticket_number)
     )`);
-    await pool.query(`CREATE INDEX IF NOT EXISTS idx_kot_device_print_jobs_pending ON kot_device_print_jobs(business_id,status,next_attempt_at,id)`);
+    // The tenant migration creates this index as the table owner. Do not
+    // recreate it here: the runtime database role may not own this table.
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS printer_id INTEGER`);
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS category_names JSONB NOT NULL DEFAULT '[]'::jsonb`);
     await pool.query(`ALTER TABLE kot_groups ADD COLUMN IF NOT EXISTS item_ids JSONB NOT NULL DEFAULT '[]'::jsonb`);
@@ -1483,10 +1487,12 @@ async function ensureBusinessTables() {
             applies_to VARCHAR(20) NOT NULL DEFAULT 'all',
             description TEXT,
             active BOOLEAN NOT NULL DEFAULT TRUE,
+            application_level VARCHAR(20) NOT NULL DEFAULT 'order',
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     `);
+    await pool.query(`ALTER TABLE billing_adjustments ADD COLUMN IF NOT EXISTS application_level VARCHAR(20) NOT NULL DEFAULT 'order'`);
 
     console.log('✅ Business extensions ready');
 }
@@ -2017,8 +2023,11 @@ function publicOnlinePromotions(settings, channelKey = "online") {
         id: `marketing:${String(deal.id)}`, source: "marketing", sourceId: String(deal.id), name: String(deal.name || "QR Menu offer").slice(0, 120),
         description: String(deal.description || "").slice(0, 240), type: String(deal.type || "Deal").slice(0, 80), valueType: String(deal.valueType || "amount"),
         value: Number.isFinite(Number(deal.value)) ? Number(deal.value) : 0,
+        bundlePrice: Number.isFinite(Number(deal.bundlePrice)) && Number(deal.bundlePrice) > 0 ? Number(deal.bundlePrice) : null,
         buyQuantity: Math.max(1, Number(deal.buyQuantity) || 1), getQuantity: Math.max(1, Number(deal.getQuantity) || 1),
-        category: String(deal.category || ""), itemId: deal.itemId || null, itemIds: Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : [],
+        rewardItemName: String(deal.rewardItemName || "").slice(0, 120),
+        category: String(deal.category || ""), categories: Array.isArray(deal.categories) ? deal.categories.map(value => String(value || "").slice(0, 120)) : [],
+        itemId: deal.itemId || null, itemIds: Array.isArray(deal.itemIds) ? deal.itemIds.map(String) : [],
         startDate: deal.startDate || null, endDate: deal.endDate || null,
         days: Array.isArray(deal.days) ? deal.days.map(day => String(day).toLowerCase()) : [],
         startTime: deal.startTime || null, endTime: deal.endTime || null
@@ -3258,7 +3267,7 @@ function cleanOrderOptions(value) {
         setName: String(set?.setName || "").trim().slice(0, 100),
         options: (Array.isArray(set?.options) ? set.options : []).slice(0, 50).map(option => ({
             id: String(option?.id || "").slice(0, 80),
-            name: String(option?.name || "").trim().slice(0, 100),
+            name: String(option?.name || "").trim().slice(0, String(set?.setId || "") === "__slash_custom_instruction__" ? 250 : 100),
             price: Math.max(0, Number(option?.price || 0))
         })).filter(option => option.name && Number.isFinite(option.price))
     })).filter(set => set.setName && set.options.length);
@@ -3266,16 +3275,35 @@ function cleanOrderOptions(value) {
 
 async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppliedBasePrice, suppliedPrice) {
     const submitted = cleanOrderOptions(value);
+    const menuSubmitted = [];
+    const customizerMetadata = [];
+    const customizerMetadataSeen = new Set();
+    for (const set of submitted) {
+        if (set.setId === "__slash_custom_instruction__") {
+            if (customizerMetadataSeen.has(set.setId) || set.options.length !== 1) throw new Error("Add one valid cooking instruction or remove it.");
+            customizerMetadataSeen.add(set.setId);
+            const instruction = String(set.options[0].name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 250);
+            if (!instruction || !/^instruction_[a-z0-9_]{1,70}$/i.test(set.options[0].id)) throw new Error("Add one valid cooking instruction or remove it.");
+            customizerMetadata.push({ setId: "__slash_custom_instruction__", setName: "Cooking Instruction", options: [{ id: set.options[0].id, name: instruction, price: 0 }] });
+        } else if (set.setId === "__slash_back_order__") {
+            if (customizerMetadataSeen.has(set.setId) || set.options.length !== 1 || set.options[0].id !== "back_order") throw new Error("Invalid Back Order selection.");
+            customizerMetadataSeen.add(set.setId);
+            customizerMetadata.push({ setId: "__slash_back_order__", setName: "Order Handling", options: [{ id: "back_order", name: "Back Order", price: 0 }] });
+        } else {
+            if (set.setId.startsWith("__slash_")) throw new Error("One of the selected options is not available for this item.");
+            menuSubmitted.push(set);
+        }
+    }
     const assignedIds = Array.isArray(menuItem?.option_set_ids) ? menuItem.option_set_ids.map(String) : [];
     if (!assignedIds.length) {
-        if (submitted.length) throw new Error("This item does not have those options available.");
-        return { options: [], addOnPrice: 0 };
+        if (menuSubmitted.length) throw new Error("This item does not have those options available.");
+        return { options: customizerMetadata, addOnPrice: 0 };
     }
     const settingsResult = await db.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [businessId]);
     const allSets = Array.isArray(settingsResult.rows[0]?.sets) ? settingsResult.rows[0].sets : [];
     const configuredById = new Map(allSets.map(set => [String(set.id), set]));
     const configured = assignedIds.map(id => configuredById.get(id)).filter(Boolean);
-    const selectedBySet = new Map(submitted.map(set => [String(set.setId), set]));
+    const selectedBySet = new Map(menuSubmitted.map(set => [String(set.setId), set]));
     const options = [];
     let addOnPrice = 0;
     for (const set of configured) {
@@ -3301,7 +3329,7 @@ async function normalizeOrderItemOptions(db, businessId, menuItem, value, suppli
     if (Number.isFinite(basePrice) && Number.isFinite(finalPrice) && Math.abs((basePrice + addOnPrice) - finalPrice) > 0.02) {
         throw new Error("Item total does not match the selected option prices. Reopen the item and choose its options again.");
     }
-    return { options, addOnPrice };
+    return { options: [...options, ...customizerMetadata], addOnPrice };
 }
 
 async function replaceMenuVariants(client, menuId, variants) {
@@ -4042,14 +4070,14 @@ async function replaceOrderItemsPreservingKOT(db, businessId, orderId, items, { 
 
     const values = [];
     const valueRows = items.map((item, index) => {
-        const offset = index * 11;
-        values.push(orderId,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options || []));
-        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb)`;
+        const offset = index * 14;
+        values.push(orderId,item.menuId,item.variantId,item.name,item.price,item.quantity,item.price*item.quantity,item.unit,item.taxRate,item.taxMode,JSON.stringify(item.options || []),item.itemDiscountRuleId||null,item.itemDiscountAmount||0,item.itemDiscountRuleName||null);
+        return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6},$${offset+7},$${offset+8},$${offset+9},$${offset+10},$${offset+11}::jsonb,$${offset+12},$${offset+13},$${offset+14})`;
     });
     const inserted = await db.query(`
-        INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
+        INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options,item_discount_rule_id,item_discount_amount,item_discount_name)
         VALUES ${valueRows.join(",")}
-        RETURNING id,menu_id,variant_id,item_name,quantity,options
+        RETURNING id,menu_id,variant_id,item_name,quantity,options,item_discount_rule_id,item_discount_amount,item_discount_name
     `, values);
 
     const matchedTicketIds = new Set();
@@ -4100,8 +4128,16 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
             (variantId !== null && (!Number.isInteger(variantId) || variantId <= 0))) {
             throw new Error("Invalid order item information.");
         }
-        return { source, menuId, variantId, quantity, options: cleanOrderOptions(source?.options) };
+        return { source, menuId, variantId, quantity, options: cleanOrderOptions(source?.options), itemDiscountRuleId: Number(source?.itemDiscountRuleId ?? source?.item_discount_rule_id) || null };
     });
+    const requestedItemDiscountIds = [...new Set(items.map(item => item.itemDiscountRuleId).filter(Boolean))];
+    const itemDiscountRulesResult = requestedItemDiscountIds.length ? await db.query(
+        "SELECT * FROM billing_adjustments WHERE business_id=$1 AND id=ANY($2::int[]) AND active=TRUE",
+        [Number(businessId), requestedItemDiscountIds]
+    ) : { rows: [] };
+    const itemDiscountRules = new Map(itemDiscountRulesResult.rows.map(rule => [Number(rule.id), rule]));
+    const saleChannel = resolveSaleChannel(settings, channelKey || defaultSaleChannelForOrderType(settings, orderType), orderType);
+    const channel = saleChannel.key;
     const menuIds = [...new Set(items.map(item => item.menuId))];
     const menuRows = await db.query(`
         SELECT id,name,price,channel_prices,sales_channels,unit,tax_rate,tax_mode,category,kot_group_id,option_set_ids
@@ -4115,8 +4151,6 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
         FROM menu_variants WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE
     `, [Number(businessId), variantIds]) : { rows: [] };
     const variantsById = new Map(variantRows.rows.map(row => [Number(row.id), row]));
-    const saleChannel = resolveSaleChannel(settings, channelKey || defaultSaleChannelForOrderType(settings, orderType), orderType);
-    const channel = saleChannel.key;
     for (const item of items) {
         const menu = menuById.get(item.menuId);
         assertMenuItemAvailableOnChannel(menu, settings, channel);
@@ -4134,6 +4168,23 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
         item.taxRate = settings.gstCalculationEnabled === false ? 0 : Math.max(0, Number(menu.tax_rate || 0));
         item.taxMode = menu.tax_mode === "inclusive" ? "inclusive" : "exclusive";
         item.options = optionData.options;
+        if (item.itemDiscountRuleId) {
+            const rule = itemDiscountRules.get(item.itemDiscountRuleId);
+            const ruleLevel = String(rule?.application_level || "order").toLowerCase();
+            const ruleKind = String(rule?.kind || rule?.type || "").toLowerCase();
+            const ruleChannel = String(rule?.applies_to || "all").toLowerCase().replace(/[\s-]+/g, "_");
+            if (!rule || ruleKind !== "discount" || ruleLevel !== "item" || (ruleChannel !== "all" && ruleChannel !== channel)) {
+                throw Object.assign(new Error("One of the selected item discounts is no longer available for this sale channel."), { status: 400 });
+            }
+            item.itemDiscountRuleName = String(rule.name || "Item discount");
+            item.itemDiscountRuleValue = Math.max(0, Number(rule.value || 0));
+            item.itemDiscountRuleCalculation = String(rule.calculation || rule.value_type || "amount").toLowerCase() === "percent" ? "percent" : "fixed";
+        } else {
+            item.itemDiscountRuleId = null;
+            item.itemDiscountRuleName = null;
+            item.itemDiscountRuleValue = 0;
+            item.itemDiscountRuleCalculation = "fixed";
+        }
         item.kotGroupId = Number(menu.kot_group_id) || null;
         item.category = String(menu.category || "");
     }
@@ -4142,24 +4193,37 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
         return item.taxMode === "inclusive" && item.taxRate > 0 ? gross / (1 + item.taxRate / 100) : gross;
     });
     const subtotal = Math.round(lineNets.reduce((sum, value) => sum + value, 0) * 100) / 100;
+    let itemDiscountTotal = 0;
+    items.forEach((item, index) => {
+        const lineNet = lineNets[index];
+        const rawDiscount = item.itemDiscountRuleCalculation === "percent"
+            ? lineNet * item.itemDiscountRuleValue / 100
+            : item.itemDiscountRuleValue * item.quantity;
+        item.itemDiscountAmount = Math.round(Math.min(lineNet, Math.max(0, rawDiscount)) * 100) / 100;
+        itemDiscountTotal += item.itemDiscountAmount;
+    });
+    itemDiscountTotal = Math.round(itemDiscountTotal * 100) / 100;
     const discount = discountValue === undefined || discountValue === null ? 0 : Number(discountValue);
     const serviceCharge = serviceChargeValue === undefined || serviceChargeValue === null ? 0 : Number(serviceChargeValue);
-    if (!Number.isFinite(discount) || discount < 0 || discount > subtotal + 0.01) throw new Error("Discount must be between 0 and the order subtotal.");
+    const orderDiscountBase = Math.max(0, subtotal - itemDiscountTotal);
+    if (!Number.isFinite(discount) || discount < 0 || discount > orderDiscountBase + 0.01) throw new Error("Discount must be between 0 and the remaining order subtotal.");
     if (!Number.isFinite(serviceCharge) || serviceCharge < 0) throw new Error("Service charge is invalid.");
-    let discountRemaining = Math.min(discount, subtotal);
-    let discountAssigned = 0;
+    let discountRemaining = Math.min(discount, orderDiscountBase);
+    let orderDiscountAssigned = 0;
     let gst = 0;
     items.forEach((item, index) => {
+        const remainingLineNet = Math.max(0, lineNets[index] - Number(item.itemDiscountAmount || 0));
         const lineDiscount = index === items.length - 1
-            ? Math.min(lineNets[index], discountRemaining)
-            : Math.min(lineNets[index], subtotal > 0 ? discount * lineNets[index] / subtotal : 0);
+            ? Math.min(remainingLineNet, discountRemaining)
+            : Math.min(remainingLineNet, orderDiscountBase > 0 ? discount * remainingLineNet / orderDiscountBase : 0);
         discountRemaining = Math.max(0, discountRemaining - lineDiscount);
-        discountAssigned += lineDiscount;
-        gst += Math.max(0, lineNets[index] - lineDiscount) * item.taxRate / 100;
+        orderDiscountAssigned += lineDiscount;
+        gst += Math.max(0, remainingLineNet - lineDiscount) * item.taxRate / 100;
     });
     gst = Math.round(gst * 100) / 100;
-    const total = Math.round((Math.max(0, subtotal - discountAssigned) + serviceCharge + gst) * 100) / 100;
-    return { items, subtotal, gst, total, discount, serviceCharge };
+    const totalDiscount = Math.round((itemDiscountTotal + orderDiscountAssigned) * 100) / 100;
+    const total = Math.round((Math.max(0, subtotal - totalDiscount) + serviceCharge + gst) * 100) / 100;
+    return { items, subtotal, gst, total, discount: totalDiscount, orderDiscount: orderDiscountAssigned, itemDiscount: itemDiscountTotal, serviceCharge };
 }
 
 app.post(
@@ -8471,6 +8535,7 @@ app.post("/api/billing-adjustments", async (req, res) => {
         const name = String(req.body.name || "").trim();
         const typeInput = String(req.body.type || req.body.kind || "discount").toLowerCase();
         const type = ["discount", "charge"].includes(typeInput) ? typeInput : "discount";
+        const applicationLevel = type === "discount" && String(req.body.applicationLevel || "order").toLowerCase() === "item" ? "item" : "order";
         const calculationInput = String(req.body.valueType || req.body.calculation || "amount").toLowerCase();
         const isPercent = calculationInput === "percent";
         const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
@@ -8489,10 +8554,10 @@ app.post("/api/billing-adjustments", async (req, res) => {
 
         const result = await pool.query(`
             INSERT INTO billing_adjustments
-            (name,${schema.kindColumn},${schema.calculationColumn},value,applies_to,description,active,business_id)
-            VALUES($1,$2,$3,$4,$5,$6,TRUE,$7)
+            (name,${schema.kindColumn},${schema.calculationColumn},value,applies_to,description,active,business_id,application_level)
+            VALUES($1,$2,$3,$4,$5,$6,TRUE,$7,$8)
             RETURNING *
-        `, [name,type,storedCalculation,value,appliesTo,description,businessId]);
+        `, [name,type,storedCalculation,value,appliesTo,description,businessId,applicationLevel]);
 
         res.status(201).json(result.rows[0]);
     } catch (e) {
@@ -8512,6 +8577,7 @@ app.put("/api/billing-adjustments/:id", async (req, res) => {
         const name = String(req.body.name || "").trim();
         const typeInput = String(req.body.type || req.body.kind || "discount").toLowerCase();
         const type = ["discount", "charge"].includes(typeInput) ? typeInput : "discount";
+        const applicationLevel = type === "discount" && String(req.body.applicationLevel || "order").toLowerCase() === "item" ? "item" : "order";
         const calculationInput = String(req.body.valueType || req.body.calculation || "amount").toLowerCase();
         const isPercent = calculationInput === "percent";
         const storedCalculation = isPercent ? "percent" : (schema.legacy ? "fixed" : "amount");
@@ -8530,10 +8596,10 @@ app.put("/api/billing-adjustments/:id", async (req, res) => {
 
         const result = await pool.query(`
             UPDATE billing_adjustments
-            SET name=$1,${schema.kindColumn}=$2,${schema.calculationColumn}=$3,value=$4,applies_to=$5,description=$6,updated_at=CURRENT_TIMESTAMP
-            WHERE id=$7 AND business_id=$8
+            SET name=$1,${schema.kindColumn}=$2,${schema.calculationColumn}=$3,value=$4,applies_to=$5,description=$6,application_level=$7,updated_at=CURRENT_TIMESTAMP
+            WHERE id=$8 AND business_id=$9
             RETURNING *
-        `, [name,type,storedCalculation,value,appliesTo,description,id,businessId]);
+        `, [name,type,storedCalculation,value,appliesTo,description,applicationLevel,id,businessId]);
         if (!result.rows.length) return res.status(404).json({ error: "Billing adjustment not found" });
         res.json(result.rows[0]);
     } catch (e) {

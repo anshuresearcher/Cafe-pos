@@ -579,7 +579,7 @@
                 <div class="billing-workspace">
                     <aside class="billing-category-panel">
                         <div class="billing-panel-heading"><strong>Categories</strong><span>Menu</span></div>
-                        <div id="billingCategorySidebar" class="billing-category-sidebar"></div>
+                        <div id="billingCategorySidebar" class="billing-category-sidebar" aria-label="Menu categories"></div>
                     </aside>
 
                     <section class="billing-menu-panel">
@@ -958,6 +958,10 @@
                     <div><span class="module-eyebrow">KITCHEN SETUP</span><h2>All KOT Groups</h2><p>Manage production stations and item routing.</p></div>
                     <button class="big-btn" type="button" onclick="openKOTGroupModal()">＋ Add KOT Group</button>
                 </div>
+                <div class="dashboard-box kot-device-print-card">
+                    <div class="kot-device-print-copy"><span class="kot-device-print-icon" aria-hidden="true">🖨️</span><div><strong>Print all tickets from this device</strong><p>Keep the counter Windows POS open and signed in. New tickets from phones and other devices will print to the printers assigned to each KOT group.</p><small id="kotDevicePrintStatus" role="status">Loading setting…</small></div></div>
+                    <label class="kot-device-print-switch" for="kotDevicePrintEnabled"><input id="kotDevicePrintEnabled" type="checkbox" onchange="saveCounterKOTPrintSetting(this.checked)"><span class="kot-device-print-slider" aria-hidden="true"></span><span>Print all tickets</span></label>
+                </div>
                 <div class="dashboard-box"><div id="kotGroupsContainer" class="kot-groups-list-grid">Loading…</div></div>
             </div>
             <div id="kotGroupEditorPanel" hidden>
@@ -973,7 +977,7 @@
                         <div class="form-group"><label for="kotGroupDescription">Description</label><input id="kotGroupDescription" type="text" placeholder="e.g. Hot food station"></div>
                         <div class="form-group"><label for="kotGroupStation">Production Station</label><select id="kotGroupStation"><option>Kitchen</option><option>Bar</option><option>Dessert</option><option>Bakery</option><option>Counter</option></select></div>
                         <div class="form-group"><label for="kotGroupSort">Sort Order</label><input id="kotGroupSort" type="number" value="0"></div>
-                        <div class="form-group kot-group-printer-field"><label for="kotGroupPrinter">Printer</label><select id="kotGroupPrinter"><option value="">Use the regular print dialog</option></select><small class="access-muted">KOTs for this group go to the selected printer.</small></div>
+                        <div class="form-group kot-group-printer-field"><label for="kotGroupPrinter">Printer for this group</label><div class="kot-group-printer-control"><span class="kot-group-printer-icon" aria-hidden="true">🖨️</span><select id="kotGroupPrinter" aria-describedby="kotGroupPrinterHelp"><option value="">Use the regular print dialog</option></select><span class="kot-group-printer-chevron" aria-hidden="true">⌄</span></div><small id="kotGroupPrinterHelp" class="access-muted">KOT tickets routed to this group will print here.</small></div>
                     </div>
                     <div class="kot-target-section">
                         <div class="kot-target-section-heading"><div><span class="module-eyebrow">ROUTING</span><h3>Categories & items</h3><p>Choose the categories or individual items sent to this KOT group.</p></div></div>
@@ -1061,7 +1065,7 @@
             <div class="menu-management-header"><div class="menu-management-actions"><button class="table-action-btn" type="button" onclick="showMenuModuleView('categories')">🗂️ Categories</button><button class="table-action-btn" type="button" onclick="downloadExistingMenuSpreadsheet()">↓ Export Items</button><button class="cancel-btn" type="button" onclick="openMenuImportModal()">⇧ Import Excel</button><button class="big-btn" type="button" onclick="openAddMenuModal()">＋ Add Menu Item</button></div></div>
             <div class="menu-list"></div>
           </div>
-          <div id="menuCategoriesPanel" hidden><div class="dashboard-box menu-category-master-box"><div class="menu-category-toolbar"><p class="access-muted">Create categories once, then select them while creating menu items.</p><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div></div>
+          <div id="menuCategoriesPanel" hidden><div class="dashboard-box menu-category-master-box"><div class="menu-category-toolbar"><div class="menu-category-toolbar-copy"><p class="access-muted">Create categories once, then select them while creating menu items.</p><label class="menu-category-search"><span aria-hidden="true">⌕</span><input id="menuCategorySearch" type="search" placeholder="Search categories..." oninput="renderMenuCategoryMaster()" aria-label="Search menu categories"></label></div><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div></div>
           <div id="menuOptionsPanel" hidden><div class="menu-management-header menu-option-sets-header"><div><span class="menu-eyebrow">MENU OPTIONS</span><h3>Item option sets</h3><p>Create choices such as sizes, add-ons or preferences, then attach them to menu items.</p></div><div class="menu-management-actions"><button type="button" class="big-btn" onclick="openOptionSetsModal()">⚙️ Manage option sets</button></div></div><div id="menuOptionSetOverviewList" class="menu-option-set-overview-grid"></div></div>
         </section>
 
@@ -1491,13 +1495,14 @@
             <div class="form-group marketing-deal-wide"><label for="marketingDealName">Deal name</label><input id="marketingDealName" maxlength="120" placeholder="e.g. Buy 2 coffees, get 1 free"></div>
             <div class="form-group marketing-deal-wide"><label for="marketingDealDescription">Deal description <span class="access-muted">(shown on QR menu)</span></label><textarea id="marketingDealDescription" maxlength="240" rows="2" placeholder="Tell guests what this deal includes"></textarea></div>
             <div class="form-group"><label for="marketingDealType">Deal type</label><select id="marketingDealType" onchange="updateMarketingDealFields()"><option>Discount</option><option>Buy X</option><option>Buy X Get X</option><option>Buy X Get Y</option><option>Voucher</option><option>Payment Deals</option><option>Meal Deals</option><option>Slab-Based Discount</option></select></div>
-            <div class="form-group"><label for="marketingDealCategory">Category</label><select id="marketingDealCategory" onchange="populateMarketingDealOptions({category:this.value})"><option value="">All categories</option></select></div>
-            <div class="form-group marketing-deal-wide"><label for="marketingDealItem">Eligible items in selected category (optional)</label><select id="marketingDealItem" multiple size="5"></select><small class="access-muted">Selecting a category limits this list to its items. Leave the category empty to see all items.</small></div>
-            <div id="marketingBuyQuantityField" class="form-group"><label for="marketingBuyQuantity">Buy quantity</label><input id="marketingBuyQuantity" type="number" min="1" value="1"></div>
-            <div id="marketingGetQuantityField" class="form-group"><label for="marketingGetQuantity">Get quantity</label><input id="marketingGetQuantity" type="number" min="1" value="1"></div>
+            <div class="form-group marketing-deal-picker"><label for="marketingDealCategorySearch">Eligible categories <span class="access-muted">(optional)</span></label><div class="marketing-selector-search"><span aria-hidden="true">⌕</span><input id="marketingDealCategorySearch" type="search" placeholder="Search categories..." oninput="filterMarketingDealCategories(this.value)"></div><div id="marketingDealCategoryOptions" class="marketing-picker-options" role="group" aria-label="Eligible categories"></div><small id="marketingDealCategorySummary" class="marketing-picker-summary">Leave blank to include every category.</small></div>
+            <div class="form-group marketing-deal-picker"><label for="marketingDealItemSearch">Eligible items <span class="access-muted">(optional)</span></label><div class="marketing-selector-search"><span aria-hidden="true">⌕</span><input id="marketingDealItemSearch" type="search" placeholder="Search menu items..." oninput="filterMarketingDealItems(this.value)"></div><div id="marketingDealItemOptions" class="marketing-picker-options" role="group" aria-label="Eligible menu items"></div><small id="marketingDealItemSummary" class="marketing-picker-summary">Leave blank to include all items in the selected categories.</small></div>
+            <div id="marketingBuyQuantityField" class="form-group"><label for="marketingBuyQuantity">Buy quantity</label><input id="marketingBuyQuantity" type="number" min="1" step="1" value="1"></div>
+            <div id="marketingGetQuantityField" class="form-group"><label for="marketingGetQuantity">Get quantity</label><input id="marketingGetQuantity" type="number" min="1" step="1" value="1"></div>
             <div id="marketingRewardItemField" class="form-group marketing-deal-wide"><label for="marketingRewardItem">Reward item</label><select id="marketingRewardItem"><option value="">Same item</option></select></div>
-            <div class="form-group"><label for="marketingValueType">Value</label><select id="marketingValueType"><option value="amount">Amount</option><option value="percentage">Percentage</option><option value="price">Price</option></select></div>
-            <div class="form-group"><label for="marketingDealValue">Deal value</label><input id="marketingDealValue" type="number" min="0" step="0.01" placeholder="0"></div>
+            <div id="marketingBundlePriceField" class="form-group marketing-deal-wide" style="display:none"><label for="marketingBundlePrice">Fixed bundle price (including GST)</label><input id="marketingBundlePrice" type="number" min="0.01" step="0.01" placeholder="e.g. 320" oninput="updateMarketingDealFields()"><small class="marketing-schedule-hint">Set the total for each complete group of items. The bundle won’t raise a cheaper order; service charges may still apply.</small></div>
+            <div id="marketingValueTypeField" class="form-group"><label for="marketingValueType">Value</label><select id="marketingValueType"><option value="amount">Amount</option><option value="percentage">Percentage</option><option value="price">Price</option></select></div>
+            <div id="marketingDealValueField" class="form-group"><label for="marketingDealValue">Deal value</label><input id="marketingDealValue" type="number" min="0" step="0.01" placeholder="0"></div>
             <div class="form-group"><label for="marketingDealStart">Start date</label><input id="marketingDealStart" type="date"></div>
             <div class="form-group"><label for="marketingDealEnd">End date</label><input id="marketingDealEnd" type="date"></div>
             <fieldset class="marketing-channel-fieldset marketing-deal-wide"><legend>Deal days</legend><div id="marketingDealDays" class="marketing-deal-days-options"></div><small class="marketing-schedule-hint">Choose when the deal is available. Older deals default to every day.</small></fieldset>
@@ -1828,17 +1833,17 @@
                 <button type="button" class="big-btn" onclick="openBillingAdjustmentModal()">＋ Create Rule</button>
             </div>
             <div class="billing-rule-grid">
-                <div class="billing-rule-info"><strong>Discount</strong><span>Percentage or fixed amount</span></div>
+                <div class="billing-rule-info"><strong>Discount</strong><span>Item level or order level · percent or fixed</span></div>
                 <div class="billing-rule-info"><strong>Charge</strong><span>Percentage or fixed amount</span></div>
                 <div class="billing-rule-info"><strong>Channel</strong><span>Dine-in, Takeaway or All</span></div>
             </div>
             <div class="table-container settings-table">
                 <table>
                     <thead>
-                        <tr><th>Name</th><th>Type</th><th>Value</th><th>Applies To</th><th>Status</th><th>Actions</th></tr>
+                        <tr><th>Name</th><th>Type</th><th>Level</th><th>Value</th><th>Applies To</th><th>Status</th><th>Actions</th></tr>
                     </thead>
                     <tbody id="billingAdjustmentsBody">
-                        <tr><td colspan="6" class="empty">Loading billing rules…</td></tr>
+                        <tr><td colspan="7" class="empty">Loading billing rules…</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -2502,8 +2507,41 @@
         <div class="modal-actions"><button type="button" class="big-btn" onclick="saveMenuPriceEditor()">Save prices</button><button type="button" class="cancel-btn" onclick="closeMenuPriceEditor()">Cancel</button></div>
       </div>
     </div>
-    <div id="variantPickerModal" class="modal"><div class="modal-content variant-picker-modal"><div class="modal-header"><h2>Select Variant</h2><button class="close-btn" onclick="closeVariantPicker()">✕</button></div><div id="variantPickerBody"></div></div></div>
-    <div id="itemOptionsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="itemOptionsTitle"><div class="modal-content variant-picker-modal"><div class="modal-header item-option-modal-header"><div><span class="menu-eyebrow">CUSTOMIZE ORDER</span><h2 id="itemOptionsTitle">Choose item options</h2></div><button type="button" class="close-btn" onclick="closeItemOptions()" aria-label="Close item options">✕</button></div><div id="itemOptionsBody"></div><div class="modal-actions"><button type="button" class="big-btn" onclick="confirmItemOptions()">Add to Order</button><button type="button" class="cancel-btn" onclick="closeItemOptions()">Cancel</button></div></div></div>
+    <div id="itemOptionsModal" class="modal item-customizer-modal" role="dialog" aria-modal="true" aria-labelledby="itemOptionsTitle">
+        <div class="modal-content variant-picker-modal item-customizer-content">
+            <div class="modal-header item-option-modal-header">
+                <div class="item-customizer-heading">
+                    <div class="item-customizer-title-row"><span id="itemOptionsNature" class="item-customizer-nature" aria-hidden="true"></span><h2 id="itemOptionsTitle">Customise item</h2></div>
+                    <button type="button" class="item-customizer-more-details" onclick="toggleItemCustomizerDetails()" aria-expanded="false">More details</button>
+                </div>
+                <div class="item-customizer-header-actions">
+                    <div class="item-customizer-quantity" aria-label="Item quantity">
+                        <button type="button" onclick="adjustItemOptionsQuantity(-1)" aria-label="Decrease quantity">−</button>
+                        <strong id="itemOptionsQuantity">1</strong>
+                        <button type="button" onclick="adjustItemOptionsQuantity(1)" aria-label="Increase quantity">+</button>
+                    </div>
+                    <button type="button" class="close-btn" onclick="closeItemOptions()" aria-label="Close item options">✕</button>
+                </div>
+            </div>
+            <div id="itemOptionsBody"></div>
+            <div class="modal-actions item-customizer-footer">
+                <div class="item-customizer-instruction-area">
+                    <button type="button" id="itemCustomizerInstructionToggle" class="item-customizer-instruction-toggle" onclick="toggleItemCustomizerInstruction()">＋ &nbsp;Add Cooking Instruction</button>
+                    <textarea id="itemCustomizerInstruction" maxlength="250" placeholder="Add a cooking instruction for the kitchen…" hidden></textarea>
+                </div>
+                <div class="item-customizer-footer-bottom">
+                    <div class="item-customizer-footer-options">
+                        <label class="item-customizer-back-order"><input type="checkbox" id="itemCustomizerBackOrder"><span>Back Order</span></label>
+                        <div class="item-customizer-discount-wrap">
+                            <button type="button" id="itemCustomizerDiscountToggle" class="item-customizer-discount-toggle" onclick="toggleItemCustomizerDiscount()">⚙ &nbsp;Discount</button>
+                            <select id="itemCustomizerDiscount" aria-label="Item level discount" hidden></select>
+                        </div>
+                    </div>
+                    <button type="button" id="confirmItemOptionsButton" class="big-btn" onclick="confirmItemOptions()"><span>Item Total: <strong id="itemOptionsTotal">₹0.00</strong></span><b class="item-customizer-add-separator">|</b><span>Add to cart</span></button>
+                </div>
+            </div>
+        </div>
+    </div>
     <div id="menuOptionSetsModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="optionSetModalTitle">
       <div class="modal-content option-sets-modal option-set-builder-modal">
         <div class="modal-header option-set-modal-header">
@@ -3043,11 +3081,11 @@
                 Cafe Management System
             </p>
             <p id="billRestaurantPhone"></p>
+            <div id="billCustomHeader" class="bill-custom-header" hidden></div>
             <p id="billRestaurantGstin"></p>
             <p id="billRestaurantFssai" hidden></p>
         </div>
         <p id="billInvoiceTitle" class="bill-invoice-title">Invoice</p>
-        <div id="billCustomHeader" class="bill-custom-header" hidden></div>
 
         <section id="billPrintIntro" class="bill-print-intro" aria-label="Invoice details">
             <div id="billPrintToken" class="bill-print-token" hidden></div>
@@ -3230,7 +3268,8 @@ Visit Again 😊</p>
         <input id="billingAdjustmentEditingId" type="hidden">
         <div class="billing-form-grid">
             <div class="form-group full"><label>Rule Name</label><input id="billingAdjustmentName" type="text" maxlength="120" placeholder="e.g. Happy Hour 10%"></div>
-            <div class="form-group"><label>Rule Type</label><select id="billingAdjustmentKind"><option value="discount">Discount</option><option value="charge">Charge</option></select></div>
+            <div class="form-group"><label>Rule Type</label><select id="billingAdjustmentKind" onchange="syncBillingAdjustmentLevelControl()"><option value="discount">Discount</option><option value="charge">Charge</option></select></div>
+            <div class="form-group" id="billingAdjustmentLevelField"><label>Discount Level</label><select id="billingAdjustmentLevel"><option value="order">Order level</option><option value="item">Item level</option></select><small class="field-hint">Item discounts are selected on individual items in the bill.</small></div>
             <div class="form-group"><label>Calculation</label><select id="billingAdjustmentCalculation"><option value="percent">Percentage (%)</option><option value="fixed">Fixed Amount</option></select></div>
             <div class="form-group"><label>Value</label><input id="billingAdjustmentValue" type="number" min="0" step="0.01" placeholder="0"></div>
             <div class="form-group"><label>Applies To</label><select id="billingAdjustmentApplies"><option value="all">All Channels</option></select></div>
@@ -3271,7 +3310,7 @@ Visit Again 😊</p>
             <button class="close-btn" type="button" onclick="closeBillingAdjustmentsDialog()" aria-label="Close">✕</button>
         </div>
         <div class="billing-adjustment-dialog-grid">
-            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading"><span>−</span><div><strong>Discount</strong><small>Reduce the bill total</small></div></div><label for="billingDiscountSelect">Choose a discount</label><select id="billingDiscountSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No discount</option></select><small id="billingDiscountRuleHelp" class="billing-adjustment-rule-help" role="status" aria-live="polite">No discount selected.</small></div>
+            <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading"><span>−</span><div><strong>Order discount</strong><small>Reduce the full bill total</small></div></div><label for="billingDiscountSelect">Choose an order-level discount</label><select id="billingDiscountSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No discount</option></select><small id="billingDiscountRuleHelp" class="billing-adjustment-rule-help" role="status" aria-live="polite">No discount selected.</small></div>
             <div class="billing-adjustment-dialog-card"><div class="billing-adjustment-dialog-heading charge"><span>＋</span><div><strong>Charge</strong><small>Add a service charge</small></div></div><label for="billingChargeSelect">Choose a charge</label><select id="billingChargeSelect" onchange="updateCart();updateBillingAdjustmentSummary()"><option value="">No charge</option></select><small id="billingChargeRuleHelp" class="billing-adjustment-rule-help">No charge selected.</small></div>
         </div>
         <div class="billing-adjustments-dialog-footer"><span id="billingAdjustmentDialogTotal">Order total: ₹0</span><div><button type="button" class="table-action-btn" onclick="clearBillingAdjustmentsDialog()">Clear selections</button><button type="button" class="cancel-btn" onclick="closeBillingAdjustmentsDialog()">Cancel</button><button type="button" id="billingAdjustmentApplyButton" class="big-btn" onclick="closeBillingAdjustmentsDialog()">Apply</button></div></div>
