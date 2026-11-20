@@ -43,6 +43,7 @@ let currentUser = null;
 let currentLicense = null;
 let currentDevice = null;
 let pendingBusinessLogoUrl = null;
+let pendingBusinessLogoBlob = null;
 let businessLogoChanged = false;
 const LOGIN_BUSINESS_NAME_KEY = 'cafeLoginBusinessName';
 function settingsLocalStorageKey(){return currentUser&&currentUser.business_id?"cafeAppSettings:"+Number(currentUser.business_id):"cafeAppSettings";}
@@ -149,6 +150,9 @@ let menuOptionSetsLoaded = false;
 let menuOptionSetsLoadPromise = null;
 let menuOptionSetSelectionOrder = [];
 let currentMenuImageData = null;
+let pendingMenuImageBlob = null;
+let menuImagePreviewUrl = null;
+let menuImageWasCleared = false;
 let editingAccessUserId = null;
 let editingAccessProfileId = null;
 
@@ -467,6 +471,73 @@ async function api(url, options = {}) {
     return data;
 }
 
+function releaseImagePreviewUrl(url) { if (url && String(url).startsWith("blob:")) URL.revokeObjectURL(url); }
+function setImageUploadStatus(id, message, state = "") {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.textContent = message || "";
+    node.dataset.state = state;
+}
+async function optimizeImageForStorage(file, maxDimension, targetBytes = 250 * 1024, maxBytes = 2 * 1024 * 1024) {
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    const supportedInput = Boolean(file && /^image\/(?:jpeg|png|webp|gif|bmp|avif|heic|heif|tiff?)$/i.test(file.type || ""));
+    if (!supportedInput) throw new Error("Choose a supported photo such as JPEG, PNG, WebP, GIF or BMP.");
+    if (file.size > 25 * 1024 * 1024) throw new Error("Choose an image smaller than 25 MB before compression.");
+    let bitmap;
+    try { bitmap = await createImageBitmap(file); }
+    catch (_) { throw new Error("This browser could not read the image. Save it as JPEG, PNG or WebP and try again."); }
+    try {
+        if (!bitmap.width || !bitmap.height || bitmap.width * bitmap.height > 50000000) throw new Error("Choose an image with dimensions below 50 megapixels.");
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d", { alpha: true });
+        if (!context) throw new Error("Image compression is unavailable in this browser.");
+        const dimensions = [...new Set([maxDimension, Math.round(maxDimension * .8), Math.round(maxDimension * .64), Math.round(maxDimension * .5), Math.round(maxDimension * .38), 240])];
+        let best = null;
+        for (const bound of dimensions) {
+            const scale = Math.min(1, bound / Math.max(bitmap.width, bitmap.height));
+            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+            context.clearRect(0, 0, canvas.width, canvas.height);
+            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+            for (const mime of ["image/webp", "image/png", "image/jpeg"]) {
+                if (mime === "image/jpeg") { context.fillStyle = "#fff"; context.fillRect(0, 0, canvas.width, canvas.height); context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); }
+                const qualities = mime === "image/png" ? [undefined] : [.86, .76, .66, .56, .46];
+                for (const quality of qualities) {
+                    const blob = await new Promise(resolve => canvas.toBlob(resolve, mime, quality));
+                    if (!blob || !allowed.includes(blob.type)) continue;
+                    if (!best || blob.size < best.size) best = blob;
+                    if (blob.size <= targetBytes) return blob;
+                }
+            }
+        }
+        if (!best) throw new Error("This browser could not create a supported compressed image.");
+        if (best.size > maxBytes) throw new Error(`Could not compress this image below ${(maxBytes / 1024).toFixed(0)} KB. Choose a smaller or simpler image.`);
+        return best;
+    } finally { bitmap.close?.(); }
+}
+function uploadManagedImage(entity, id, blob, statusId) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const target = entity === "logo" ? "/image-storage/logo" : `/image-storage/${encodeURIComponent(entity)}/${encodeURIComponent(id)}`;
+        xhr.open("POST", API + target);
+        xhr.withCredentials = true;
+        xhr.setRequestHeader("Content-Type", blob.type);
+        xhr.upload.onprogress = event => {
+            if (event.lengthComputable) setImageUploadStatus(statusId, `Uploading image… ${Math.round(event.loaded / event.total * 100)}%`, "uploading");
+            else setImageUploadStatus(statusId, "Uploading image…", "uploading");
+        };
+        xhr.onload = () => {
+            let result = {};
+            try { result = JSON.parse(xhr.responseText || "{}"); } catch (_) {}
+            if (xhr.status >= 200 && xhr.status < 300) return resolve(result);
+            if (xhr.status === 401 && currentUser) handleAutomaticLogout(result.error || "Your session has expired. Please log in again.");
+            reject(new Error(result.error || `Image upload failed (${xhr.status || "network error"}).`));
+        };
+        xhr.onerror = () => reject(new Error("Could not reach the POS server to upload this image."));
+        xhr.onabort = () => reject(new Error("Image upload was cancelled."));
+        xhr.send(blob);
+    });
+}
 
 function money(value) {
     const currency = appSettings?.currency || "₹";
@@ -2695,6 +2766,9 @@ function fillBillingCustomerFields(customer = {}) {
 
 let menuCategories=[];
 let currentMenuCategoryImageData=null;
+let pendingMenuCategoryImageBlob=null;
+let menuCategoryImagePreviewUrl=null;
+let menuCategoryImageWasCleared=false;
 async function loadMenuCategories(){
     try{
         menuCategories=await api('/menu/categories');
@@ -2717,7 +2791,7 @@ function populateMenuCategorySelect(selected=''){
 function renderMenuCategoryMaster(){
     const grid=document.getElementById('menuCategoryMasterGrid');
     const list=document.getElementById('menuCategoryMasterList');
-    const renderRows=items=>items.length?items.map(c=>`<div class="menu-category-master-row"><div class="menu-category-master-identity"><span class="menu-category-master-thumb">${c.image_url?`<img src="${esc(c.image_url)}" alt="">`:'▦'}</span><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'';
+    const renderRows=items=>items.length?items.map(c=>`<div class="menu-category-master-row"><div class="menu-category-master-identity"><span class="menu-category-master-thumb">${c.image_url?`<img src="${esc(c.image_url)}" alt="" loading="lazy" decoding="async">`:'▦'}</span><div><strong>${esc(c.name)}</strong><small>Sort ${Number(c.sort_order||0)} · ${c.active?'Active':'Inactive'}</small></div></div><div class="table-actions"><button type="button" onclick="editMenuCategory(${c.id})">✏️ Edit</button><button type="button" onclick="toggleMenuCategory(${c.id})">${c.active?'Disable':'Enable'}</button><button type="button" onclick="deleteMenuCategory(${c.id})">🗑️ Delete</button></div></div>`).join(''):'';
     const all=menuCategories||[];
     const term=String(document.getElementById('menuCategorySearch')?.value||'').trim().toLowerCase();
     const filtered=all.filter(category=>!term||String(category.name||'').toLowerCase().includes(term));
@@ -2729,7 +2803,7 @@ function openMenuCategoryModal(category=null){
     document.getElementById('menuCategoryName').value=category?.name||'';
     document.getElementById('menuCategorySort').value=category?.sort_order??0;
     document.getElementById('menuCategoryActive').value=category?.active===false?'false':'true';
-    currentMenuCategoryImageData=category?.image_url||category?.imageUrl||null;
+    currentMenuCategoryImageData=category?.image_url||category?.imageUrl||null;pendingMenuCategoryImageBlob=null;menuCategoryImageWasCleared=false;releaseImagePreviewUrl(menuCategoryImagePreviewUrl);menuCategoryImagePreviewUrl=null;setImageUploadStatus('menuCategoryImageStatus','','');
     const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';
     renderMenuCategoryImagePreview();
     document.getElementById('menuCategoryModalTitle').textContent=category?'Edit Menu Category':'Create Menu Category';
@@ -2738,33 +2812,42 @@ function openMenuCategoryModal(category=null){
 }
 function closeMenuCategoryModal(){document.getElementById('menuCategoryModal')?.style.setProperty('display','none');}
 function editMenuCategory(id){const c=menuCategories.find(x=>Number(x.id)===Number(id));if(c)openMenuCategoryModal(c);}
-function renderMenuCategoryImagePreview(){const box=document.getElementById('menuCategoryImagePreview');if(!box)return;box.innerHTML=currentMenuCategoryImageData?`<img src="${esc(currentMenuCategoryImageData)}" alt="Category image preview">`:'<span class="menu-category-image-placeholder">▦</span><span><strong>No category image</strong><small>Add an image to feature this category on the guest QR menu.</small></span>';box.classList.toggle('has-image',Boolean(currentMenuCategoryImageData));}
+function renderMenuCategoryImagePreview(){const box=document.getElementById('menuCategoryImagePreview');if(!box)return;box.innerHTML=currentMenuCategoryImageData?`<img src="${esc(currentMenuCategoryImageData)}" alt="Category image preview" loading="lazy" decoding="async">`:'<span class="menu-category-image-placeholder">▦</span><span><strong>No category image</strong><small>Add an image to feature this category on the guest QR menu.</small></span>';box.classList.toggle('has-image',Boolean(currentMenuCategoryImageData));}
 async function previewMenuCategoryImage(file){
     if(!file)return;
-    if(!['image/jpeg','image/png','image/webp'].includes(file.type))return alert('Choose a JPG, PNG or WebP image.');
-    if(file.size>8*1024*1024)return alert('Choose an image smaller than 8 MB before compression.');
     try{
-        const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),limit=200*1024;
-        let longest=Math.min(1200,Math.max(bitmap.width,bitmap.height)),quality=0.86,encoded='';
-        for(let attempt=0;attempt<24;attempt++){
-            const scale=Math.min(1,longest/Math.max(bitmap.width,bitmap.height));
-            canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-            const context=canvas.getContext('2d',{alpha:false});context.fillStyle='#fff';context.fillRect(0,0,canvas.width,canvas.height);context.drawImage(bitmap,0,0,canvas.width,canvas.height);
-            encoded=canvas.toDataURL('image/jpeg',quality);
-            if(atob(encoded.split(',')[1]).length<=limit)break;
-            if(quality>0.52)quality=Math.max(0.5,quality-0.08);else longest=Math.max(240,Math.floor(longest*0.84));
-        }
-        bitmap.close?.();
-        if(atob(encoded.split(',')[1]).length>limit)throw new Error('Could not compress this image below 200 KB. Choose a smaller image.');
-        currentMenuCategoryImageData=encoded;renderMenuCategoryImagePreview();
-    }catch(error){alert(error.message||'Unable to read this image.');}
+        const blob=await optimizeImageForStorage(file,800,200*1024,200*1024);
+        releaseImagePreviewUrl(menuCategoryImagePreviewUrl);
+        pendingMenuCategoryImageBlob=blob;menuCategoryImagePreviewUrl=URL.createObjectURL(blob);currentMenuCategoryImageData=menuCategoryImagePreviewUrl;menuCategoryImageWasCleared=false;
+        setImageUploadStatus('menuCategoryImageStatus',`Optimized · ${(blob.size/1024).toFixed(0)} KB · ready to upload`,'ready');renderMenuCategoryImagePreview();
+    }catch(error){const input=document.getElementById('menuCategoryImageFile');if(input)input.value='';setImageUploadStatus('menuCategoryImageStatus','', '');alert(error.message||'Unable to read this image.');}
 }
-function clearMenuCategoryImage(){currentMenuCategoryImageData=null;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';renderMenuCategoryImagePreview();}
+function clearMenuCategoryImage(){releaseImagePreviewUrl(menuCategoryImagePreviewUrl);menuCategoryImagePreviewUrl=null;pendingMenuCategoryImageBlob=null;currentMenuCategoryImageData=null;menuCategoryImageWasCleared=true;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';setImageUploadStatus('menuCategoryImageStatus','Image will be removed when you save.','ready');renderMenuCategoryImagePreview();}
+
 async function saveMenuCategory(){
-    const id=document.getElementById('menuCategoryEditingId')?.value||'';
-    const payload={name:document.getElementById('menuCategoryName')?.value.trim(),sortOrder:Number(document.getElementById('menuCategorySort')?.value||0),active:document.getElementById('menuCategoryActive')?.value!=='false',imageUrl:currentMenuCategoryImageData};
+    let id=document.getElementById('menuCategoryEditingId')?.value||'';
+    const wasNew=!id;
+    const payload={name:document.getElementById('menuCategoryName')?.value.trim(),sortOrder:Number(document.getElementById('menuCategorySort')?.value||0),active:document.getElementById('menuCategoryActive')?.value!=='false'};
     if(!payload.name)return alert('Enter a category name.');
-    try{const saved=await api(id?`/menu/categories/${id}`:'/menu/categories',{method:id?'PUT':'POST',body:JSON.stringify(payload)});await loadMenuCategories();await loadMenu();if(!id){document.getElementById('menuCategoryName').value='';currentMenuCategoryImageData=null;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';renderMenuCategoryImagePreview();document.getElementById('menuCategoryModalTitle').textContent='Create Menu Category';const menuSelect=document.getElementById('menuCategory');if(menuSelect&&payload.active)menuSelect.value=payload.name;}else{currentMenuCategoryImageData=saved?.image_url||payload.imageUrl;renderMenuCategoryImagePreview();}alert(id?'Category updated successfully.':'Category created successfully.');}catch(e){alert(e.message);}
+    try{
+        const saved=await api(id?`/menu/categories/${id}`:'/menu/categories',{method:id?'PUT':'POST',body:JSON.stringify(payload)});
+        id=String(saved.id||id);
+        if(id)document.getElementById('menuCategoryEditingId').value=id;
+        if(pendingMenuCategoryImageBlob){
+            setImageUploadStatus('menuCategoryImageStatus','Uploading image…','uploading');
+            const uploaded=await uploadManagedImage('category',id,pendingMenuCategoryImageBlob,'menuCategoryImageStatus');
+            releaseImagePreviewUrl(menuCategoryImagePreviewUrl);menuCategoryImagePreviewUrl=null;pendingMenuCategoryImageBlob=null;menuCategoryImageWasCleared=false;currentMenuCategoryImageData=uploaded.imageUrl;
+            setImageUploadStatus('menuCategoryImageStatus',`Uploaded · ${(uploaded.size/1024).toFixed(0)} KB`,'success');
+        }else if(menuCategoryImageWasCleared){
+            setImageUploadStatus('menuCategoryImageStatus','Removing image…','uploading');
+            await api(`/image-storage/category/${id}`,{method:'DELETE'});
+            menuCategoryImageWasCleared=false;currentMenuCategoryImageData=null;setImageUploadStatus('menuCategoryImageStatus','Image removed.','success');
+        }
+        await loadMenuCategories();await loadMenu();
+        if(wasNew){document.getElementById('menuCategoryName').value='';document.getElementById('menuCategoryEditingId').value='';currentMenuCategoryImageData=null;const file=document.getElementById('menuCategoryImageFile');if(file)file.value='';releaseImagePreviewUrl(menuCategoryImagePreviewUrl);menuCategoryImagePreviewUrl=null;pendingMenuCategoryImageBlob=null;menuCategoryImageWasCleared=false;setImageUploadStatus('menuCategoryImageStatus','','');renderMenuCategoryImagePreview();document.getElementById('menuCategoryModalTitle').textContent='Create Menu Category';const menuSelect=document.getElementById('menuCategory');if(menuSelect&&payload.active)menuSelect.value=payload.name;}
+        else{currentMenuCategoryImageData=menuCategories.find(category=>String(category.id)===id)?.image_url||null;renderMenuCategoryImagePreview();}
+        alert(wasNew?'Category created successfully.':'Category updated successfully.');
+    }catch(error){setImageUploadStatus('menuCategoryImageStatus',error.message||'Could not save category image.','error');alert(error.message);}
 }
 async function toggleMenuCategory(id){const c=menuCategories.find(x=>Number(x.id)===Number(id));if(!c)return;try{await api(`/menu/categories/${id}`,{method:'PUT',body:JSON.stringify({name:c.name,sortOrder:c.sort_order,active:!c.active})});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
 async function deleteMenuCategory(id){if(!confirm('Delete this menu category?'))return;try{await api(`/menu/categories/${id}`,{method:'DELETE'});await loadMenuCategories();await loadMenu();}catch(e){alert(e.message);}}
@@ -2836,7 +2919,7 @@ async function loadMenu() {
             card.innerHTML = `
                 <div class="food-card-image">
                     ${image
-                        ? `<img src="${esc(image)}" alt="${esc(item.name)}">`
+                        ? `<img src="${esc(image)}" alt="${esc(item.name)}" loading="lazy" decoding="async">`
                         : `<div class="food-icon">${menuIcon(item.category)}</div>`}
                     ${hasVariants ? `<span class="variant-badge">${variantsUnavailable ? "Unavailable" : `${variants.length} size${variants.length > 1 ? "s" : ""}`}</span>` : ""}
                 </div>
@@ -6460,7 +6543,7 @@ function renderMenuChannelFields(selectedChannels=null, channelPrices={}, basePr
 }
 function openAddMenuModal(item=null){
     editingMenuItemId=item?.id||null;
-    currentMenuImageData=item?.image_url||item?.imageUrl||null;
+    currentMenuImageData=item?.image_url||item?.imageUrl||null;pendingMenuImageBlob=null;menuImageWasCleared=false;releaseImagePreviewUrl(menuImagePreviewUrl);menuImagePreviewUrl=null;setImageUploadStatus('menuImageUploadStatus','','');
     populateMenuCategorySelect(item?.category||'');
     document.getElementById('addMenuModalTitle').textContent=editingMenuItemId?'Edit Menu Item':'Add Menu Item';
     document.getElementById('menuName').value=item?.name||'';
@@ -6484,32 +6567,21 @@ function openAddMenuModal(item=null){
     renderMenuVariantsEditor(item?.variants||[]);
     document.getElementById('addMenuModal').style.display='flex';
 }
-function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';document.getElementById('menuTagPicker')?.removeAttribute('open');editingMenuItemId=null;currentMenuImageData=null;}
+function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';document.getElementById('menuTagPicker')?.removeAttribute('open');editingMenuItemId=null;currentMenuImageData=null;pendingMenuImageBlob=null;menuImageWasCleared=false;releaseImagePreviewUrl(menuImagePreviewUrl);menuImagePreviewUrl=null;setImageUploadStatus('menuImageUploadStatus','','');}
 function menuVariantEditorRow(variant={}){const selected=new Set((variant.option_set_ids||variant.optionSetIds||[]).map(String));const options=menuOptionSets.length?menuOptionSets.map(set=>`<label class="variant-option-set-choice"><input class="variant-option-set" type="checkbox" value="${esc(set.id)}" ${selected.has(String(set.id))?'checked':''}><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<div class="variant-option-set-empty">Create option sets first. Item-wide options are inherited by every variant.</div>';return `<div class="variant-editor-card"><div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Base price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn variant-remove" onclick="this.closest('.variant-editor-card').remove()">✕</button></div><details class="variant-editor-details"><summary>Channel prices &amp; add-ons for this size</summary><div class="variant-editor-panel"><div class="variant-channel-price-grid">${POS_CHANNELS.map(channel=>`<label>${esc(channel.label)} price<input class="variant-channel-price" type="number" min="0" step="0.01" data-channel="${esc(channel.key)}" value="${variant.channel_prices?.[channel.key]??variant.channelPrices?.[channel.key]??''}" placeholder="Use base price"></label>`).join('')}</div><div><span class="menu-eyebrow">VARIANT ADD-ONS</span><p class="access-muted">Item-wide add-ons still apply. Select extra option sets for this variant only.</p><div class="variant-option-set-list">${options}</div></div></div></details></div>`;}
 function renderMenuVariantsEditor(variants=[]){const wrap=document.getElementById('menuVariantsEditor');if(wrap)wrap.innerHTML=(variants||[]).map(menuVariantEditorRow).join('');}
 function addMenuVariantRow(){document.getElementById('menuVariantsEditor')?.insertAdjacentHTML('beforeend',menuVariantEditorRow({}));}
-function renderMenuItemImagePreview(){const box=document.getElementById('menuImagePreview');if(!box)return;box.innerHTML=currentMenuImageData?`<img src="${esc(currentMenuImageData)}" alt="Menu item preview">`:'<span>No image selected</span>';}
+function renderMenuItemImagePreview(){const box=document.getElementById('menuImagePreview');if(!box)return;box.innerHTML=currentMenuImageData?`<img src="${esc(currentMenuImageData)}" alt="Menu item preview" loading="lazy" decoding="async">`:'<span>No image selected</span>';}
 async function previewMenuItemImage(file){
     if(!file)return;
-    if(!['image/jpeg','image/png','image/webp'].includes(file.type))return alert('Choose a JPG, PNG or WebP image.');
-    if(file.size>8*1024*1024)return alert('Choose an image smaller than 8 MB before compression.');
     try{
-        const bitmap=await createImageBitmap(file),canvas=document.createElement('canvas'),limit=60*1024;
-        let longest=Math.min(1600,Math.max(bitmap.width,bitmap.height)),quality=0.86,encoded='';
-        for(let attempt=0;attempt<24;attempt++){
-            const scale=Math.min(1,longest/Math.max(bitmap.width,bitmap.height));
-            canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-            canvas.getContext('2d',{alpha:false}).drawImage(bitmap,0,0,canvas.width,canvas.height);
-            encoded=canvas.toDataURL('image/jpeg',quality);
-            if(atob(encoded.split(',')[1]).length<=limit)break;
-            if(quality>0.52)quality=Math.max(0.5,quality-0.08);else longest=Math.max(240,Math.floor(longest*0.84));
-        }
-        bitmap.close?.();
-        if(atob(encoded.split(',')[1]).length>limit)throw new Error('Could not compress this image below 60 KB. Choose a smaller image.');
-        currentMenuImageData=encoded;renderMenuItemImagePreview();
-    }catch(error){alert(error.message||'Unable to read this image.');}
+        const blob=await optimizeImageForStorage(file,800,250*1024,2*1024*1024);
+        releaseImagePreviewUrl(menuImagePreviewUrl);
+        pendingMenuImageBlob=blob;menuImagePreviewUrl=URL.createObjectURL(blob);currentMenuImageData=menuImagePreviewUrl;menuImageWasCleared=false;
+        setImageUploadStatus('menuImageUploadStatus',`Optimized · ${(blob.size/1024).toFixed(0)} KB · ready to upload`,'ready');renderMenuItemImagePreview();
+    }catch(error){const input=document.getElementById('menuImageFile');if(input)input.value='';setImageUploadStatus('menuImageUploadStatus','', '');alert(error.message||'Unable to read this image.');}
 }
-function clearMenuItemImage(){currentMenuImageData=null;const file=document.getElementById('menuImageFile');if(file)file.value='';renderMenuItemImagePreview();}
+function clearMenuItemImage(){releaseImagePreviewUrl(menuImagePreviewUrl);menuImagePreviewUrl=null;pendingMenuImageBlob=null;currentMenuImageData=null;menuImageWasCleared=true;const file=document.getElementById('menuImageFile');if(file)file.value='';setImageUploadStatus('menuImageUploadStatus','Image will be removed when you save.','ready');renderMenuItemImagePreview();}
 function renderMenuOptionSetPicker(selected=[]){
     const box=document.getElementById('menuOptionSetPicker');if(!box)return;
     const knownIds=new Set(menuOptionSets.map(set=>String(set.id)));
@@ -6548,16 +6620,30 @@ async function saveMenuItemV2(){
     for(const channel of POS_CHANNELS){const raw=String(document.getElementById('menuPrice_'+channel.key)?.value||'').trim();if(raw!==''){const value=Number(raw);if(Number.isFinite(value)&&value>=0)channelPrices[channel.key]=value;}}
     const variants=[];
     for(const row of document.querySelectorAll('#menuVariantsEditor .variant-editor-card')){
-        const variantName=row.querySelector('.variant-name')?.value.trim(),variantPrice=Number(row.querySelector('.variant-price')?.value),channelPrices={};
-        for(const input of row.querySelectorAll('.variant-channel-price')){const raw=String(input.value||'').trim();if(raw==='')continue;const value=Number(raw);if(!Number.isFinite(value)||value<0)return alert(`Enter a valid ${input.dataset.channel} price for ${variantName||'the variant'}.`);channelPrices[input.dataset.channel]=value;}
+        const variantName=row.querySelector('.variant-name')?.value.trim(),variantPrice=Number(row.querySelector('.variant-price')?.value),variantChannelPrices={};
+        for(const input of row.querySelectorAll('.variant-channel-price')){const raw=String(input.value||'').trim();if(raw==='')continue;const value=Number(raw);if(!Number.isFinite(value)||value<0)return alert(`Enter a valid ${input.dataset.channel} price for ${variantName||'the variant'}.`);variantChannelPrices[input.dataset.channel]=value;}
         if(variantName&&(!Number.isFinite(variantPrice)||variantPrice<0))return alert(`Enter a valid base price for ${variantName}.`);
-        if(variantName)variants.push({name:variantName,sku:row.querySelector('.variant-sku')?.value.trim(),price:variantPrice,unit:row.querySelector('.variant-unit')?.value||'ea',channelPrices,optionSetIds:[...row.querySelectorAll('.variant-option-set:checked')].map(input=>input.value)});
+        if(variantName)variants.push({name:variantName,sku:row.querySelector('.variant-sku')?.value.trim(),price:variantPrice,unit:row.querySelector('.variant-unit')?.value||'ea',channelPrices:variantChannelPrices,optionSetIds:[...row.querySelectorAll('.variant-option-set:checked')].map(input=>input.value)});
     }
-    const existing=editingMenuItemId?currentMenu.find(item=>Number(item.id)===Number(editingMenuItemId)):null;
-    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,imageUrl:currentMenuImageData,optionSetIds:menuOptionSetSelectionOrder.slice(),available:existing?existing.available!==false:true};
-    try{await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});closeAddMenuModal();await loadMenuManagement();await loadMenu();showProfileToast(wasEditing?'Menu item updated successfully.':'Menu item added successfully.',true);}catch(error){alert(error.message);}
+    const existing=editingMenuItemId?currentMenu.find(x=>Number(x.id)===Number(editingMenuItemId)):null;
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,optionSetIds:menuOptionSetSelectionOrder.slice(),available:existing?existing.available!==false:true};
+    try{
+        const saved=await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});
+        const itemId=Number(saved?.menu?.id||editingMenuItemId||0);
+        if(!wasEditing&&itemId)editingMenuItemId=itemId;
+        if(pendingMenuImageBlob){
+            setImageUploadStatus('menuImageUploadStatus','Uploading image…','uploading');
+            const uploaded=await uploadManagedImage('item',itemId,pendingMenuImageBlob,'menuImageUploadStatus');
+            releaseImagePreviewUrl(menuImagePreviewUrl);menuImagePreviewUrl=null;pendingMenuImageBlob=null;menuImageWasCleared=false;currentMenuImageData=uploaded.imageUrl;
+            setImageUploadStatus('menuImageUploadStatus',`Uploaded · ${(uploaded.size/1024).toFixed(0)} KB`,'success');
+        }else if(menuImageWasCleared){
+            setImageUploadStatus('menuImageUploadStatus','Removing image…','uploading');
+            await api(`/image-storage/item/${itemId}`,{method:'DELETE'});
+            menuImageWasCleared=false;currentMenuImageData=null;setImageUploadStatus('menuImageUploadStatus','Image removed.','success');
+        }
+        closeAddMenuModal();await loadMenuManagement();await loadMenu();showProfileToast(wasEditing?'Menu item updated successfully.':'Menu item added successfully.',true);
+    }catch(error){setImageUploadStatus('menuImageUploadStatus',error.message||'Could not save menu item image.','error');alert(error.message);}
 }
-
 function optionSetNewId(){return `${Date.now()}_${Math.random().toString(36).slice(2,8)}`;}
 function renderMenuOptionSetsOverview(){
     const list=document.getElementById('menuOptionSetOverviewList');
@@ -8231,8 +8317,11 @@ async function loadSettings() {
     setSettingValue("settingPhone", appSettings.phone);
     setSettingValue("settingGstin", appSettings.gstin);
     setSettingValue("settingFssai", appSettings.fssai || "");
+    releaseImagePreviewUrl(pendingBusinessLogoUrl);
     pendingBusinessLogoUrl = null;
+    pendingBusinessLogoBlob = null;
     businessLogoChanged = false;
+    setImageUploadStatus("restaurantLogoUploadStatus", "", "");
     setRestaurantLogoPreview(currentUser?.logo_url || "");
     setSettingValue("settingHeader", appSettings.header);
     setSettingValue("settingFooter", appSettings.footer);
@@ -8291,63 +8380,26 @@ function setRestaurantLogoPreview(logoUrl) {
     const wrap = document.getElementById("settingRestaurantLogoPreviewWrap");
     const image = document.getElementById("settingRestaurantLogoPreview");
     const hasLogo = Boolean(String(logoUrl || "").trim());
-    if (image) image.src = hasLogo ? String(logoUrl) : "";
+    if (image) { image.src = hasLogo ? String(logoUrl) : ""; image.loading = "lazy"; image.decoding = "async"; }
     if (wrap) wrap.hidden = !hasLogo;
 }
 
 async function handleRestaurantLogoUpload(input) {
-    const file = input?.files?.[0];
-    if (!file) return;
-    if (!/^image\/(?:png|jpeg|webp)$/.test(file.type)) {
-        input.value = "";
-        return alert("Choose a PNG, JPG or WebP image.");
-    }
-    if (file.size > 200 * 1024) {
-        input.value = "";
-        return alert("Choose a logo image that is 200 KB or smaller.");
-    }
-    try {
-        const bitmap = await createImageBitmap(file);
-        if (bitmap.width * bitmap.height > 40000000) {
-            bitmap.close?.();
-            throw new Error("Choose a logo image with dimensions below 40 megapixels.");
-        }
-        const canvas = document.createElement("canvas");
-        let result = "";
-        for (const size of [600, 480, 360]) {
-            const scale = Math.min(1, size / bitmap.width, size / bitmap.height);
-            canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-            canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-            const context = canvas.getContext("2d");
-            context.clearRect(0, 0, canvas.width, canvas.height);
-            context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-            for (const quality of [0.84, 0.72, 0.6]) {
-                result = canvas.toDataURL("image/webp", quality);
-                if (atob(result.slice(result.indexOf(",") + 1)).length <= 200 * 1024) break;
-            }
-            if (atob(result.slice(result.indexOf(",") + 1)).length <= 200 * 1024) break;
-        }
-        bitmap.close?.();
-        if (!result.startsWith("data:image/webp;base64,") || atob(result.slice(result.indexOf(",") + 1)).length > 200 * 1024) {
-            throw new Error("This logo could not be compressed below 200 KB. Choose a smaller or simpler image.");
-        }
-        pendingBusinessLogoUrl = result;
-        businessLogoChanged = true;
-        setRestaurantLogoPreview(result);
-    } catch (error) {
-        input.value = "";
-        alert(error.message || "Could not read this logo image.");
-    }
+    const file=input?.files?.[0];
+    if(!file)return;
+    try{
+        const blob=await optimizeImageForStorage(file,500,200*1024,200*1024);
+        releaseImagePreviewUrl(pendingBusinessLogoUrl);
+        pendingBusinessLogoBlob=blob;pendingBusinessLogoUrl=URL.createObjectURL(blob);businessLogoChanged=true;
+        setImageUploadStatus('restaurantLogoUploadStatus',`Optimized · ${(blob.size/1024).toFixed(0)} KB · ready to upload when settings are saved`,'ready');
+        setRestaurantLogoPreview(pendingBusinessLogoUrl);
+    }catch(error){input.value='';setImageUploadStatus('restaurantLogoUploadStatus',error.message||'Could not read this logo image.','error');alert(error.message||'Could not read this logo image.');}
 }
-
 function removeRestaurantLogo() {
-    pendingBusinessLogoUrl = "";
-    businessLogoChanged = true;
-    const input = document.getElementById("settingRestaurantLogoFile");
-    if (input) input.value = "";
-    setRestaurantLogoPreview("");
+    releaseImagePreviewUrl(pendingBusinessLogoUrl);pendingBusinessLogoUrl='';pendingBusinessLogoBlob=null;businessLogoChanged=true;
+    const input=document.getElementById('settingRestaurantLogoFile');if(input)input.value='';
+    setImageUploadStatus('restaurantLogoUploadStatus','Logo will be removed when settings are saved.','ready');setRestaurantLogoPreview('');
 }
-
 function businessLogoUrl() {
     if (Object.prototype.hasOwnProperty.call(appSettings || {}, "businessLogoUrl")) return String(appSettings.businessLogoUrl || "");
     return String(currentUser?.logo_url || "");
@@ -8443,13 +8495,25 @@ async function saveSettings() {
     let logoSaveError = "";
     if (businessLogoChanged) {
         try {
-            const savedLogo = await api("/business/profile/logo", { method: "PUT", body: JSON.stringify({ logoUrl: pendingBusinessLogoUrl }) });
-            currentUser.logo_url = savedLogo.logoUrl || "";
+            if (pendingBusinessLogoBlob) {
+                setImageUploadStatus("restaurantLogoUploadStatus", "Uploading logo…", "uploading");
+                const uploaded = await uploadManagedImage("logo", null, pendingBusinessLogoBlob, "restaurantLogoUploadStatus");
+                currentUser.logo_url = uploaded.imageUrl || "";
+                setImageUploadStatus("restaurantLogoUploadStatus", `Uploaded · ${(uploaded.size / 1024).toFixed(0)} KB`, "success");
+            } else {
+                setImageUploadStatus("restaurantLogoUploadStatus", "Removing logo…", "uploading");
+                await api("/image-storage/logo", { method: "DELETE" });
+                currentUser.logo_url = "";
+                setImageUploadStatus("restaurantLogoUploadStatus", "Logo removed.", "success");
+            }
+            releaseImagePreviewUrl(pendingBusinessLogoUrl);
             pendingBusinessLogoUrl = null;
+            pendingBusinessLogoBlob = null;
             businessLogoChanged = false;
             setRestaurantLogoPreview(currentUser.logo_url);
         } catch (error) {
             logoSaveError = error.message || "The business logo could not be saved.";
+            setImageUploadStatus("restaurantLogoUploadStatus", logoSaveError, "error");
         }
     }
     try {

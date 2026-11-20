@@ -912,6 +912,11 @@ function permissionForRequest(req) {
     if (path.startsWith('/reports/')) return 'reports.view';
     if (path === '/settings') return method === 'GET' ? 'settings.view' : 'settings.edit';
     if (path === '/business/profile/logo') return method === 'PUT' ? 'settings.edit' : 'settings.view';
+    if (path.startsWith('/image-storage/')) {
+        const entity = path.split('/')[2];
+        if (!['POST', 'DELETE'].includes(method)) return null;
+        return entity === 'logo' ? 'settings.edit' : ['item', 'category'].includes(entity) ? 'menu.edit' : null;
+    }
     if (path === '/settings/sales-channels') return method === 'GET' ? 'settings.view' : 'settings.edit';
     if (path === '/menu-option-sets') return method === 'GET' ? 'menu.view' : 'menu.edit';
     if (path === '/billing-adjustments' || path.startsWith('/billing-adjustments/')) return method === 'GET' ? 'settings.view' : 'settings.edit';
@@ -2145,7 +2150,7 @@ app.get("/public-menu/:token", async (req, res) => {
             }
             return {
                 restaurantName: String(settings.restaurantName || business.business_name || "Cafe & Restaurant"),
-                logoUrl: String(settings.logoUrl || business.logo_url || ""),
+                logoUrl: String(business.logo_url || settings.logoUrl || ""),
                 heroImages,
                 currency: String(settings.currency || business.currency || "₹"),
                 priceChannel,
@@ -2733,6 +2738,13 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
 });
 app.use("/api", requireAuth);
 
+// Image writes use the application's café-scoped session. The Supabase service key
+// stays on this server; callers cannot choose a business id, bucket, or object path.
+app.post("/api/image-storage/:entity/:id", parseImageStorageBody, uploadTenantImage);
+app.post("/api/image-storage/logo", parseImageStorageBody, uploadTenantImage);
+app.delete("/api/image-storage/:entity/:id", removeTenantImage);
+app.delete("/api/image-storage/logo", removeTenantImage);
+
 // =====================================================
 // MENU
 // =====================================================
@@ -3064,10 +3076,11 @@ app.delete("/api/menu/categories/:id", async (req, res) => {
             DELETE FROM menu_categories
             WHERE id = $1
               AND business_id = $2
-            RETURNING id
+            RETURNING id,image_url
         `, [id, businessId]);
 
         if (!result.rows.length) return res.status(404).json({ error: "Menu category not found" });
+        if (result.rows[0].image_url) await deleteManagedImageIfUnreferenced(result.rows[0].image_url, businessId);
         res.json({ success: true });
     } catch (e) {
         console.error("Delete menu category error:", e);
@@ -3210,15 +3223,184 @@ function menuSkuErrorResponse(error, fallback) {
 }
 
 function cleanMenuImage(value, existingValue = null, imageLabel = "Menu item images") {
-    if (value === null || value === undefined || value === "") return null;
+    if (value === undefined) return existingValue || null;
+    if (value === null || value === "") return null;
     const image = String(value);
-    if (!/^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(image)) {
-        throw Object.assign(new Error("Choose a JPG, PNG or WebP image."), { status: 400 });
+    if (image === existingValue) return image;
+    throw Object.assign(new Error(`${imageLabel} must be uploaded through secure image storage.`), { status: 400 });
+}
+
+const imageStorageBuckets = Object.freeze({
+    item: "cafe-menu-items",
+    category: "cafe-category-images",
+    logo: "cafe-logos"
+});
+const imageStorageMimeExtensions = Object.freeze({ "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" });
+const IMAGE_STORAGE_MAX_BYTES = 2 * 1024 * 1024;
+
+function imageBufferMatchesMime(image, mimeType) {
+    if (!Buffer.isBuffer(image)) return false;
+    if (mimeType === "image/jpeg") return image.length >= 3 && image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff;
+    if (mimeType === "image/png") return image.length >= 8 && image.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]));
+    if (mimeType === "image/webp") return image.length >= 12 && image.toString("ascii", 0, 4) === "RIFF" && image.toString("ascii", 8, 12) === "WEBP";
+    return false;
+}
+
+function parseImageStorageBody(req, res, next) {
+    express.raw({ type: Object.keys(imageStorageMimeExtensions), limit: IMAGE_STORAGE_MAX_BYTES })(req, res, error => {
+        if (error) return res.status(error.status === 413 ? 413 : 400).json({ error: error.status === 413 ? "Image must be 2 MB or smaller." : "Choose a JPEG, PNG, or WebP image." });
+        next();
+    });
+}
+
+function getImageStorageConfig() {
+    const rawUrl = String(process.env.SUPABASE_URL || "").trim();
+    const apiKey = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || "").trim();
+    if (!rawUrl || !apiKey) throw Object.assign(new Error("Image storage is not configured on the POS server. Set SUPABASE_URL and SUPABASE_SECRET_KEY."), { status: 503 });
+    let parsed;
+    try { parsed = new URL(rawUrl); } catch (_) { throw Object.assign(new Error("SUPABASE_URL must be a valid Supabase project URL."), { status: 503 }); }
+    const localHttp = parsed.protocol === "http:" && ["localhost", "127.0.0.1"].includes(parsed.hostname);
+    if ((!localHttp && parsed.protocol !== "https:") || parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== "/") throw Object.assign(new Error("SUPABASE_URL must be an HTTPS project origin."), { status: 503 });
+    return { origin: parsed.origin, apiKey, legacyServiceRole: apiKey.startsWith("eyJ") };
+}
+function imageStorageAuthHeaders(config) {
+    const headers = { apikey: config.apiKey };
+    // Legacy service_role keys are JWTs and need the bearer header to select service_role.
+    // Current sb_secret keys are API keys, not JWTs; send those only as apikey.
+    if (config.legacyServiceRole) headers.Authorization = `Bearer ${config.apiKey}`;
+    return headers;
+}
+
+function imageStorageObjectEndpoint(config, bucket, objectPath) {
+    const encodedPath = String(objectPath).split("/").map(segment => encodeURIComponent(segment)).join("/");
+    return `${config.origin}/storage/v1/object/${encodeURIComponent(bucket)}/${encodedPath}`;
+}
+function imageStoragePublicUrl(config, bucket, objectPath) {
+    const encodedPath = String(objectPath).split("/").map(segment => encodeURIComponent(segment)).join("/");
+    return `${config.origin}/storage/v1/object/public/${encodeURIComponent(bucket)}/${encodedPath}`;
+}
+function managedImageObjectFromUrl(imageUrl, businessId) {
+    if (!imageUrl || typeof imageUrl !== "string") return null;
+    let config, parsed;
+    try { config = getImageStorageConfig(); parsed = new URL(imageUrl); } catch (_) { return null; }
+    if (parsed.origin !== config.origin) return null;
+    const match = parsed.pathname.match(/^\/storage\/v1\/object\/public\/(cafe-menu-items|cafe-category-images|cafe-logos)\/(.+)$/);
+    if (!match) return null;
+    let objectPath;
+    try { objectPath = match[2].split("/").map(segment => decodeURIComponent(segment)).join("/"); } catch (_) { return null; }
+    if (!objectPath.startsWith(`${Number(businessId)}/`) || objectPath.split("/").some(segment => !segment || segment === "." || segment === "..")) return null;
+    return { config, bucket: match[1], objectPath };
+}
+
+async function deleteManagedImageIfUnreferenced(imageUrl, businessId) {
+    const object = managedImageObjectFromUrl(imageUrl, businessId);
+    if (!object) return false;
+    try {
+        const references = await runSystemContext(() => pool.query(`
+            SELECT EXISTS(SELECT 1 FROM menu WHERE image_url=$1) OR
+                   EXISTS(SELECT 1 FROM menu_categories WHERE image_url=$1) OR
+                   EXISTS(SELECT 1 FROM businesses WHERE logo_url=$1) OR
+                   EXISTS(SELECT 1 FROM app_settings WHERE settings->>'logoUrl'=$1) OR
+                   EXISTS(SELECT 1 FROM orders WHERE billing_settings_snapshot->>'businessLogoUrl'=$1) AS referenced
+        `, [imageUrl]));
+        if (references.rows[0]?.referenced) return false;
+        const response = await fetch(imageStorageObjectEndpoint(object.config, object.bucket, object.objectPath), {
+            method: "DELETE", headers: imageStorageAuthHeaders(object.config)
+        });
+        if (!response.ok && response.status !== 404) {
+            console.warn("Managed image cleanup failed:", response.status, (await response.text()).slice(0, 250));
+            return false;
+        }
+        return true;
+    } catch (error) { console.warn("Managed image cleanup failed:", error.message); return false; }
+}
+
+async function imageRecordForBusiness(entity, id, businessId) {
+    if (entity === "item") {
+        const result = await pool.query("SELECT image_url FROM menu WHERE id=$1 AND business_id=$2 LIMIT 1", [id, businessId]);
+        return result.rows[0] || null;
     }
-    if (image !== existingValue && Buffer.from(image.slice(image.indexOf(",") + 1), "base64").length > 200 * 1024) {
-        throw Object.assign(new Error(`${imageLabel} must be 200 KB or smaller after compression.`), { status: 413 });
+    if (entity === "category") {
+        const result = await pool.query("SELECT image_url FROM menu_categories WHERE id=$1 AND business_id=$2 LIMIT 1", [id, businessId]);
+        return result.rows[0] || null;
     }
-    return image;
+    if (entity === "logo") {
+        const result = await runSystemContext(() => pool.query("SELECT logo_url AS image_url FROM businesses WHERE id=$1 LIMIT 1", [businessId]));
+        return result.rows[0] || null;
+    }
+    return null;
+}
+async function setBusinessImageReference(entity, id, businessId, imageUrl, previousUrl) {
+    if (entity === "item") return pool.query("UPDATE menu SET image_url=$1 WHERE id=$2 AND business_id=$3 AND image_url IS NOT DISTINCT FROM $4 RETURNING id,image_url", [imageUrl, id, businessId, previousUrl]);
+    if (entity === "category") return pool.query("UPDATE menu_categories SET image_url=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3 AND image_url IS NOT DISTINCT FROM $4 RETURNING id,image_url", [imageUrl, id, businessId, previousUrl]);
+    return runSystemContext(() => pool.query("UPDATE businesses SET logo_url=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND logo_url IS NOT DISTINCT FROM $3 RETURNING id,logo_url AS image_url", [imageUrl, businessId, previousUrl]));
+}
+
+async function uploadTenantImage(req, res) {
+    const entity = String(req.params.entity || (req.path?.endsWith("/logo") ? "logo" : "")).toLowerCase();
+    const businessId = Number(req.user?.business_id || 0);
+    const id = entity === "logo" ? businessId : Number(req.params.id);
+    const mimeType = String(req.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const image = Buffer.isBuffer(req.body) ? req.body : null;
+    if (!imageStorageBuckets[entity] || !Number.isInteger(businessId) || businessId <= 0 || !Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Choose a valid image target." });
+    const maxBytes = entity === "item" ? IMAGE_STORAGE_MAX_BYTES : 200 * 1024;
+    if (!image || !image.length || image.length > maxBytes || !imageStorageMimeExtensions[mimeType]) return res.status(413).json({ error: entity === "item" ? "Choose a non-empty JPEG, PNG or WebP image up to 2 MB." : "Café logos and category images must be 200 KB or smaller." });
+    if (!imageBufferMatchesMime(image, mimeType)) return res.status(415).json({ error: "The image contents do not match its JPEG, PNG or WebP file type." });
+    try {
+        const existing = await imageRecordForBusiness(entity, id, businessId);
+        if (!existing) return res.status(404).json({ error: "The image target was not found for this café." });
+        const config = getImageStorageConfig();
+        const objectPath = entity === "logo"
+            ? `${businessId}/logo/${crypto.randomUUID()}.${imageStorageMimeExtensions[mimeType]}`
+            : `${businessId}/${id}/${crypto.randomUUID()}.${imageStorageMimeExtensions[mimeType]}`;
+        const bucket = imageStorageBuckets[entity];
+        const endpoint = imageStorageObjectEndpoint(config, bucket, objectPath);
+        const upload = await fetch(endpoint, {
+            method: "POST",
+            headers: { ...imageStorageAuthHeaders(config), "Content-Type": mimeType, "Cache-Control": "max-age=31536000, immutable", "x-upsert": "false" },
+            body: image
+        });
+        if (!upload.ok) {
+            const detail = (await upload.text()).slice(0, 300);
+            console.error("Supabase Storage upload failed:", upload.status, detail);
+            return res.status(502).json({ error: upload.status === 413 ? "Storage rejected the image because it exceeds the bucket limit." : "Could not upload this image to Supabase Storage. Check the bucket setup and try again." });
+        }
+        const imageUrl = imageStoragePublicUrl(config, bucket, objectPath);
+        let updated;
+        try { updated = await setBusinessImageReference(entity, id, businessId, imageUrl, existing.image_url || null); }
+        catch (error) {
+            await fetch(endpoint, { method: "DELETE", headers: imageStorageAuthHeaders(config) }).catch(() => {});
+            throw error;
+        }
+        if (!updated.rows.length) {
+            await fetch(endpoint, { method: "DELETE", headers: imageStorageAuthHeaders(config) }).catch(() => {});
+            return res.status(409).json({ error: "The image target changed while uploading. Please retry." });
+        }
+        if (existing.image_url && existing.image_url !== imageUrl) await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
+        res.json({ success: true, imageUrl, objectPath, size: image.length, contentType: mimeType });
+    } catch (error) {
+        console.error("Secure image upload error:", error.message);
+        res.status(error.status || 500).json({ error: error.status ? error.message : "Could not save the image reference." });
+    }
+}
+
+async function removeTenantImage(req, res) {
+    const entity = String(req.params.entity || (req.path?.endsWith("/logo") ? "logo" : "")).toLowerCase();
+    const businessId = Number(req.user?.business_id || 0);
+    const id = entity === "logo" ? businessId : Number(req.params.id);
+    if (!imageStorageBuckets[entity] || !Number.isInteger(businessId) || businessId <= 0 || !Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Choose a valid image target." });
+    try {
+        const existing = await imageRecordForBusiness(entity, id, businessId);
+        if (!existing) return res.status(404).json({ error: "The image target was not found for this café." });
+        if (!existing.image_url) return res.json({ success: true, imageUrl: "" });
+        const updated = await setBusinessImageReference(entity, id, businessId, null, existing.image_url);
+        if (!updated.rows.length) return res.status(409).json({ error: "The image changed while removing it. Please retry." });
+        await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
+        res.json({ success: true, imageUrl: "" });
+    } catch (error) {
+        console.error("Secure image removal error:", error.message);
+        res.status(500).json({ error: "Could not remove this image." });
+    }
 }
 
 function cleanQrMenuHeroImages(value) {
@@ -9655,30 +9837,28 @@ app.put("/api/business/profile/logo", async (req, res) => {
     const businessId = Number(req.user?.business_id || 0);
     const rawLogo = req.body?.logoUrl;
     if (!Number.isInteger(businessId) || businessId <= 0) return res.status(401).json({ error: "Business session is required." });
-    if (rawLogo !== null && rawLogo !== undefined && typeof rawLogo !== "string") {
-        return res.status(400).json({ error: "Choose a PNG, JPEG or WebP logo image." });
-    }
+    if (rawLogo !== null && rawLogo !== undefined && typeof rawLogo !== "string") return res.status(400).json({ error: "Choose a PNG, JPEG or WebP logo image." });
     const logoUrl = String(rawLogo || "").trim();
-    if (logoUrl && !/^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(logoUrl)) {
-        return res.status(400).json({ error: "Logo must be a PNG, JPEG or WebP image." });
-    }
-    if (logoUrl && Buffer.from(logoUrl.slice(logoUrl.indexOf(",") + 1), "base64").length > 200 * 1024) {
-        return res.status(413).json({ error: "Logo must be 200 KB or smaller." });
-    }
     try {
+        const current = await runSystemContext(() => pool.query("SELECT logo_url FROM businesses WHERE id=$1 LIMIT 1", [businessId]));
+        if (!current.rows.length) return res.status(404).json({ error: "Business profile not found." });
+        const previousUrl = current.rows[0].logo_url || null;
+        // Older clients may submit their unchanged legacy logo while saving settings.
+        // They may also clear it, but all new image bytes must use the Storage endpoint.
+        if (logoUrl && logoUrl === previousUrl) return res.json({ success: true, logoUrl: previousUrl });
+        if (logoUrl) return res.status(400).json({ error: "Upload the logo through secure image storage." });
         const result = await runSystemContext(() => pool.query(
-            "UPDATE businesses SET logo_url=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 RETURNING id,logo_url",
-            [logoUrl || null, businessId]
+            "UPDATE businesses SET logo_url=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND logo_url IS NOT DISTINCT FROM $2 RETURNING id,logo_url",
+            [businessId, previousUrl]
         ));
-        if (!result.rows.length) return res.status(404).json({ error: "Business profile not found." });
-        res.json({ success: true, logoUrl: result.rows[0].logo_url || "" });
+        if (!result.rows.length) return res.status(409).json({ error: "The logo changed while removing it. Please retry." });
+        if (previousUrl) await deleteManagedImageIfUnreferenced(previousUrl, businessId);
+        res.json({ success: true, logoUrl: "" });
     } catch (error) {
         console.error("Business logo update error:", error);
         res.status(500).json({ error: "Could not update the business logo." });
     }
-});
-
-app.get(
+});app.get(
     "/api/settings",
     async (req, res) => {
         try {

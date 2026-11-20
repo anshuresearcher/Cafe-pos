@@ -4126,3 +4126,9 @@ body:has(#new-order.active-page) .billing-category-sidebar .category-dot{display
 .kot-group-printer-control select option{color:#263630;background:#fff}
 .kot-group-printer-chevron{color:#73847f;font-size:20px;line-height:1;text-align:center;pointer-events:none}
 .kot-group-printer-field>small{margin:0;color:#75837f;font-size:11px;line-height:1.45}
+
+.image-upload-status{min-height:18px;margin-top:6px;color:#64748b;font-size:12px;line-height:1.45}
+.image-upload-status:empty{display:none}
+.image-upload-status[data-state='uploading']{color:#1d4ed8;font-weight:700}
+.image-upload-status[data-state='success']{color:#047857;font-weight:700}
+.image-upload-status[data-state='error']{color:#b91c1c;font-weight:700}
