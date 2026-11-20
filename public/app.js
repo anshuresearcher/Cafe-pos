@@ -122,6 +122,7 @@ function handleAutomaticLogout(message = "Your session has expired. Please login
 let cart = [];
 let cartItemCancellationReasons = [];
 let orderType = "Takeaway";
+let currentBillingPOSModuleKey = "newOrder";
 // Empty until settings are loaded. This lets the saved POS preference choose the
 // first channel for a fresh billing session instead of silently keeping Takeaway.
 let selectedPOSChannelKey = "";
@@ -1150,15 +1151,21 @@ function showPage(pageName) {
 
     const activePage = document.querySelector(".page.active-page");
     if (pageName === "table-view") {
+        currentBillingPOSModuleKey = "tableView";
         selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
         setOrderType("Dine-in", true);
     }
     if (pageName === "new-order" && activePage?.id !== "new-order" && !currentOpenOrderId) {
-        if (document.getElementById("tableNumber")?.value) {
+        const enteringFromSelectedTable = activePage?.id === "table-view" && Boolean(document.getElementById("tableNumber")?.value);
+        currentBillingPOSModuleKey = enteringFromSelectedTable ? "tableView" : "newOrder";
+        if (enteringFromSelectedTable) {
             selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
             setOrderType("Dine-in", true);
         } else {
-            setOrderType("Takeaway");
+            const defaultChannelKey = getPOSChannelPreferences().newOrder.defaultChannel;
+            const defaultChannel = getSaleChannel(defaultChannelKey);
+            selectedPOSChannelKey = defaultChannelKey;
+            setOrderType(defaultChannel?.orderType || "Takeaway", true);
         }
     }
     if (activePage?.id === "new-order" && pageName !== "new-order") {
@@ -1572,20 +1579,22 @@ async function loadOrderActivityAuditReport() {
 // ==========================================
 
 function setOrderType(type, preserveSaleChannel = false) {
+    if (!preserveSaleChannel) {
+        const preferences = getPOSChannelPreferences();
+        const modulePrefs = preferences[currentBillingPOSModuleKey] || preferences.newOrder;
+        const fallback = POS_CHANNELS.find(channel => channel.orderType === type)?.key;
+        let nextChannel = modulePrefs.defaultChannel || fallback;
+        if (!modulePrefs.channels.includes(nextChannel)) nextChannel = modulePrefs.channels[0] || fallback;
+        const preferredChannel = getSaleChannel(nextChannel);
+        if (preferredChannel) type = preferredChannel.orderType || type;
+        selectedPOSChannelKey = nextChannel;
+    }
     orderType = type;
     const label = document.getElementById("orderType");
     if (label) label.textContent = type;
     const paxField = document.getElementById("billingPaxField");
     if (paxField) paxField.hidden = type !== "Dine-in";
     if (type !== "Dine-in") setBillingPaxForTable(null, 1);
-    if (!preserveSaleChannel) {
-        const preferences = getPOSChannelPreferences();
-        const modulePrefs = type === "Dine-in" ? preferences.tableView : preferences.newOrder;
-        const fallback = POS_CHANNELS.find(channel => channel.orderType === type)?.key;
-        let nextChannel = modulePrefs.defaultChannel || fallback;
-        if (!modulePrefs.channels.includes(nextChannel)) nextChannel = modulePrefs.channels[0] || fallback;
-        selectedPOSChannelKey = nextChannel;
-    }
     if (type !== "Dine-in") {
         const tableInput = document.getElementById("tableNumber");
         if (tableInput) tableInput.value = "";
@@ -1752,6 +1761,12 @@ function marketingDealAppliesToLine(deal, line) {
     return true;
 }
 
+function marketingDealRewardIds(deal) {
+    const ids = Array.isArray(deal?.rewardItemIds) ? [...deal.rewardItemIds] : [];
+    if (!ids.length && deal?.rewardItemId) ids.push(deal.rewardItemId);
+    return [...new Set(ids.map(value => String(value || "").trim()).filter(Boolean))];
+}
+
 function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))) {
     if (!deal) return { eligible: false, messages: ["Select a marketing deal."] };
     const type = String(deal.type || "").trim().toLowerCase();
@@ -1771,15 +1786,16 @@ function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))
     const isBundle = ["buy x get x", "buy x get y", "meal deals"].includes(type);
 
     if (isBundle) {
-        const rewardId = type === "buy x get x"
-            ? (selectedIds.length ? null : deal.itemId)
-            : (deal.rewardItemId || (type === "meal deals" ? deal.itemId : null));
+        const rewardIds = type === "buy x get x"
+            ? (selectedIds.length ? [] : deal.itemId ? [String(deal.itemId)] : [])
+            : marketingDealRewardIds(deal);
+        if (!rewardIds.length && type === "meal deals" && deal.itemId) rewardIds.push(String(deal.itemId));
         const rewardIndexes = lines.map((line, index) => {
             const itemId = line.item?.id ?? line.item?.menuId ?? line.item?.menu_id;
-            return rewardId ? (String(itemId) === String(rewardId) ? index : -1) : (marketingDealAppliesToLine(deal, line) ? index : -1);
+            return rewardIds.length ? (rewardIds.includes(String(itemId)) ? index : -1) : (marketingDealAppliesToLine(deal, line) ? index : -1);
         }).filter(index => index >= 0);
         const rewardQuantity = rewardIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
-        const rewardIsAlsoEligible = !rewardId || rewardIndexes.some(index => eligibleIndexes.includes(index));
+        const rewardIsAlsoEligible = !rewardIds.length || rewardIndexes.some(index => eligibleIndexes.includes(index));
 
         if (rewardIsAlsoEligible) {
             const neededForFirstReward = Math.max(minimumQuantity, buyQuantity + getQuantity);
@@ -1788,8 +1804,8 @@ function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))
             } else {
                 const possibleFreeQuantity = Math.floor(eligibleQuantity / (buyQuantity + getQuantity)) * getQuantity;
                 if (rewardQuantity < possibleFreeQuantity) {
-                    const rewardName = rewardIndexes.length ? lines[rewardIndexes[0]].item.name : "reward";
-                    messages.push(`Add ${possibleFreeQuantity - rewardQuantity} more ${rewardName} reward item(s) to receive the full deal.`);
+                    const rewardLabel = rewardIds.length > 1 ? "selected" : rewardIndexes.length ? lines[rewardIndexes[0]].item.name : "reward";
+                    messages.push(`Add ${possibleFreeQuantity - rewardQuantity} more ${rewardLabel} reward item(s) to receive the full deal.`);
                 }
             }
         } else {
@@ -1799,8 +1815,8 @@ function marketingDealCartEligibility(deal, lines = cart.map(item => ({ item }))
             const possibleFreeQuantity = Math.floor(eligibleQuantity / buyQuantity) * getQuantity;
             const requiredRewardQuantity = Math.max(getQuantity, possibleFreeQuantity);
             if (rewardQuantity < requiredRewardQuantity) {
-                const rewardName = rewardId
-                    ? (currentMenu.find(item => String(item.id) === String(rewardId))?.name || "selected")
+                const rewardName = rewardIds.length
+                    ? (rewardIds.length > 1 ? "selected" : currentMenu.find(item => String(item.id) === String(rewardIds[0]))?.name || "selected")
                     : "eligible";
                 messages.push(`Add ${requiredRewardQuantity - rewardQuantity} more ${rewardName} reward item(s) (current order: ${rewardQuantity}/${requiredRewardQuantity}).`);
             }
@@ -1854,10 +1870,13 @@ function marketingDiscountPlan(rule, lines) {
     }
 
     if (hasReward) {
-        const rewardId = type === "buy x get x" ? (Array.isArray(rule.itemIds)&&rule.itemIds.length?null:rule.itemId) : (rule.rewardItemId || (type === "meal deals" ? rule.itemId : null));
+        const rewardIds = type === "buy x get x"
+            ? (Array.isArray(rule.itemIds) && rule.itemIds.length ? [] : rule.itemId ? [String(rule.itemId)] : [])
+            : marketingDealRewardIds(rule);
+        if (!rewardIds.length && type === "meal deals" && rule.itemId) rewardIds.push(String(rule.itemId));
         const rewardIndexes = lines.map((line, index) => {
             const itemId = line.item?.id ?? line.item?.menuId ?? line.item?.menu_id;
-            return rewardId ? (String(itemId) === String(rewardId) ? index : -1) : (marketingDealAppliesToLine(rule, line) ? index : -1);
+            return rewardIds.length ? (rewardIds.includes(String(itemId)) ? index : -1) : (marketingDealAppliesToLine(rule, line) ? index : -1);
         }).filter(index => index >= 0);
         const getQuantity = Math.max(1, Math.floor(Number(rule.getQuantity || 1)));
         const rewardQuantity = rewardIndexes.reduce((sum, index) => sum + Math.max(0, Number(lines[index].item.quantity || 0)), 0);
@@ -2112,11 +2131,7 @@ function updateCart() {
         row.className =
             "cart-item";
 
-
-        const lineDiscount=getCartItemDiscountAmount(item);
-        const discountRule=getSelectedBillingAdjustment(item.itemDiscountRuleId);
-        const itemDiscountRules=availableItemDiscountRules();
-        const discountControl=itemDiscountRules.length?`<label class="cart-item-discount-control"><span>Item discount</span><select aria-label="Item discount for ${esc(item.name)}" onchange="setCartItemDiscount(${index},this.value)"><option value="">No discount</option>${itemDiscountRules.map(rule=>`<option value="${rule.id}" ${Number(item.itemDiscountRuleId)===Number(rule.id)?'selected':''}>${esc(rule.name)} · ${rule.calculation==="percent"?`${esc(rule.value)}%`:money(rule.value)}</option>`).join('')}</select></label>`:"";
+        const lineDiscount = getCartItemDiscountAmount(item);
 
         row.innerHTML = `
 
@@ -2130,9 +2145,6 @@ function updateCart() {
                 <small>
                     ${money(item.price)} each
                 </small>
-                ${lineDiscount>0?`<small class="cart-item-discount-note">${esc(discountRule?.name||'Item discount')} · −${money(lineDiscount)}</small>`:''}
-                ${discountControl}
-
             </div>
 
 
@@ -2232,15 +2244,14 @@ function defaultPOSChannelPreferences() {
 }
 function normalizePOSChannelPreferences(value) {
     const defaults = defaultPOSChannelPreferences();
-    const normalizeModule = function(moduleValue, fallback) {
-        const moduleType = fallback === defaults.tableView ? "Dine-in" : "Takeaway";
-        const valid = Array.isArray(moduleValue?.channels) ? moduleValue.channels.filter(key => POS_CHANNELS.some(channel => channel.key === key && channel.orderType === moduleType)) : [];
+    const normalizeModule = function(moduleValue, fallback, moduleKey) {
+        const valid = Array.isArray(moduleValue?.channels) ? moduleValue.channels.filter(key => POS_CHANNELS.some(channel => channel.key === key && (moduleKey === "newOrder" || channel.orderType === "Dine-in"))) : [];
         const channels = valid.length ? [...new Set(valid)] : fallback.channels.slice();
         const defaultChannel = channels.includes(moduleValue?.defaultChannel) ? moduleValue.defaultChannel : channels[0];
         return { channels, defaultChannel };
     };
-    const newOrder = normalizeModule(value?.newOrder, defaults.newOrder);
-    const tableView = normalizeModule(value?.tableView, defaults.tableView);
+    const newOrder = normalizeModule(value?.newOrder, defaults.newOrder, "newOrder");
+    const tableView = normalizeModule(value?.tableView, defaults.tableView, "tableView");
     return {
         newOrder,
         tableView
@@ -2259,8 +2270,8 @@ function renderBillingSaleChannelOptions() {
     const select = document.getElementById("billingSaleChannel");
     if (!select) return;
     const preferences = getPOSChannelPreferences();
-    const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
-    const channels = modulePrefs.channels.length ? modulePrefs.channels : POS_CHANNELS.filter(channel => channel.orderType === orderType).map(channel => channel.key);
+    const modulePrefs = preferences[currentBillingPOSModuleKey] || preferences.newOrder;
+    const channels = modulePrefs.channels.length ? modulePrefs.channels : (currentBillingPOSModuleKey === "tableView" ? POS_CHANNELS.filter(channel => channel.orderType === "Dine-in") : POS_CHANNELS).map(channel => channel.key);
     if (!channels.includes(selectedPOSChannelKey)) {
         selectedPOSChannelKey = channels.includes(modulePrefs.defaultChannel)
             ? modulePrefs.defaultChannel
@@ -2320,7 +2331,7 @@ function clearNewOrderDraft() {
 }
 async function selectBillingSaleChannel(channelKey) {
     const preferences = getPOSChannelPreferences();
-    const modulePrefs = orderType === "Dine-in" ? preferences.tableView : preferences.newOrder;
+    const modulePrefs = preferences[currentBillingPOSModuleKey] || preferences.newOrder;
     if (!modulePrefs.channels.includes(channelKey)) return;
     const channel = getSaleChannel(channelKey);
     if (!channel) return;
@@ -3388,7 +3399,8 @@ async function payOpenOrder(orderId) {
             itemDiscountRuleId: Number(item.item_discount_rule_id)||null
         }));
         orderType = order.order_type || "Dine-in";
-        setOrderType(orderType);
+        currentBillingPOSModuleKey = order.table_number ? "tableView" : "newOrder";
+        setOrderType(orderType, true);
         if (getSaleChannel(order.sales_channel_key)?.orderType === orderType) {
             selectedPOSChannelKey=order.sales_channel_key;
             renderBillingSaleChannelOptions();
@@ -7488,7 +7500,8 @@ async function editOpenOrder(orderId) {
             itemDiscountRuleId: Number(item.item_discount_rule_id)||null
         }));
         orderType = data.order.order_type || "Dine-in";
-        setOrderType(orderType);
+        currentBillingPOSModuleKey = data.order.table_number ? "tableView" : "newOrder";
+        setOrderType(orderType, true);
         if (getSaleChannel(data.order.sales_channel_key)?.orderType === orderType) {
             selectedPOSChannelKey=data.order.sales_channel_key;
             renderBillingSaleChannelOptions();
@@ -7697,9 +7710,10 @@ function renderMarketingDeals() {
 function populateMarketingDealOptions(selected = {}) {
     const categoryOptions = document.getElementById("marketingDealCategoryOptions");
     const itemOptions = document.getElementById("marketingDealItemOptions");
-    const rewardSelect = document.getElementById("marketingRewardItem");
+    const rewardOptions = document.getElementById("marketingRewardItemOptions");
     const existingCategories = [...(categoryOptions?.querySelectorAll('input:checked') || [])].map(input => input.value);
     const existingItems = [...(itemOptions?.querySelectorAll('input:checked') || [])].map(input => input.value);
+    const existingRewards = [...(rewardOptions?.querySelectorAll('input:checked') || [])].map(input => input.value);
     const hasSelectedCategories = Object.prototype.hasOwnProperty.call(selected, "categories") || Object.prototype.hasOwnProperty.call(selected, "category");
     const selectedCategories = hasSelectedCategories
         ? (Array.isArray(selected.categories) ? selected.categories : (selected.category ? [selected.category] : [])).map(value => String(value || "").trim()).filter(Boolean)
@@ -7707,8 +7721,13 @@ function populateMarketingDealOptions(selected = {}) {
     const selectedIds = Array.isArray(selected.itemIds)
         ? selected.itemIds
         : selected.itemId ? [selected.itemId] : existingItems;
+    const hasRewardSelection = Object.prototype.hasOwnProperty.call(selected, "rewardItemIds") || Object.prototype.hasOwnProperty.call(selected, "rewardItemId");
+    const selectedRewardIds = hasRewardSelection
+        ? (Array.isArray(selected.rewardItemIds) ? selected.rewardItemIds : selected.rewardItemId ? [selected.rewardItemId] : [])
+        : existingRewards;
     const chosenCategories = new Set(selectedCategories.map(value => value.toLowerCase()));
     const chosenItems = new Set((Array.isArray(selectedIds) ? selectedIds : []).map(String));
+    const chosenRewards = new Set((Array.isArray(selectedRewardIds) ? selectedRewardIds : []).map(String));
     const categories = [...new Set([
         ...(menuCategories || []).filter(category => category.active !== false).map(category => String(category.name || "").trim()),
         ...currentMenu.map(item => String(item.category || "").trim()),
@@ -7732,13 +7751,17 @@ function populateMarketingDealOptions(selected = {}) {
             return `<label class="marketing-picker-option"><input type="checkbox" value="${value}" ${chosenItems.has(String(item.id)) ? "checked" : ""} onchange="updateMarketingDealPickerSummary()"><span><strong>${name}</strong><small>${category}</small></span></label>`;
         }).join("") : '<div class="marketing-picker-empty">No menu items in these categories.</div>';
     }
-    if (rewardSelect) {
-        const previousReward = selected.rewardItemId || rewardSelect.value || "";
-        rewardSelect.innerHTML = '<option value="">Same item</option>' + currentMenu.map(item => `<option value="${esc(item.id)}">${esc(item.name)} · ${esc(item.category||"Uncategorized")}</option>`).join("");
-        rewardSelect.value = currentMenu.some(item => String(item.id) === String(previousReward)) ? String(previousReward) : "";
+    if (rewardOptions) {
+        rewardOptions.innerHTML = currentMenu.length ? currentMenu.map(item => {
+            const value = esc(item.id);
+            const name = esc(item.name);
+            const category = esc(item.category || "Uncategorized");
+            return `<label class="marketing-picker-option"><input type="checkbox" value="${value}" ${chosenRewards.has(String(item.id)) ? "checked" : ""} onchange="updateMarketingRewardPickerSummary()"><span><strong>${name}</strong><small>${category}</small></span></label>`;
+        }).join("") : '<div class="marketing-picker-empty">No menu items available.</div>';
     }
     filterMarketingDealCategories(document.getElementById("marketingDealCategorySearch")?.value || "");
     filterMarketingDealItems(document.getElementById("marketingDealItemSearch")?.value || "");
+    filterMarketingRewardItems(document.getElementById("marketingRewardItemSearch")?.value || "");
 }
 function handleMarketingDealCategoriesChange() {
     const categories = [...(document.querySelectorAll("#marketingDealCategoryOptions input:checked"))].map(input => input.value);
@@ -7772,6 +7795,22 @@ function filterMarketingDealItems(value = "") {
         summary.textContent = labels.length && !visible ? "No menu items match your search." : selected ? `${selected} selected` : "Leave blank to include all items in the selected categories.";
     }
 }
+function updateMarketingRewardPickerSummary() {
+    const selected = document.querySelectorAll("#marketingRewardItemOptions input:checked").length;
+    const summary = document.getElementById("marketingRewardItemSummary");
+    if (summary) summary.textContent = selected ? `${selected} reward ${selected === 1 ? "item" : "items"} selected` : "Leave blank to use eligible items as rewards.";
+}
+function filterMarketingRewardItems(value = "") {
+    const term = String(value || "").trim().toLowerCase();
+    const labels = [...document.querySelectorAll("#marketingRewardItemOptions .marketing-picker-option")];
+    let visible = 0;
+    labels.forEach(label => { const matches = !term || label.textContent.toLowerCase().includes(term); label.hidden = !matches; if (matches) visible++; });
+    const summary = document.getElementById("marketingRewardItemSummary");
+    if (summary) {
+        const selected = document.querySelectorAll("#marketingRewardItemOptions input:checked").length;
+        summary.textContent = labels.length && !visible ? "No reward items match your search." : selected ? `${selected} reward ${selected === 1 ? "item" : "items"} selected` : "Leave blank to use eligible items as rewards.";
+    }
+}
 function marketingDealOfferLabel(deal) {
     const type = String(deal?.type || "").trim().toLowerCase();
     const buy = Math.max(1, Math.floor(Number(deal?.buyQuantity || 1)));
@@ -7779,7 +7818,10 @@ function marketingDealOfferLabel(deal) {
     const bundlePrice = Number(deal?.bundlePrice || 0);
     if (bundlePrice > 0) {
         const priceLabel = money(bundlePrice);
-        const rewardName = String(deal?.rewardItemName || currentMenu.find(item => String(item.id) === String(deal?.rewardItemId))?.name || "").trim();
+        const rewardNames = Array.isArray(deal?.rewardItemNames) && deal.rewardItemNames.length
+            ? deal.rewardItemNames
+            : marketingDealRewardIds(deal).map(id => currentMenu.find(item => String(item.id) === id)?.name).filter(Boolean);
+        const rewardName = rewardNames.length > 1 ? `one of ${rewardNames.slice(0, 2).join(" or ")}${rewardNames.length > 2 ? "…" : ""}` : String(deal?.rewardItemName || rewardNames[0] || "").trim();
         const rewardLabel = rewardName ? (get === 1 ? `Get ${rewardName} free` : `Get ${get} × ${rewardName} free`) : `Get ${get} free`;
         return ["buy x get x", "buy x get y", "meal deals"].includes(type)
             ? `Buy ${buy} for ${priceLabel} · ${rewardLabel}`
@@ -7859,8 +7901,11 @@ async function saveMarketingDeal() {
     const selectedCategories=[...document.querySelectorAll("#marketingDealCategoryOptions input:checked")].map(input=>input.value).filter(Boolean);
     const selectedItemIds=[...document.querySelectorAll("#marketingDealItemOptions input:checked")].map(input=>input.value).filter(Boolean);
     const selectedItems=currentMenu.filter(item=>selectedItemIds.includes(String(item.id)));
-    const rewardItemId = document.getElementById("marketingRewardItem").value || null;
-    const rewardItemName = currentMenu.find(item => String(item.id) === String(rewardItemId))?.name || prior?.rewardItemName || null;
+    const rewardItemIds = [...document.querySelectorAll("#marketingRewardItemOptions input:checked")].map(input => input.value).filter(Boolean);
+    const rewardItems = currentMenu.filter(item => rewardItemIds.includes(String(item.id)));
+    const rewardItemId = rewardItemIds[0] || null;
+    const rewardItemNames = rewardItems.map(item => item.name);
+    const rewardItemName = rewardItemNames[0] || null;
     const deal = {
         id: prior?.id || String(Date.now()), name, description: document.getElementById("marketingDealDescription").value.trim().slice(0, 240), type,
         category: selectedCategories[0] || "",
@@ -7873,6 +7918,8 @@ async function saveMarketingDeal() {
         getQuantity: Math.max(1, Math.floor(Number(document.getElementById("marketingGetQuantity").value || 1))),
         rewardItemId,
         rewardItemName,
+        rewardItemIds,
+        rewardItemNames,
         bundlePrice: supportsBundlePrice ? bundlePrice : null,
         valueType: document.getElementById("marketingValueType").value,
         value: Math.max(0, Number(document.getElementById("marketingDealValue").value || 0)),
@@ -7943,6 +7990,7 @@ async function selectBillingTable(tableNumber, status) {
         }
     }
 
+    currentBillingPOSModuleKey = "tableView";
     selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
     setOrderType("Dine-in", true);
     setBillingPaxForTable(tableNumber, document.getElementById("billingPax")?.value || 1);
@@ -8380,7 +8428,11 @@ async function saveSettings() {
     appSettings = { ...appSettings, ...next };
     delete appSettings.publicMenuHeroImages;
     if (!currentOpenOrderId) {
-        setOrderType(orderType === "Dine-in" ? "Dine-in" : "Takeaway");
+        currentBillingPOSModuleKey = "newOrder";
+        const defaultChannelKey = getPOSChannelPreferences().newOrder.defaultChannel;
+        const defaultChannel = getSaleChannel(defaultChannelKey);
+        selectedPOSChannelKey = defaultChannelKey;
+        setOrderType(defaultChannel?.orderType || "Takeaway", true);
     } else {
         renderBillingSaleChannelOptions();
     }

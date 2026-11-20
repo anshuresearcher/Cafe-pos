@@ -9788,10 +9788,11 @@ app.put("/api/settings/sales-channels", async (req, res) => {
         }) : settings.marketingDeals;
         const preferences = {};
         for (const [name, orderType] of [["newOrder", "Takeaway"], ["tableView", "Dine-in"]]) {
-            const available = channels.filter(channel => channel.orderType === orderType).map(channel => channel.key);
+            const available = channels.filter(channel => name === "newOrder" || channel.orderType === orderType).map(channel => channel.key);
+            const fallbackChannels = name === "newOrder" ? channels.filter(channel => channel.orderType === orderType).map(channel => channel.key) : available;
             const current = settings.posChannelPreferences?.[name] || {};
             const selected = Array.isArray(current.channels) ? current.channels.filter(key => available.includes(key)) : [];
-            const selectedChannels = selected.length ? [...new Set(selected)] : available;
+            const selectedChannels = selected.length ? [...new Set(selected)] : fallbackChannels;
             preferences[name] = {
                 channels: selectedChannels,
                 defaultChannel: selectedChannels.includes(current.defaultChannel) ? current.defaultChannel : selectedChannels[0]
@@ -10040,6 +10041,10 @@ const TENANT_TABLES_PHASE_2A = [
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
     'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','qr_menu_events','qr_service_requests','kot_device_print_hosts','kot_device_print_jobs'
 ];
+// These tables are provisioned and secured by sql/002_counter_device_kot_printing.sql.
+// They are owned by the Supabase migration role, so the restricted runtime role
+// must verify their security and grants rather than attempting ALTER TABLE/RLS DDL.
+const TENANT_TABLES_PHASE_2A_ADMIN_MANAGED = new Set(['kot_device_print_hosts','kot_device_print_jobs']);
 
 // NOTE: Orders, order_items, reservations, KOT, payments, customers, and invoices
 // are also tenant-isolated at the database layer by the Phase 2A RLS policy above.
@@ -10119,6 +10124,32 @@ async function ensureTenantIsolationPhase2A() {
 
     for (const tableName of TENANT_TABLES_PHASE_2A) {
         console.log(`🔧 Phase 2A: migrating table ${tableName}`);
+        if (TENANT_TABLES_PHASE_2A_ADMIN_MANAGED.has(tableName)) {
+            const security = await pool.query(`
+                SELECT c.relrowsecurity AS rls_enabled,
+                       c.relforcerowsecurity AS rls_forced,
+                       EXISTS (
+                           SELECT 1 FROM pg_policies p
+                           WHERE p.schemaname='public' AND p.tablename=$1 AND p.policyname='tenant_isolation'
+                       ) AS has_tenant_policy,
+                       has_table_privilege(current_user, 'public.' || $1, 'SELECT') AS can_select,
+                       has_table_privilege(current_user, 'public.' || $1, 'INSERT') AS can_insert,
+                       has_table_privilege(current_user, 'public.' || $1, 'UPDATE') AS can_update,
+                       CASE WHEN $1='kot_device_print_jobs'
+                           THEN has_sequence_privilege(current_user, 'public.kot_device_print_jobs_id_seq', 'USAGE')
+                           ELSE TRUE
+                       END AS can_use_id_sequence
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid=c.relnamespace
+                WHERE n.nspname='public' AND c.relname=$1 AND c.relkind='r'
+            `, [tableName]);
+            const state = security.rows[0];
+            if (!state || !state.rls_enabled || !state.rls_forced || !state.has_tenant_policy || !state.can_select || !state.can_insert || !state.can_update || !state.can_use_id_sequence) {
+                throw new Error(`Counter ticket printing table ${tableName} is missing its tenant policy or cafe_pos_runtime grants. Apply sql/002_counter_device_kot_printing.sql in Supabase using a table-owner role, then restart the server.`);
+            }
+            console.log(`✅ ${tableName} tenant policy and runtime grants are ready; skipping owner-only DDL`);
+            continue;
+        }
         if (!(await tableExists(tableName))) continue;
         const safeTable=String(tableName).replace(/"/g,'""');
         await pool.query(`ALTER TABLE "${safeTable}" ADD COLUMN IF NOT EXISTS business_id INTEGER REFERENCES businesses(id) ON DELETE CASCADE`);
