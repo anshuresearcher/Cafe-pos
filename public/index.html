@@ -578,7 +578,7 @@
 
                 <div class="billing-workspace">
                     <aside class="billing-category-panel">
-                        <div class="billing-panel-heading"><strong>Categories</strong><span>Menu</span></div>
+                        <div class="billing-panel-heading billing-category-heading"><strong>Categories</strong><label class="billing-menu-account-wrap"><select id="billingMenuAccountSelect" aria-label="Menu account" onchange="selectBillingMenuAccount(this.value)"><option value="all">All accounts</option></select></label></div>
                         <div id="billingCategorySidebar" class="billing-category-sidebar" aria-label="Menu categories"></div>
                     </aside>
 
@@ -670,13 +670,14 @@
         <section id="table-view" class="page billing-table-view-page">
             <div id="tableArea" class="billing-tables-area table-view-workspace">
                 <section class="table-view-list-panel" aria-label="Restaurant tables">
-                    <div class="table-view-list-heading"><div><strong>Select a table</strong><span id="billingTableHint">Choose any table to see its order.</span></div><small id="tableViewVisibleCount">Loading tables…</small></div>
+                    <div class="table-view-list-heading"><div><strong>Select a table</strong><span id="billingTableHint">Choose any table to see its order.</span></div><div class="table-view-heading-actions"><small id="tableViewVisibleCount">Loading tables…</small><button type="button" class="table-view-adhoc-button" onclick="openAdhocTableDrawer()">＋ Adhoc table</button></div></div>
                     <div class="table-view-filters" role="group" aria-label="Filter tables by status">
                         <button type="button" class="active" data-table-view-filter="all" aria-pressed="true" onclick="setTableViewFilter('all')">All <span id="tableViewAllCount">0</span></button>
                         <button type="button" data-table-view-filter="available" aria-pressed="false" onclick="setTableViewFilter('available')">Available <span id="tableViewAvailableCount">0</span></button>
                         <button type="button" data-table-view-filter="occupied" aria-pressed="false" onclick="setTableViewFilter('occupied')">Occupied <span id="tableViewOccupiedCount">0</span></button>
                         <button type="button" data-table-view-filter="reserved" aria-pressed="false" onclick="setTableViewFilter('reserved')">Reserved <span id="tableViewReservedCount">0</span></button>
                     </div>
+                    <div id="tableViewAreaFilters" class="table-view-area-filters" role="group" aria-label="Filter tables by area"></div>
                     <div id="billingTablesGrid" class="billing-tables-grid"></div>
                 </section>
                 <aside id="tableViewOrderPanel" class="table-view-order-panel" aria-label="Selected table order" aria-live="polite">
@@ -1058,6 +1059,7 @@
           <div id="menuModuleOverview" class="module-card-grid">
             <button type="button" class="module-navigation-card" onclick="showMenuModuleView('items')"><span class="module-card-icon">🍽️</span><span class="module-card-copy"><strong>Menu Items</strong><span>Manage item prices, availability, variants and KOT routing.</span><small><b id="menuItemCount">0</b> items</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
             <button type="button" class="module-navigation-card" onclick="showMenuModuleView('categories')"><span class="module-card-icon">🗂️</span><span class="module-card-copy"><strong>Categories</strong><span>Organize the menu into categories for ordering and reports.</span><small><b id="menuCategoryCount">0</b> categories</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+            <button type="button" class="module-navigation-card" onclick="showMenuModuleView('accounts')"><span class="module-card-icon">▤</span><span class="module-card-copy"><strong>Menu Accounts</strong><span>Group categories and switch menu sections while billing.</span><small><b id="menuAccountCount">0</b> accounts</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
             <button type="button" class="module-navigation-card" onclick="showMenuModuleView('options')"><span class="module-card-icon">🧩</span><span class="module-card-copy"><strong>Item option</strong><span>Manage option sets and choices attached to menu items.</span><small><b id="menuOptionSetCount">0</b> option sets</small></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
           </div>
           <div id="menuDetailHeader" class="module-subpage-header" hidden><button type="button" class="module-back-button" onclick="showMenuModuleView('overview')">← Menu</button><div><span class="module-eyebrow">MENU MANAGEMENT</span><h2 id="menuDetailTitle">Menu Items</h2><p id="menuDetailDescription">Manage your catalog.</p></div></div>
@@ -1066,6 +1068,7 @@
             <div class="menu-list"></div>
           </div>
           <div id="menuCategoriesPanel" hidden><div class="dashboard-box menu-category-master-box"><div class="menu-category-toolbar"><div class="menu-category-toolbar-copy"><p class="access-muted">Create categories once, then select them while creating menu items.</p><label class="menu-category-search"><span aria-hidden="true">⌕</span><input id="menuCategorySearch" type="search" placeholder="Search categories..." oninput="renderMenuCategoryMaster()" aria-label="Search menu categories"></label></div><button class="big-btn" type="button" onclick="openMenuCategoryModal()">＋ Add Category</button></div><div id="menuCategoryMasterGrid" class="menu-category-master-grid"></div></div></div>
+          <div id="menuAccountsPanel" hidden><div class="dashboard-box menu-account-master-box"><div class="menu-account-toolbar"><div><span class="menu-eyebrow">BILLING GROUPS</span><h3>Menu Accounts</h3><p>Create an account such as Italian, then map its categories. Select it in billing to show only those categories.</p></div></div><div class="menu-account-editor"><input id="menuAccountEditingId" type="hidden"><label class="menu-account-name-field" for="menuAccountName">Account name<input id="menuAccountName" type="text" maxlength="80" placeholder="e.g. Italian" autocomplete="off"></label><section class="menu-account-category-field" aria-labelledby="menuAccountCategoryHeading"><div class="menu-account-category-heading"><strong id="menuAccountCategoryHeading">Map menu categories</strong><small>Choose one or more categories for this account.</small></div><div id="menuAccountCategoryOptions" class="menu-account-category-options"></div><small id="menuAccountCategorySummary" class="menu-account-category-summary">Select the categories included in this account.</small></section><div class="menu-account-editor-actions"><button id="menuAccountSaveButton" type="button" class="big-btn" onclick="saveMenuAccount()">Create account</button><button id="menuAccountCancelButton" type="button" class="cancel-btn" onclick="resetMenuAccountForm()" hidden>Cancel edit</button></div></div><div id="menuAccountsList" class="menu-account-list"></div></div></div>
           <div id="menuOptionsPanel" hidden><div class="menu-management-header menu-option-sets-header"><div><span class="menu-eyebrow">MENU OPTIONS</span><h3>Item option sets</h3><p>Create choices such as sizes, add-ons or preferences, then attach them to menu items.</p></div><div class="menu-management-actions"><button type="button" class="big-btn" onclick="openOptionSetsModal()">⚙️ Manage option sets</button></div></div><div id="menuOptionSetOverviewList" class="menu-option-set-overview-grid"></div></div>
         </section>
 
@@ -1733,7 +1736,14 @@
             </div>
         </div>
 
-        <div class="settings-card pos-preferences-card" data-settings-feature="pos-preferences" hidden>
+            <div class="settings-card table-area-settings-card" data-settings-feature="table-areas" hidden>
+                <div class="table-area-settings-heading"><span class="table-area-settings-icon" aria-hidden="true">▦</span><div><span class="eyebrow">FLOOR PLAN</span><h3>Table Areas</h3><p class="access-muted">Create groups such as Indoor and Outdoor, then assign each table to an area.</p></div></div>
+                <div class="table-area-add-row"><label class="sr-only" for="newTableAreaName">New area name</label><input id="newTableAreaName" type="text" maxlength="80" placeholder="e.g. Indoor" onkeydown="if(event.key==='Enter'){event.preventDefault();addTableArea();}"><button type="button" class="big-btn" onclick="addTableArea()">＋ Add Area</button></div>
+                <div id="tableAreasSaveStatus" class="table-area-save-status" role="status" aria-live="polite"></div>
+                <div id="tableAreasList" class="table-area-settings-list"></div>
+            </div>
+
+            <div class="settings-card pos-preferences-card" data-settings-feature="pos-preferences" hidden>
             <div class="settings-master-header">
                 <div>
                     <span class="eyebrow">POINT OF SALE</span>
@@ -2709,6 +2719,11 @@
 
             </div>
 
+            <div class="form-group">
+                <label for="editTableArea">Area</label>
+                <select id="editTableArea"><option value="">No area</option></select>
+            </div>
+
 
 
             <div class="modal-actions">
@@ -2816,6 +2831,11 @@
 
             </div>
 
+            <div class="form-group">
+                <label for="newTableArea">Area</label>
+                <select id="newTableArea"><option value="">No area</option></select>
+            </div>
+
 
 
             <div class="modal-actions">
@@ -2850,6 +2870,25 @@
     </div>
 
 
+
+    <div id="adhocTableOverlay" class="adhoc-table-overlay" hidden onclick="closeAdhocTableDrawer()"></div>
+    <aside id="adhocTableDrawer" class="adhoc-table-drawer" role="dialog" aria-modal="true" aria-labelledby="adhocTableTitle" hidden>
+        <header class="adhoc-table-drawer-header">
+            <h2 id="adhocTableTitle">Add Adhoc Table</h2>
+            <button type="button" class="adhoc-table-close" onclick="closeAdhocTableDrawer()" aria-label="Close">×</button>
+        </header>
+        <div class="adhoc-table-drawer-body">
+            <label class="adhoc-table-field"><span>Table Name</span><span class="adhoc-table-name-control"><span class="adhoc-table-prefix">Adhoc</span><input id="adhocTableName" type="text" maxlength="74" autocomplete="off" placeholder="e.g. Patio 1" aria-label="Custom adhoc table name"></span></label>
+            <label class="adhoc-table-field"><span>Guest Count</span><span class="adhoc-table-stepper"><button type="button" onclick="adjustAdhocGuestCount(-1)" aria-label="Decrease guest count">−</button><input id="adhocGuestCount" type="number" min="1" max="100" value="1" inputmode="numeric" aria-label="Guest count"><button type="button" onclick="adjustAdhocGuestCount(1)" aria-label="Increase guest count">＋</button></span></label>
+            <label class="adhoc-table-field"><span>Area <small>Optional</small></span><select id="adhocTableArea"><option value="">No area</option></select></label>
+            <label class="adhoc-table-field"><span>Server Name</span><select id="adhocTableServer"><option value="SYSTEM">SYSTEM</option></select></label>
+            <p class="adhoc-table-expiry-note"><span aria-hidden="true">ⓘ</span><span>This adhoc table is removed only after its order is settled. The order remains in order history.</span></p>
+        </div>
+        <footer class="adhoc-table-drawer-footer">
+            <button type="button" class="cancel-btn" onclick="closeAdhocTableDrawer()">Cancel</button>
+            <button type="button" class="big-btn" id="adhocTableSaveButton" onclick="saveAdhocTable()">Save</button>
+        </footer>
+    </aside>
 
     <div id="orderActivityModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="orderActivityTitle">
         <div class="modal-content order-activity-dialog">

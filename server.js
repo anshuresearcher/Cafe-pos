@@ -447,27 +447,42 @@ async function ensureBusinessTable() {
     `);
 
     const columnMigrations = [
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_code VARCHAR(100)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_name VARCHAR(200)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_type VARCHAR(80) DEFAULT 'Cafe'`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS owner_name VARCHAR(150)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS phone VARCHAR(40)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS email VARCHAR(180)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS address TEXT`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS city VARCHAR(100)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS state VARCHAR(100)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS gstin VARCHAR(40)`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS logo_url TEXT`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT '₹'`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP`,
+        { column: 'business_code', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_code VARCHAR(100)` },
+        { column: 'business_name', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_name VARCHAR(200)` },
+        { column: 'business_type', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS business_type VARCHAR(80) DEFAULT 'Cafe'` },
+        { column: 'owner_name', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS owner_name VARCHAR(150)` },
+        { column: 'phone', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS phone VARCHAR(40)` },
+        { column: 'email', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS email VARCHAR(180)` },
+        { column: 'address', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS address TEXT` },
+        { column: 'city', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS city VARCHAR(100)` },
+        { column: 'state', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS state VARCHAR(100)` },
+        { column: 'gstin', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS gstin VARCHAR(40)` },
+        { column: 'logo_url', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS logo_url TEXT` },
+        { column: 'currency', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS currency VARCHAR(10) DEFAULT '₹'` },
+        { column: 'active', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE` },
+        { column: 'created_at', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP` },
+        { column: 'updated_at', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP` },
         // Some earlier Phase 1 experiments added authentication fields directly
         // to businesses. Keep the column for compatibility but do not require it;
         // authentication now belongs to app_users.
-        `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS password_hash TEXT`
+        { column: 'password_hash', sql: `ALTER TABLE businesses ADD COLUMN IF NOT EXISTS password_hash TEXT` }
     ];
-    for (const sql of columnMigrations) await pool.query(sql);
+    const businessColumnResult = await pool.query(`
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='businesses'
+    `);
+    const existingBusinessColumns = new Set(businessColumnResult.rows.map(row => String(row.column_name).toLowerCase()));
+    for (const migration of columnMigrations) {
+        if (existingBusinessColumns.has(migration.column)) continue;
+        try {
+            await pool.query(migration.sql);
+            existingBusinessColumns.add(migration.column);
+        } catch (error) {
+            console.error(`Business table migration failed for businesses.${migration.column}:`, error.message);
+            throw error;
+        }
+    }
 
     // Compatibility migration for older business schemas: any legacy required
     // columns outside the current canonical business model must not block a new
@@ -3979,19 +3994,92 @@ app.put(
 // TABLES
 // =====================================================
 
+async function readRestaurantTableSettings(db, businessId, lock = false) {
+    const result = await db.query(
+        `SELECT settings FROM app_settings WHERE business_id=$1${lock ? " FOR UPDATE" : ""}`,
+        [Number(businessId)]
+    );
+    return result.rows[0]?.settings || {};
+}
+
+async function saveRestaurantTableMetadata(db, businessId, tableNumber, metadata, previousTableNumber = "") {
+    const settings = await readRestaurantTableSettings(db, businessId, true);
+    const tableMetadata = settings.restaurantTableMetadata && typeof settings.restaurantTableMetadata === "object" && !Array.isArray(settings.restaurantTableMetadata)
+        ? { ...settings.restaurantTableMetadata }
+        : {};
+    if (previousTableNumber) delete tableMetadata[String(previousTableNumber)];
+    if (metadata) tableMetadata[String(tableNumber)] = metadata;
+    else delete tableMetadata[String(tableNumber)];
+    await db.query(`
+        INSERT INTO app_settings(id,business_id,settings,updated_at)
+        VALUES($1,$1,$2::jsonb,CURRENT_TIMESTAMP)
+        ON CONFLICT(business_id) DO UPDATE
+        SET settings=COALESCE(app_settings.settings,'{}'::jsonb) || EXCLUDED.settings,
+            updated_at=CURRENT_TIMESTAMP
+    `, [Number(businessId), JSON.stringify({ restaurantTableMetadata: tableMetadata })]);
+}
+
+async function validateRestaurantTableArea(db, businessId, areaId) {
+    const normalizedAreaId = String(areaId || "").trim().slice(0, 80);
+    if (!normalizedAreaId) return "";
+    const settings = await readRestaurantTableSettings(db, businessId);
+    const areas = Array.isArray(settings.tableAreas) ? settings.tableAreas : [];
+    if (!areas.some(area => String(area?.id || "") === normalizedAreaId)) {
+        throw Object.assign(new Error("Choose a valid table area from Settings."), { status: 400 });
+    }
+    return normalizedAreaId;
+}
+
 app.get(
     "/api/tables",
     async (req, res) => {
         try {
-            await syncDueReservationsForBusiness(pool, Number(req.user.business_id));
+            const businessId = Number(req.user.business_id);
+            await syncDueReservationsForBusiness(pool, businessId);
+            await pool.query(`
+                UPDATE restaurant_tables t
+                SET status='Available'
+                WHERE t.business_id=$1 AND LOWER(COALESCE(t.status,''))='occupied'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM orders o
+                      WHERE o.business_id=t.business_id
+                        AND (o.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND o.table_number::text=t.id::text))
+                        AND LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled')
+                  )
+                  AND (
+                      SELECT LOWER(COALESCE(latest.status,''))
+                      FROM orders latest
+                      WHERE latest.business_id=t.business_id
+                        AND (latest.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND latest.table_number::text=t.id::text))
+                      ORDER BY latest.updated_at DESC NULLS LAST, latest.id DESC
+                      LIMIT 1
+                  ) IN ('completed','cancelled')
+            `, [businessId]);
             const result = await pool.query(`
                 SELECT *
                 FROM restaurant_tables
                 WHERE business_id = $1
                 ORDER BY id
-            `, [Number(req.user.business_id)]);
-            res.json(result.rows);
+            `, [businessId]);
+            const settings = await readRestaurantTableSettings(pool, businessId);
+            const metadata = settings.restaurantTableMetadata && typeof settings.restaurantTableMetadata === "object"
+                ? settings.restaurantTableMetadata
+                : {};
+            res.json(result.rows.map(table => {
+                const saved = metadata[String(table.table_number)] || {};
+                const areaId = String(saved.areaId || "");
+                const area = (Array.isArray(settings.tableAreas) ? settings.tableAreas : []).find(entry => String(entry?.id || "") === areaId);
+                return {
+                    ...table,
+                    area_id: areaId,
+                    area_name: String(area?.name || ""),
+                    is_temporary: saved.isTemporary === true,
+                    server_name: String(saved.serverName || ""),
+                    temporary_created_at: saved.isTemporary === true ? String(saved.createdAt || "") : ""
+                };
+            }));
         } catch (e) {
+            console.error("Table list failed:", e);
             res.status(500).json({ error: "Failed to load tables" });
         }
     }
@@ -4001,22 +4089,40 @@ app.get(
 app.post(
     "/api/tables",
     async (req, res) => {
+        let client;
         try {
             const businessId = Number(req.user.business_id);
-            const n = req.body.tableNumber || req.body.table_number;
+            const enteredName = String(req.body.tableNumber || req.body.table_number || "").trim();
             const c = Number(req.body.capacity) || 4;
-            if (!n) return res.status(400).json({ error: "Table number is required" });
+            const isTemporary = req.body.isTemporary === true;
+            const adhocSuffix = enteredName.replace(/^adhoc(?:\s+|$)/i, "").trim();
+            const n = (isTemporary ? `Adhoc ${adhocSuffix}` : enteredName).slice(0, 80);
+            if (!enteredName || (isTemporary && !adhocSuffix)) return res.status(400).json({ error: isTemporary ? "Enter a custom name after Adhoc." : "Table number is required" });
+            if (!Number.isInteger(c) || c < 1 || c > 100) return res.status(400).json({ error: "Guest count must be between 1 and 100." });
 
-            const result = await pool.query(`
+            client = await pool.connect();
+            await client.query("BEGIN");
+            const areaId = await validateRestaurantTableArea(client, businessId, req.body.areaId);
+            const result = await client.query(`
                 INSERT INTO restaurant_tables (table_number, capacity, status, business_id)
                 VALUES ($1,$2,'Available',$3)
                 RETURNING *
             `, [n, c, businessId]);
-
-            res.status(201).json({ success: true, table: result.rows[0] });
+            if (areaId || isTemporary) {
+                await saveRestaurantTableMetadata(client, businessId, n, {
+                    ...(areaId ? { areaId } : {}),
+                    ...(isTemporary ? { isTemporary: true, serverName: String(req.body.serverName || "SYSTEM").trim().slice(0, 160) || "SYSTEM", createdAt: new Date().toISOString() } : {})
+                });
+            }
+            await client.query("COMMIT");
+            res.status(201).json({ success: true, table: { ...result.rows[0], area_id: areaId, is_temporary: isTemporary, server_name: isTemporary ? String(req.body.serverName || "SYSTEM") : "" } });
         } catch (e) {
+            if (client) { try { await client.query("ROLLBACK"); } catch (_) {} }
+            if (e.status) return res.status(e.status).json({ error: e.message });
             if (e.code === "23505") return res.status(409).json({ error: "Table number already exists" });
             res.status(500).json({ error: "Failed to add table" });
+        } finally {
+            client?.release();
         }
     }
 );
@@ -4025,24 +4131,42 @@ app.post(
 app.put(
     "/api/tables/:id",
     async (req, res) => {
+        let client;
         try {
             const businessId = Number(req.user.business_id);
-            const n = req.body.tableNumber || req.body.table_number;
+            const n = String(req.body.tableNumber || req.body.table_number || "").trim().slice(0, 80);
             const c = Number(req.body.capacity) || 4;
             if (!n) return res.status(400).json({ error: "Table number is required" });
+            if (!Number.isInteger(c) || c < 1 || c > 100) return res.status(400).json({ error: "Seating capacity must be between 1 and 100." });
 
-            const result = await pool.query(`
+            client = await pool.connect();
+            await client.query("BEGIN");
+            const currentResult = await client.query(`SELECT * FROM restaurant_tables WHERE id=$1 AND business_id=$2 FOR UPDATE`, [req.params.id, businessId]);
+            const current = currentResult.rows[0];
+            if (!current) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Table not found" }); }
+            const settings = await readRestaurantTableSettings(client, businessId, true);
+            const oldMeta = settings.restaurantTableMetadata?.[String(current.table_number)] || {};
+            const areaId = await validateRestaurantTableArea(client, businessId, req.body.areaId);
+            const result = await client.query(`
                 UPDATE restaurant_tables
                 SET table_number = $1, capacity = $2
                 WHERE id = $3 AND business_id = $4
                 RETURNING *
             `, [n, c, req.params.id, businessId]);
-
-            if (!result.rows.length) return res.status(404).json({ error: "Table not found" });
+            const nextMeta = {
+                ...(areaId ? { areaId } : {}),
+                ...(oldMeta.isTemporary === true ? { isTemporary: true, serverName: String(oldMeta.serverName || "SYSTEM"), createdAt: String(oldMeta.createdAt || new Date().toISOString()) } : {})
+            };
+            await saveRestaurantTableMetadata(client, businessId, n, Object.keys(nextMeta).length ? nextMeta : null, String(current.table_number));
+            await client.query("COMMIT");
             res.json({ success: true, table: result.rows[0] });
         } catch (e) {
+            if (client) { try { await client.query("ROLLBACK"); } catch (_) {} }
+            if (e.status) return res.status(e.status).json({ error: e.message });
             if (e.code === "23505") return res.status(409).json({ error: "Table number already exists" });
             res.status(500).json({ error: "Failed to update table" });
+        } finally {
+            client?.release();
         }
     }
 );
@@ -4085,6 +4209,27 @@ app.delete(
             const table = tableResult.rows[0];
             if (table.status === "Occupied") {
                 return res.status(400).json({ error: `${table.table_number} is currently occupied. Please make it Available before deleting.` });
+            }
+
+            const tableSettings = await readRestaurantTableSettings(pool, businessId);
+            const tableMeta = tableSettings.restaurantTableMetadata?.[String(table.table_number)] || {};
+            if (tableMeta.isTemporary === true) {
+                const active = await pool.query(`
+                    SELECT 1 FROM orders WHERE business_id=$1 AND table_number::text=$2
+                      AND LOWER(COALESCE(status,'')) NOT IN ('completed','cancelled') LIMIT 1
+                `, [businessId, String(table.table_number)]);
+                if (active.rows.length) return res.status(400).json({ error: "This adhoc table still has an active order." });
+                const client = await pool.connect();
+                try {
+                    await client.query("BEGIN");
+                    await client.query(`DELETE FROM restaurant_tables WHERE id=$1 AND business_id=$2`, [req.params.id, businessId]);
+                    await saveRestaurantTableMetadata(client, businessId, String(table.table_number), null);
+                    await client.query("COMMIT");
+                } catch (error) {
+                    try { await client.query("ROLLBACK"); } catch (_) {}
+                    throw error;
+                } finally { client.release(); }
+                return res.json({ success: true, table });
             }
 
             const orders = await pool.query(`
@@ -5173,7 +5318,18 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
     if (!keepOpen) await recordOrderActivity(client, normalizedOrderId, "Order completed", "Sale completed.", req);
 
     if (!keepOpen && savedOrder.order_type === "Dine-in" && savedOrder.table_number) {
-        await client.query(`UPDATE restaurant_tables SET status='Available' WHERE table_number=$1 AND business_id=$2`, [savedOrder.table_number, businessId]);
+        const tableSettings = await readRestaurantTableSettings(client, businessId);
+        const tableMeta = tableSettings.restaurantTableMetadata?.[String(savedOrder.table_number)] || {};
+        if (tableMeta.isTemporary === true && !isPartialPayment) {
+            await client.query(`DELETE FROM restaurant_tables WHERE table_number::text=$1 AND business_id=$2`, [String(savedOrder.table_number), businessId]);
+            await saveRestaurantTableMetadata(client, businessId, String(savedOrder.table_number), null);
+        } else {
+            await client.query(`
+                UPDATE restaurant_tables SET status='Available'
+                WHERE business_id=$2
+                  AND (table_number::text=$1::text OR (table_number::text !~ '^[0-9]+$' AND id::text=$1::text))
+            `, [savedOrder.table_number, businessId]);
+        }
     }
 
     const status = nonChargeable ? "Non-chargeable" : (keepOpen || isPartialPayment) ? "Partially Paid" : "Paid";
@@ -5646,7 +5802,8 @@ app.put(
                     `
                     UPDATE restaurant_tables
                     SET status = 'Available'
-                    WHERE table_number = $1 AND business_id = $2
+                    WHERE business_id = $2
+                      AND (table_number::text = $1::text OR (table_number::text !~ '^[0-9]+$' AND id::text = $1::text))
                     `,
                     [order.table_number, Number(req.user.business_id)]
                 );
@@ -9873,6 +10030,8 @@ app.put("/api/business/profile/logo", async (req, res) => {
             const settings = { ...(result.rows[0]?.settings || {}) };
             // Hero photos are fetched by the Table QR module, not with routine POS settings.
             delete settings.publicMenuHeroImages;
+            // Table metadata is maintained only by the table endpoints.
+            delete settings.restaurantTableMetadata;
             settings.posSalesChannels = salesChannelsForSettings(settings);
             settings.showPoweredByCafePilot = brandingResult.rows[0]?.show_powered_by_cafe_pilot !== false;
             res.json(settings);
@@ -9893,10 +10052,74 @@ app.put(
             delete settings.showPoweredByCafePilot;
             delete settings.marketingDeals;
             delete settings.menuOptionSets;
+            delete settings.restaurantTableMetadata;
             // Hero photos are written through /api/menu/public-settings. Ignore
             // stale browser copies so regular settings saves stay small.
             delete settings.publicMenuHeroImages;
             const businessId = Number(req.user.business_id);
+
+            if (Object.prototype.hasOwnProperty.call(settings, "tableAreas")) {
+                if (!Array.isArray(settings.tableAreas) || settings.tableAreas.length > 50) {
+                    return res.status(400).json({ error: "Table areas must be a list of up to 50 areas." });
+                }
+                const seenIds = new Set();
+                const seenNames = new Set();
+                const tableAreas = settings.tableAreas.map(area => ({
+                    id: String(area?.id || "").trim().slice(0, 80),
+                    name: String(area?.name || "").trim().slice(0, 80)
+                }));
+                for (const area of tableAreas) {
+                    const normalizedName = area.name.toLocaleLowerCase();
+                    if (!/^[a-zA-Z0-9_-]{1,80}$/.test(area.id) || !area.name || seenIds.has(area.id) || seenNames.has(normalizedName)) {
+                        return res.status(400).json({ error: "Table area names and IDs must be non-empty and unique." });
+                    }
+                    seenIds.add(area.id);
+                    seenNames.add(normalizedName);
+                }
+                const existingSettings = await pool.query("SELECT settings->'restaurantTableMetadata' AS metadata FROM app_settings WHERE business_id=$1", [businessId]);
+                const metadata = existingSettings.rows[0]?.metadata && typeof existingSettings.rows[0].metadata === "object" ? existingSettings.rows[0].metadata : {};
+                const nextIds = new Set(tableAreas.map(area => area.id));
+                const stillAssigned = Object.values(metadata).some(entry => entry?.areaId && !nextIds.has(String(entry.areaId)));
+                if (stillAssigned) return res.status(400).json({ error: "Move tables out of an area before removing it." });
+                settings.tableAreas = tableAreas;
+            }
+
+            if (Object.prototype.hasOwnProperty.call(settings, "menuAccounts")) {
+                if (!Array.isArray(settings.menuAccounts) || settings.menuAccounts.length > 100) {
+                    return res.status(400).json({ error: "Menu accounts must be a list of up to 100 accounts." });
+                }
+                const seenIds = new Set();
+                const seenNames = new Set();
+                const menuAccounts = settings.menuAccounts.map(account => ({
+                    id: String(account?.id || "").trim().slice(0, 80),
+                    name: String(account?.name || "").trim().slice(0, 80),
+                    categoryIds: [...new Set((Array.isArray(account?.categoryIds) ? account.categoryIds : []).map(id => String(id || "").trim()).filter(id => /^\d+$/.test(id)))].slice(0, 500)
+                }));
+                for (const account of menuAccounts) {
+                    const normalizedName = account.name.toLocaleLowerCase();
+                    if (!/^menu_account_[a-zA-Z0-9_-]{1,64}$/.test(account.id) || !account.name || seenIds.has(account.id) || seenNames.has(normalizedName)) {
+                        return res.status(400).json({ error: "Menu account names and IDs must be non-empty and unique." });
+                    }
+                    seenIds.add(account.id);
+                    seenNames.add(normalizedName);
+                }
+                const assignedCategoryIds = new Set();
+                for (const account of menuAccounts) {
+                    for (const categoryId of account.categoryIds) {
+                        if (assignedCategoryIds.has(categoryId)) {
+                            return res.status(409).json({ error: "Each menu category can only be assigned to one menu account." });
+                        }
+                        assignedCategoryIds.add(categoryId);
+                    }
+                }
+                const categoryIds = [...new Set(menuAccounts.flatMap(account => account.categoryIds).map(Number))];
+                if (categoryIds.length) {
+                    const categories = await pool.query("SELECT id FROM menu_categories WHERE business_id=$1 AND id=ANY($2::int[])", [businessId, categoryIds]);
+                    const validCategoryIds = new Set(categories.rows.map(category => Number(category.id)));
+                    menuAccounts.forEach(account => { account.categoryIds = account.categoryIds.filter(id => validCategoryIds.has(Number(id))); });
+                }
+                settings.menuAccounts = menuAccounts;
+            }
 
             const result = await pool.query(
                 `

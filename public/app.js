@@ -133,6 +133,9 @@ let currentOrders = [];
 let selectedTableViewNumber = "";
 let tableViewStatusFilter = "all";
 let tableViewOrderRequestToken = 0;
+let tableViewOrderMenuDismissListener = null;
+let tableViewOrdersLoadError = false;
+let tableViewAreaFilter = "all";
 let dashboardAutoRefreshTimer = null;
 let currentMenu = [];
 let currentCustomers = [];
@@ -186,7 +189,7 @@ let appSettings = {
     qrCallWaiterNotification: true, qrCallWaiterSound: true, qrCallWaiterBuzzer: false,
     sessionTimeout: 12, auditLog: false,
     uiDensity: "comfortable", accentLabel: "", largeBilling: false, kotEnabled: true, kotDisabledBehavior: "hide",
-    customerInfoRequirements: {},
+    customerInfoRequirements: {}, tableAreas: [], menuAccounts: [],
     posSalesChannels: [
         { key: "dine_in", label: "Dine", orderType: "Dine-in", qrMenu: false },
         { key: "takeaway", label: "Takeaway", orderType: "Takeaway", qrMenu: false },
@@ -1186,6 +1189,7 @@ async function startAuthenticatedApp(){
     startSessionHeartbeat();
     startReservationAutoRefresh();
     startDashboardAutoRefresh();
+    setupDesktopOrderNotifications();
     startPOSQrOrderAlerts();
     startQrTableServiceAlerts();
     startCounterKOTPrintAgent();
@@ -1436,6 +1440,7 @@ const SETTINGS_FEATURES = [
     { key: "gst", title: "GST", icon: "％", description: "Enable or disable GST calculation on orders." },
     { key: "general-currency", title: "General / Currency", icon: "💱", description: "Set currency and the default GST rate." },
     { key: "pos-preferences", title: "POS Preferences", icon: "🧭", description: "Choose sales channels and defaults for each POS module." },
+    { key: "table-areas", title: "Table Areas", icon: "▦", description: "Create areas like Indoor and Outdoor, then assign tables to each area." },
     { key: "customer-details", title: "Customer Details", icon: "👤", description: "Choose which sale channels require customer name and mobile number." },
     { key: "sales-channels", title: "Sales Channels", icon: "🛍️", description: "Create and manage where menu items can be sold." },
     { key: "billing-rules", title: "Billing Rules", icon: "🧮", description: "Set payment, invoice numbering and bill rounding rules." },
@@ -1485,11 +1490,98 @@ function showSettingsFeature(featureKey = "") {
     if (footerActions) footerActions.hidden = !feature;
 }
 
+function normalizeTableAreas(value = appSettings.tableAreas) {
+    const seen = new Set();
+    return (Array.isArray(value) ? value : []).map(area => ({
+        id: String(area?.id || "").trim().slice(0, 80),
+        name: String(area?.name || "").trim().slice(0, 80)
+    })).filter(area => {
+        if (!area.id || !area.name || seen.has(area.id)) return false;
+        seen.add(area.id);
+        return true;
+    }).slice(0, 50);
+}
+
+function renderTableAreas() {
+    appSettings.tableAreas = normalizeTableAreas();
+    const list = document.getElementById("tableAreasList");
+    if (!list) return;
+    if (!appSettings.tableAreas.length) {
+        list.innerHTML = '<div class="table-area-empty">No areas yet. Add your first area, such as Indoor or Outdoor.</div>';
+    } else {
+        list.innerHTML = appSettings.tableAreas.map(area => {
+            const count = (restaurantTables || []).filter(table => String(table.area_id || "") === area.id).length;
+            return `<div class="table-area-setting-row"><span class="table-area-setting-icon" aria-hidden="true">▦</span><strong>${esc(area.name)}</strong><small>${count} ${count === 1 ? "table" : "tables"}</small><button type="button" class="table-action-btn table-delete-btn" onclick="deleteTableArea('${esc(area.id)}')" ${count ? "disabled title='Move its tables to another area first'" : ""}>Remove</button></div>`;
+        }).join("");
+    }
+    renderTableAreaSelects();
+    renderTableViewAreaFilters();
+}
+
+async function persistTableAreas() {
+    const status = document.getElementById("tableAreasSaveStatus");
+    if (status) status.textContent = "Saving areas…";
+    try {
+        await api("/settings", { method: "PUT", body: JSON.stringify({ tableAreas: normalizeTableAreas() }) });
+        localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings));
+        if (status) status.textContent = "Areas saved for this business.";
+        renderTableAreas();
+    } catch (error) {
+        if (status) status.textContent = `Could not save areas: ${error.message || "Please try again."}`;
+        throw error;
+    }
+}
+
+async function addTableArea() {
+    const input = document.getElementById("newTableAreaName");
+    const name = String(input?.value || "").trim().slice(0, 80);
+    if (!name) return input?.focus();
+    if (appSettings.tableAreas.length >= 50) return alert("You can create up to 50 table areas.");
+    if (appSettings.tableAreas.some(area => area.name.toLocaleLowerCase() === name.toLocaleLowerCase())) return alert("An area with this name already exists.");
+    const previous = appSettings.tableAreas;
+    appSettings.tableAreas = [...previous, { id: `area_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, name }];
+    if (input) input.value = "";
+    renderTableAreas();
+    try { await persistTableAreas(); }
+    catch (_) { appSettings.tableAreas = previous; renderTableAreas(); }
+}
+
+async function deleteTableArea(areaId) {
+    const area = appSettings.tableAreas.find(entry => entry.id === String(areaId));
+    if (!area) return;
+    const count = (restaurantTables || []).filter(table => String(table.area_id || "") === area.id).length;
+    if (count) return alert(`Move the ${count} table${count === 1 ? "" : "s"} out of ${area.name} before removing the area.`);
+    const previous = appSettings.tableAreas;
+    appSettings.tableAreas = previous.filter(entry => entry.id !== area.id);
+    renderTableAreas();
+    try { await persistTableAreas(); }
+    catch (_) { appSettings.tableAreas = previous; renderTableAreas(); }
+}
+
+function renderTableAreaSelects() {
+    ["newTableArea", "editTableArea", "adhocTableArea"].forEach(id => {
+        const select = document.getElementById(id);
+        if (!select) return;
+        const selected = select.value;
+        select.innerHTML = `<option value="">No area</option>${appSettings.tableAreas.map(area => `<option value="${esc(area.id)}">${esc(area.name)}</option>`).join("")}`;
+        if ([...select.options].some(option => option.value === selected)) select.value = selected;
+    });
+}
+
+function renderTableViewAreaFilters() {
+    const filters = document.getElementById("tableViewAreaFilters");
+    if (!filters) return;
+    const options = [{ id: "all", name: "All areas" }, ...appSettings.tableAreas];
+    if (!options.some(area => area.id === tableViewAreaFilter)) tableViewAreaFilter = "all";
+    filters.innerHTML = options.map(area => `<button type="button" class="${area.id === tableViewAreaFilter ? "active" : ""}" data-table-area-filter="${esc(area.id)}" aria-pressed="${area.id === tableViewAreaFilter}" onclick="setTableViewAreaFilter('${esc(area.id)}')">${esc(area.name)}${area.id === "all" ? ` <span>${(restaurantTables || []).length}</span>` : ` <span>${(restaurantTables || []).filter(table => String(table.area_id || "") === area.id).length}</span>`}</button>`).join("");
+}
+
 function showMenuModuleView(view = "overview") {
     const overview = document.getElementById("menuModuleOverview");
     const header = document.getElementById("menuDetailHeader");
     const items = document.getElementById("menuItemsPanel");
     const categories = document.getElementById("menuCategoriesPanel");
+    const accounts = document.getElementById("menuAccountsPanel");
     const options = document.getElementById("menuOptionsPanel");
     const title = document.getElementById("menuDetailTitle");
     const description = document.getElementById("menuDetailDescription");
@@ -1498,13 +1590,20 @@ function showMenuModuleView(view = "overview") {
     if (header) header.hidden = isOverview;
     if (items) items.hidden = view !== "items";
     if (categories) categories.hidden = view !== "categories";
+    if (accounts) accounts.hidden = view !== "accounts";
     if (options) options.hidden = view !== "options";
-    if (title) title.textContent = view === "categories" ? "Categories" : view === "options" ? "Item option" : "Menu Items";
+    if (title) title.textContent = view === "categories" ? "Categories" : view === "accounts" ? "Menu Accounts" : view === "options" ? "Item option" : "Menu Items";
     if (description) description.textContent = view === "categories"
         ? "Create and organize the categories used throughout your menu."
+        : view === "accounts"
+            ? "Group menu categories into accounts and filter them while billing."
         : view === "options"
             ? "Set up the choices customers can select for each menu item."
             : "Manage your catalog, pricing, availability, variants and KOT routing.";
+    if (view === "accounts") {
+        renderMenuAccountsMaster();
+        loadMenuCategories().then(() => renderMenuAccountsMaster());
+    }
     if (view === "options") renderMenuOptionSetsOverview();
 }
 
@@ -2765,10 +2864,130 @@ function fillBillingCustomerFields(customer = {}) {
 }
 
 let menuCategories=[];
+let selectedBillingMenuAccountId="all";
 let currentMenuCategoryImageData=null;
 let pendingMenuCategoryImageBlob=null;
 let menuCategoryImagePreviewUrl=null;
 let menuCategoryImageWasCleared=false;
+function normalizeMenuAccounts(value=appSettings.menuAccounts){
+    const seenIds=new Set(),seenNames=new Set();
+    const accounts=(Array.isArray(value)?value:[]).map(account=>({
+        id:String(account?.id||"").trim().slice(0,80),
+        name:String(account?.name||"").trim().slice(0,80),
+        categoryIds:[...new Set((Array.isArray(account?.categoryIds)?account.categoryIds:[]).map(id=>String(id||"").trim()).filter(id=>/^\d+$/.test(id)))].slice(0,500)
+    })).filter(account=>{
+        const key=account.name.toLocaleLowerCase();
+        if(!account.id||!account.name||seenIds.has(account.id)||seenNames.has(key))return false;
+        seenIds.add(account.id);seenNames.add(key);return true;
+    }).slice(0,100);
+    const assignedCategoryIds=new Set();
+    accounts.forEach(account=>{
+        account.categoryIds=account.categoryIds.filter(id=>{
+            if(assignedCategoryIds.has(id))return false;
+            assignedCategoryIds.add(id);return true;
+        });
+    });
+    return accounts;
+}
+function menuAccountsHaveDuplicateCategories(value=appSettings.menuAccounts){
+    const assigned=new Set();
+    for(const account of Array.isArray(value)?value:[]){
+        for(const id of Array.isArray(account?.categoryIds)?account.categoryIds:[]){
+            const categoryId=String(id||"").trim();
+            if(!/^\d+$/.test(categoryId))continue;
+            if(assigned.has(categoryId))return true;
+            assigned.add(categoryId);
+        }
+    }
+    return false;
+}
+function renderMenuAccountCategoryChoices(selectedIds=[]){
+    const container=document.getElementById("menuAccountCategoryOptions");
+    if(!container)return;
+    const selected=new Set((Array.isArray(selectedIds)?selectedIds:[]).map(String));
+    const categories=Array.isArray(menuCategories)?menuCategories:[];
+    if(!categories.length){container.innerHTML='<div class="menu-account-empty">Create menu categories before mapping them to an account.</div>';updateMenuAccountCategorySummary();return;}
+    const editingId=document.getElementById("menuAccountEditingId")?.value||"";
+    const accounts=normalizeMenuAccounts(appSettings.menuAccounts);
+    container.innerHTML=categories.map(category=>{
+        const owner=accounts.find(account=>account.id!==editingId&&account.categoryIds.includes(String(category.id)));
+        const note=owner?`Assigned to ${esc(owner.name)}`:category.active===false?"Inactive":"";
+        return `<label class="menu-account-category-option${owner?" is-assigned":""}"><input type="checkbox" data-menu-account-category value="${esc(category.id)}" onchange="updateMenuAccountCategorySummary()" ${selected.has(String(category.id))?"checked":""} ${owner?"disabled": ""}><span><strong>${esc(category.name)}</strong>${note?`<small>${note}</small>`:""}</span></label>`;
+    }).join("");
+    updateMenuAccountCategorySummary();
+}
+function updateMenuAccountCategorySummary(){
+    const summary=document.getElementById("menuAccountCategorySummary");
+    if(!summary)return;
+    const checked=[...document.querySelectorAll("[data-menu-account-category]:checked")];
+    summary.textContent=checked.length?`${checked.length} ${checked.length===1?"category":"categories"} selected`:"Select the categories included in this account.";
+}
+function renderMenuAccountsMaster(){
+    appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
+    const list=document.getElementById("menuAccountsList");
+    setText("menuAccountCount",appSettings.menuAccounts.length);
+    if(list){
+        list.innerHTML=appSettings.menuAccounts.length?appSettings.menuAccounts.map(account=>{
+            const mapped=account.categoryIds.map(id=>menuCategories.find(category=>String(category.id)===id)?.name).filter(Boolean);
+            const categoryMarkup=mapped.length?mapped.map(name=>`<span class="menu-account-category-chip">${esc(name)}</span>`).join(""):'<small class="menu-account-unmapped">No categories mapped</small>';
+            return `<article class="menu-account-card"><div class="menu-account-card-main"><span class="menu-account-mark" aria-hidden="true">${esc(account.name.charAt(0).toLocaleUpperCase())}</span><div><strong>${esc(account.name)}</strong><small>${mapped.length} ${mapped.length===1?"category":"categories"}</small><div class="menu-account-card-categories">${categoryMarkup}</div></div></div><div class="table-actions"><button type="button" onclick="editMenuAccount('${esc(account.id)}')">✏️ Edit</button><button type="button" onclick="deleteMenuAccount('${esc(account.id)}')">🗑️ Delete</button></div></article>`;
+        }).join(""):'<div class="menu-account-empty">No menu accounts yet. Create one, such as Italian, then map its categories.</div>';
+    }
+    const editingId=document.getElementById("menuAccountEditingId")?.value||"";
+    if(!editingId)renderMenuAccountCategoryChoices([]);
+    const button=document.getElementById("menuAccountSaveButton");
+    if(button)button.textContent=editingId?"Save account changes":"Create account";
+    const cancel=document.getElementById("menuAccountCancelButton");
+    if(cancel)cancel.hidden=!editingId;
+}
+function resetMenuAccountForm(){
+    const id=document.getElementById("menuAccountEditingId"),name=document.getElementById("menuAccountName");
+    if(id)id.value="";if(name)name.value="";
+    renderMenuAccountsMaster();
+}
+function editMenuAccount(id){
+    const account=appSettings.menuAccounts.find(entry=>entry.id===String(id));
+    if(!account)return;
+    document.getElementById("menuAccountEditingId").value=account.id;
+    document.getElementById("menuAccountName").value=account.name;
+    renderMenuAccountCategoryChoices(account.categoryIds);
+    const button=document.getElementById("menuAccountSaveButton");if(button)button.textContent="Save account changes";
+    const cancel=document.getElementById("menuAccountCancelButton");if(cancel)cancel.hidden=false;
+    document.getElementById("menuAccountName")?.focus();
+}
+async function persistMenuAccounts(){
+    appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
+    const response=await api("/settings",{method:"PUT",body:JSON.stringify({menuAccounts:appSettings.menuAccounts})});
+    if(Array.isArray(response?.settings?.menuAccounts))appSettings.menuAccounts=normalizeMenuAccounts(response.settings.menuAccounts);
+    try{localStorage.setItem(settingsLocalStorageKey(),JSON.stringify(appSettings));}catch(_){}
+}
+async function saveMenuAccount(){
+    const id=String(document.getElementById("menuAccountEditingId")?.value||"");
+    const name=String(document.getElementById("menuAccountName")?.value||"").trim().slice(0,80);
+    const categoryIds=[...document.querySelectorAll("[data-menu-account-category]:checked")].map(input=>String(input.value));
+    if(!name)return alert("Enter an account name.");
+    if(!categoryIds.length)return alert("Select at least one menu category for this account.");
+    if(appSettings.menuAccounts.some(account=>account.name.toLocaleLowerCase()===name.toLocaleLowerCase()&&account.id!==id))return alert("A menu account with this name already exists.");
+    const previous=appSettings.menuAccounts;
+    const account={id:id||`menu_account_${Date.now()}_${Math.random().toString(36).slice(2,9)}`,name,categoryIds};
+    appSettings.menuAccounts=id?previous.map(entry=>entry.id===id?account:entry):[...previous,account];
+    if(appSettings.menuAccounts.length>100){appSettings.menuAccounts=previous;return alert("You can create up to 100 menu accounts.");}
+    try{
+        await persistMenuAccounts();
+        resetMenuAccountForm();
+        renderBillingMenuAccountSelect();
+        await loadMenu();
+    }catch(error){appSettings.menuAccounts=previous;alert(error.message||"Could not save the menu account.");}
+}
+async function deleteMenuAccount(id){
+    const account=appSettings.menuAccounts.find(entry=>entry.id===String(id));
+    if(!account||!confirm(`Delete the “${account.name}” menu account? Categories and menu items will not be deleted.`))return;
+    const previous=appSettings.menuAccounts;
+    appSettings.menuAccounts=previous.filter(entry=>entry.id!==account.id);
+    if(selectedBillingMenuAccountId===account.id)selectedBillingMenuAccountId="all";
+    try{await persistMenuAccounts();renderMenuAccountsMaster();renderBillingMenuAccountSelect();await loadMenu();}
+    catch(error){appSettings.menuAccounts=previous;renderMenuAccountsMaster();alert(error.message||"Could not delete the menu account.");}
+}
 async function loadMenuCategories(){
     try{
         menuCategories=await api('/menu/categories');
@@ -2858,17 +3077,40 @@ function billingCategoryDisplayName(value){
 function billingCategoryHue(value){
     let hash=0;for(const character of String(value||""))hash=(hash*31+character.charCodeAt(0))%360;return hash;
 }
+function renderBillingMenuAccountSelect(){
+    appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
+    const select=document.getElementById("billingMenuAccountSelect");
+    if(!appSettings.menuAccounts.some(account=>account.id===selectedBillingMenuAccountId))selectedBillingMenuAccountId="all";
+    if(!select)return;
+    select.innerHTML='<option value="all">All accounts</option>'+appSettings.menuAccounts.map(account=>`<option value="${esc(account.id)}">${esc(account.name)}</option>`).join("");
+    select.value=selectedBillingMenuAccountId;
+}
+function selectBillingMenuAccount(accountId){
+    selectedBillingMenuAccountId=String(accountId||"all");
+    loadMenu();
+}
 async function loadMenu() {
     try {
         await loadMenuCategories();
         currentMenu = await api("/menu");
+        appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
+        renderBillingMenuAccountSelect();
         const sidebar = document.getElementById("billingCategorySidebar");
         const grid = document.querySelector("#new-order .menu-grid");
         if (!grid) return;
 
-        const categories = [...new Set([
-            ...menuCategories.filter(c=>c.active!==false).map(c=>c.name).filter(Boolean),
-            ...currentMenu.filter(item=>item.available!==false).map(item=>String(item.category||"Uncategorized").trim()).filter(Boolean)
+        const selectedAccount=appSettings.menuAccounts.find(account=>account.id===selectedBillingMenuAccountId)||null;
+        const mappedCategoryIds=new Set(selectedAccount?.categoryIds||[]);
+        const activeCategories=menuCategories.filter(category=>category.active!==false&&category.name);
+        const accountCategories=selectedAccount?activeCategories.filter(category=>mappedCategoryIds.has(String(category.id))):activeCategories;
+        const accountCategoryNames=new Set(accountCategories.map(category=>String(category.name||"").trim().toLocaleLowerCase()));
+        const availableChannelMenu=currentMenu.filter(item=>item.available!==false&&isMenuItemAvailableOnSaleChannel(item));
+        const channelMenu=selectedAccount
+            ? availableChannelMenu.filter(item=>accountCategoryNames.has(String(item.category||"Uncategorized").trim().toLocaleLowerCase()))
+            : availableChannelMenu;
+        const categories=[...new Set([
+            ...accountCategories.map(category=>String(category.name||"").trim()).filter(Boolean),
+            ...channelMenu.map(item=>String(item.category||"Uncategorized").trim()).filter(Boolean)
         ])];
 
         if (sidebar) {
@@ -2894,9 +3136,10 @@ async function loadMenu() {
 }
 
         grid.innerHTML = "";
-        const channelMenu = currentMenu.filter(item => item.available !== false && isMenuItemAvailableOnSaleChannel(item));
         if (!channelMenu.length) {
-            grid.innerHTML = `<div class="menu-empty-state">No items are available on the ${esc(getSaleChannel(currentSaleChannelKey())?.label || "selected")} channel. Update item channel availability in Menu Management.</div>`;
+            grid.innerHTML = selectedAccount&&!accountCategories.length
+                ? `<div class="menu-empty-state">No active categories are mapped to ${esc(selectedAccount.name)}. Update its category mapping in Menu → Menu Accounts.</div>`
+                : `<div class="menu-empty-state">No items are available on the ${esc(getSaleChannel(currentSaleChannelKey())?.label || "selected")} channel${selectedAccount?` for ${esc(selectedAccount.name)}`:""}. Update item channel availability in Menu Management.</div>`;
             return;
         }
         channelMenu.forEach(item => {
@@ -4283,8 +4526,8 @@ function renderQrOrderListAction(order) {
     return `<button type="button" class="qr-order-list-action ${className}" onclick="event.stopPropagation();${action}"${permitted ? "" : ` disabled title="${permissionHint}"`}>${label}</button>`;
 }
 
-function renderQrOrderWorkflow(order) {
-    const panel = document.getElementById("qrOrderWorkflow");
+function renderQrOrderWorkflow(order, panelId = "qrOrderWorkflow", tableView = false) {
+    const panel = document.getElementById(panelId);
     if (!panel) return;
     const status = String(order?.status || "").trim().toLowerCase();
     if (!isQrTrackedOrder(order) || ["completed", "cancelled"].includes(status)) {
@@ -4297,10 +4540,10 @@ function renderQrOrderWorkflow(order) {
     let note = "";
     let actionButton = "";
     if (status === "pending") {
-        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Preparing')"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to accept this order."'}>Accept order</button>`;
+        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Preparing'${tableView ? ",true" : ""})"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to accept this order."'}>Accept order</button>`;
         note = "New QR order · use Accept on its order card to send the ticket to the kitchen.";
     } else if (status === "preparing") {
-        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Ready')"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to mark this order ready."'}>Mark ready</button>`;
+        actionButton = `<button type="button" class="big-btn" onclick="updateQrOrderWorkflow(${Number(order.id)},'Ready'${tableView ? ",true" : ""})"${canAdvance ? "" : ' disabled title="Kitchen edit access is required to mark this order ready."'}>Mark ready</button>`;
         note = "Accepted · kitchen is preparing this order. Mark it ready from its order card.";
     } else if (status === "ready") {
         note = "Ready · complete checkout from its order card to close this QR order.";
@@ -4314,12 +4557,13 @@ function renderQrOrderWorkflow(order) {
     panel.hidden = false;
 }
 
-async function updateQrOrderWorkflow(orderId, status) {
+async function updateQrOrderWorkflow(orderId, status, returnToTableView = false) {
     try {
         await api(`/orders/${Number(orderId)}/qr-status`, { method: "PUT", body: JSON.stringify({ status }) });
         if (status === "Preparing" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId,undefined,undefined,{auto:true});
         await updateOrdersTable(true, false);
-        await viewOrder(orderId);
+        if (returnToTableView) await loadTables();
+        else await viewOrder(orderId);
         if (appSettings.kotEnabled !== false && hasPermission("kitchen", "view")) await loadKOT(false);
     } catch (error) {
         alert(error.message || "Could not update this QR order.");
@@ -4743,10 +4987,27 @@ async function printCurrentOrder() {
 }
 
 function getActiveOrderForTable(tableNumber) {
-    return (Array.isArray(currentOrders) ? currentOrders : [])
-        .filter(order => String(order.table_number || "") === String(tableNumber || ""))
-        .filter(order => !["completed", "cancelled"].includes(String(order.status || "").toLowerCase()))
-        .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
+    const normalize = value => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase().replace(/\s*-\s*/g, "-").replace(/\s+/g, " ");
+    const target = normalize(tableNumber);
+    if (!target) return null;
+    const orders = (Array.isArray(currentOrders) ? currentOrders : [])
+        .filter(order => !["completed", "cancelled"].includes(String(order.status || "").trim().toLowerCase()));
+    const byCreatedAt = (a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0);
+    const directMatch = orders
+        .filter(order => normalize(order.table_number) === target)
+        .sort(byCreatedAt)[0];
+    if (directMatch) return directMatch;
+
+    // Older dine-in orders may have saved the table row ID instead of its
+    // current display name. Resolve that legacy reference for named tables.
+    const table = (restaurantTables || []).find(entry => normalize(entry.table_number) === target);
+    if (table && !/^\d+$/.test(target)) {
+        return orders
+            .filter(order => normalize(order.table_number) === normalize(table.id)
+                || Number(order.table_id || order.restaurant_table_id || 0) === Number(table.id))
+            .sort(byCreatedAt)[0] || null;
+    }
+    return null;
 }
 
 function selectTableViewTable(tableNumber) {
@@ -4754,6 +5015,11 @@ function selectTableViewTable(tableNumber) {
     document.querySelectorAll("#billingTablesGrid .billing-table-card").forEach(card => {
         card.classList.toggle("selected", card.dataset.tableNumber === selectedTableViewNumber);
     });
+    const table = (restaurantTables || []).find(entry => String(entry.table_number) === selectedTableViewNumber);
+    if (table && String(table.status || "").trim().toLowerCase() === "occupied" && hasPermission("orders", "view") && !getActiveOrderForTable(selectedTableViewNumber)) {
+        refreshTableViewOrderData();
+        return;
+    }
     renderTableViewOrderPanel(selectedTableViewNumber);
 }
 
@@ -4770,11 +5036,23 @@ function setTableViewFilter(filter) {
     applyTableViewFilter();
 }
 
+function setTableViewAreaFilter(areaId) {
+    const value = String(areaId || "all");
+    tableViewAreaFilter = value === "all" || appSettings.tableAreas.some(area => area.id === value) ? value : "all";
+    const grid = document.getElementById("billingTablesGrid");
+    if (grid) grid.scrollTop = 0;
+    renderTableViewAreaFilters();
+    applyTableViewFilter();
+}
+
 function applyTableViewFilter() {
     const grid = document.getElementById("billingTablesGrid");
     if (!grid) return;
     const cards = [...grid.querySelectorAll(".billing-table-card")];
-    const visibleCards = cards.filter(card => tableViewStatusFilter === "all" || card.dataset.tableStatus === tableViewStatusFilter);
+    const visibleCards = cards.filter(card =>
+        (tableViewStatusFilter === "all" || card.dataset.tableStatus === tableViewStatusFilter)
+        && (tableViewAreaFilter === "all" || card.dataset.areaId === tableViewAreaFilter)
+    );
     cards.forEach(card => { card.hidden = !visibleCards.includes(card); });
     setText("tableViewVisibleCount", tableViewStatusFilter === "all"
         ? `${cards.length} ${cards.length === 1 ? "table" : "tables"}`
@@ -4783,13 +5061,21 @@ function applyTableViewFilter() {
     const visibleSelection = visibleCards.find(card => card.dataset.tableNumber === selectedTableViewNumber);
     if (!visibleCards.length) {
         const panel = document.getElementById("tableViewOrderPanel");
-        if (panel) panel.innerHTML = `<div class="table-view-empty"><span aria-hidden="true">▦</span><strong>No ${esc(tableViewStatusFilter)} tables</strong><p>There are no tables in this status right now. Choose another filter to see more tables.</p></div>`;
+        const areaName = appSettings.tableAreas.find(area => area.id === tableViewAreaFilter)?.name;
+        if (panel) panel.innerHTML = `<div class="table-view-empty"><span aria-hidden="true">▦</span><strong>No tables match these filters</strong><p>${areaName ? `There are no ${tableViewStatusFilter === "all" ? "" : `${esc(tableViewStatusFilter)} `}tables in ${esc(areaName)}.` : `There are no ${esc(tableViewStatusFilter)} tables right now.`} Choose another area or status to see more tables.</p></div>`;
         return;
     }
     const nextSelection = visibleSelection || visibleCards[0];
     selectedTableViewNumber = nextSelection.dataset.tableNumber || "";
     cards.forEach(card => card.classList.toggle("selected", card === nextSelection));
     renderTableViewOrderPanel(selectedTableViewNumber);
+}
+
+async function refreshTableViewOrderData() {
+    const panel = document.getElementById("tableViewOrderPanel");
+    if (panel) panel.innerHTML = `<div class="table-view-order-loading"><span class="pos-sync-spinner" aria-hidden="true"></span><span>Refreshing table order…</span></div>`;
+    await loadTables();
+    if (panel?.querySelector(".table-view-order-loading")) await renderTableViewOrderPanel(selectedTableViewNumber);
 }
 
 function updateTableViewFilterCounts() {
@@ -4810,9 +5096,67 @@ async function printTableViewOrder(orderId) {
     }
 }
 
+function closeTableViewOrderMoreMenu() {
+    const menu = document.getElementById("tableViewOrderMoreMenu");
+    const button = document.getElementById("tableViewOrderMoreButton");
+    if (menu) menu.hidden = true;
+    if (button) button.setAttribute("aria-expanded", "false");
+    if (tableViewOrderMenuDismissListener) {
+        document.removeEventListener("click", tableViewOrderMenuDismissListener);
+        tableViewOrderMenuDismissListener = null;
+    }
+}
+
+function toggleTableViewOrderMoreMenu(event, orderId) {
+    event?.stopPropagation();
+    const menu = document.getElementById("tableViewOrderMoreMenu");
+    const button = document.getElementById("tableViewOrderMoreButton");
+    if (!menu || !button) return;
+    if (!menu.hidden) return closeTableViewOrderMoreMenu();
+
+    const id = Number(orderId);
+    const order = currentOrderForDetails?.order || {};
+    const status = String(order.status || "").toLowerCase();
+    const closed = status === "completed";
+    const cancelled = status === "cancelled";
+    const isQrOrder = isQrTrackedOrder(order);
+    const paymentSummary = currentOrderForDetails?.paymentSummary || {};
+    const amountDue = Math.max(0, Number(paymentSummary.amountDue ?? order.amount_due ?? (Number(order.total || 0) - Number(paymentSummary.amountCollected ?? order.amount_collected ?? 0))));
+    const canTakePayment = !cancelled && ((closed && amountDue > 0.009) || (!closed && (!isQrOrder || status === "ready")));
+    const canEdit = closed
+        ? (order.bill_printed_at ? hasPermission("orders", "edit_after_print") || hasPermission("orders", "edit_closed") : hasPermission("orders", "edit_closed"))
+        : !cancelled && (hasPermission("orders", "edit_open") || hasPermission("orders", "edit"));
+    const canCancel = !cancelled && (closed ? hasPermission("orders", "cancel_closed") : (hasPermission("orders", "edit_open") || hasPermission("orders", "edit")));
+    const actions = [
+        `<button type="button" role="menuitem" onclick="closeTableViewOrderMoreMenu();viewOrderBill(${id})">View bill</button>`,
+        `<button type="button" role="menuitem" onclick="closeTableViewOrderMoreMenu();viewOrderActivity(${id})">Activity</button>`,
+        canTakePayment && (!isQrOrder || closed) ? `<button type="button" role="menuitem" onclick="closeTableViewOrderMoreMenu();payOpenOrder(${id})">Take payment</button>` : "",
+        canEdit ? `<button type="button" role="menuitem" onclick="closeTableViewOrderMoreMenu();editOpenOrder(${id})">Edit order</button>` : "",
+        canCancel ? `<button type="button" role="menuitem" class="danger" onclick="closeTableViewOrderMoreMenu();cancelOrder(${id})">Cancel order</button>` : "",
+        `<button type="button" role="menuitem" onclick="closeTableViewOrderMoreMenu();printTableViewOrder(${id})">Print bill</button>`
+    ].filter(Boolean);
+    menu.innerHTML = actions.join("");
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    tableViewOrderMenuDismissListener = clickEvent => {
+        if (!clickEvent.target?.closest(".table-view-order-more-wrap")) closeTableViewOrderMoreMenu();
+    };
+    setTimeout(() => document.addEventListener("click", tableViewOrderMenuDismissListener), 0);
+}
+
+function focusTableViewOrderInfo() {
+    closeTableViewOrderMoreMenu();
+    const content = document.getElementById("tableViewOrderInfoContent");
+    if (content) content.scrollTo({ top: 0, behavior: "smooth" });
+    document.querySelectorAll(".table-view-order-toolbar .orders-detail-tool").forEach(button => {
+        button.classList.toggle("active", button.dataset.tableOrderInfo === "true");
+    });
+}
+
 async function renderTableViewOrderPanel(tableNumber = selectedTableViewNumber) {
     const panel = document.getElementById("tableViewOrderPanel");
     if (!panel) return;
+    closeTableViewOrderMoreMenu();
     const requestToken = ++tableViewOrderRequestToken;
     const table = (restaurantTables || []).find(entry => String(entry.table_number) === String(tableNumber));
     if (!table) {
@@ -4822,9 +5166,13 @@ async function renderTableViewOrderPanel(tableNumber = selectedTableViewNumber) 
 
     const activeOrder = getActiveOrderForTable(table.table_number);
     if (!activeOrder) {
-        const canStart = String(table.status || "").toLowerCase() === "available" && hasPermission("new_order", "view");
-        const occupiedWithoutAccess = String(table.status || "").toLowerCase() === "occupied" && !hasPermission("orders", "view");
-        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">TABLE</span><h3>${esc(table.table_number)}</h3><p>${esc(table.capacity || 0)} seats</p></div><span class="table-view-state ${String(table.status || "available").toLowerCase()}">${esc(table.status || "Available")}</span></div><div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">${occupiedWithoutAccess ? "🔒" : "🧾"}</span><strong>${occupiedWithoutAccess ? "Order details are restricted" : String(table.status || "").toLowerCase() === "occupied" ? "No active order found" : "No open order"}</strong><p>${occupiedWithoutAccess ? "You need order viewing access to see this table’s order." : String(table.status || "").toLowerCase() === "occupied" ? "This table is marked occupied, but there is no active order to show." : "Start a dine-in order for this table when your guests are ready."}</p>${canStart ? `<button type="button" class="table-view-start-btn" onclick="selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, "&quot;")},'Available')">＋ Start order</button>` : ""}</div>`;
+        const tableStatus = String(table.status || "available").trim().toLowerCase();
+        const canStart = tableStatus === "available" && hasPermission("new_order", "view");
+        const occupiedWithoutAccess = tableStatus === "occupied" && !hasPermission("orders", "view");
+        const occupiedMessage = tableViewOrdersLoadError
+            ? "The latest order list could not be refreshed. Refresh this table to try again."
+            : "This table is marked occupied, but there is no active order to show.";
+        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">TABLE</span><h3>${esc(table.table_number)}</h3><p>${esc(table.capacity || 0)} seats</p></div><span class="table-view-state ${tableStatus}">${esc(table.status || "Available")}</span></div><div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">${occupiedWithoutAccess ? "🔒" : "🧾"}</span><strong>${occupiedWithoutAccess ? "Order details are restricted" : tableStatus === "occupied" ? "No active order found" : "No open order"}</strong><p>${occupiedWithoutAccess ? "You need order viewing access to see this table’s order." : tableStatus === "occupied" ? occupiedMessage : "Start a dine-in order for this table when your guests are ready."}</p>${canStart ? `<button type="button" class="table-view-start-btn" onclick="selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, "&quot;")},'Available')">＋ Start order</button>` : tableStatus === "occupied" && hasPermission("orders", "view") ? `<button type="button" class="table-view-start-btn table-view-refresh-order-btn" onclick="refreshTableViewOrderData()">↻ Refresh order</button>` : ""}</div>`;
         return;
     }
 
@@ -4844,6 +5192,7 @@ async function renderTableViewOrderPanel(tableNumber = selectedTableViewNumber) 
             try { paymentSummary = await api(`/orders/${Number(order.id)}/payment-summary`); } catch (_) { paymentSummary = null; }
         }
         if (requestToken !== tableViewOrderRequestToken) return;
+        currentOrderForDetails = { ...data, paymentSummary };
         const items = Array.isArray(data.items) ? data.items : [];
         const amountCollected = Number(paymentSummary?.amountCollected ?? order.amount_collected ?? 0);
         const amountDue = Math.max(0, Number(paymentSummary?.amountDue ?? (Number(order.total || 0) - amountCollected)));
@@ -4856,8 +5205,53 @@ async function renderTableViewOrderPanel(tableNumber = selectedTableViewNumber) 
             : isQrOrder && normalizedStatus !== "ready"
                 ? "Accept this QR order and mark it ready before checkout."
                 : "Checkout";
+        const orderId = Number(order.id);
+        const isClosed = ["completed", "cancelled"].includes(normalizedStatus);
+        const customerMarkup = order.customer_name || order.customer_phone || order.customer_email || order.customer_gstin || order.customer_address
+            ? `<div class="table-view-customer"><strong>Customer</strong><span>${esc(order.customer_name || "")}${order.customer_phone ? ` · ${esc(order.customer_phone)}` : ""}${order.customer_email ? ` · ${esc(order.customer_email)}` : ""}${order.customer_gstin ? `<small>GSTIN: ${esc(order.customer_gstin)}</small>` : ""}${order.customer_address ? `<small>${esc(order.customer_address)}${order.customer_city ? `, ${esc(order.customer_city)}` : ""}${order.customer_state ? `, ${esc(order.customer_state)}` : ""}</small>` : ""}</span></div>`
+            : "";
         const itemRows = items.map(item => `<tr><td>${esc(item.item_name || "Item")}${formatItemOptionNames(item.options) ? `<small>${esc(formatItemOptionNames(item.options))}</small>` : ""}</td><td>${Number(item.quantity || 0)}</td><td>${money(item.price)}</td><td>${money(item.line_total)}</td></tr>`).join("");
-        panel.innerHTML = `<div class="table-view-order-heading"><div><span class="eyebrow">OPEN TABLE ORDER</span><h3>${esc(table.table_number)}</h3><p>${esc(order.order_number || `Order #${order.id}`)} · ${order.created_at ? esc(formatPOSDateTime(order.created_at)) : ""}</p></div><span class="table-view-state occupied">${esc(status)}</span></div>${order.customer_name || order.customer_phone ? `<div class="table-view-customer"><strong>Customer</strong><span>${esc(order.customer_name || "")}${order.customer_phone ? ` · ${esc(order.customer_phone)}` : ""}</span></div>` : ""}<div class="table-view-order-items"><div class="table-container"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${itemRows || `<tr><td colspan="4">No items on this order.</td></tr>`}</tbody></table></div></div><div class="table-view-order-totals"><div><span>Subtotal</span><strong>${money(order.subtotal)}</strong></div><div><span>GST</span><strong>${money(order.gst)}</strong></div>${Number(order.discount || 0) > 0 ? `<div><span>Discount</span><strong>−${money(order.discount)}</strong></div>` : ""}${Number(order.service_charge || 0) > 0 ? `<div><span>Charges</span><strong>${money(order.service_charge)}</strong></div>` : ""}<div class="table-view-total"><span>Total</span><strong>${money(order.total)}</strong></div><div><span>Amount collected</span><strong>${money(amountCollected)}</strong></div><div class="table-view-due"><span>Amount due</span><strong>${money(amountDue)}</strong></div></div><div class="table-view-order-actions"><button type="button" class="order-detail-print-btn" onclick="printTableViewOrder(${Number(order.id)})"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/></svg>Print bill</button><button type="button" class="order-detail-checkout-btn" onclick="${isQrOrder ? `checkoutQrOrder(${Number(order.id)})` : `payOpenOrder(${Number(order.id)})`}"${canCheckout ? "" : ` disabled title="${esc(checkoutTitle)}"`}>Checkout <span aria-hidden="true">→</span></button></div>`;
+        const orderDate = order.created_at ? formatPOSDateTime(order.created_at) : "";
+        const tableAndPax = `${order.table_number || table.table_number}${Number(order.pax) > 0 ? ` · ${Number(order.pax)} PAX` : ""}`;
+        panel.innerHTML = `
+            <div class="table-view-order-heading">
+                <div><span class="eyebrow">OPEN TABLE ORDER</span><h3>${esc(table.table_number)}</h3><p>${esc(order.order_number || `Order #${order.id}`)}${orderDate ? ` · ${esc(orderDate)}` : ""}</p></div>
+                <span class="table-view-state ${esc(normalizedStatus.replace(/[^a-z0-9_-]/g, ""))}">${esc(status)}</span>
+            </div>
+            <div class="orders-detail-toolbar table-view-order-toolbar" aria-label="Order details actions">
+                <button type="button" class="orders-detail-tool" onclick="openOrderKOTView(${orderId})" aria-label="KOT view" title="KOT view"><span class="orders-detail-tool-icon orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><small>KOT View</small></button>
+                <button type="button" class="orders-detail-tool active" data-table-order-info="true" onclick="focusTableViewOrderInfo()" aria-label="Order info" title="Order info"><span class="orders-detail-tool-icon" aria-hidden="true">ⓘ</span><small>Order Info</small></button>
+                <div class="orders-detail-more-wrap table-view-order-more-wrap">
+                    <button id="tableViewOrderMoreButton" type="button" class="orders-detail-tool" onclick="toggleTableViewOrderMoreMenu(event,${orderId})" aria-haspopup="menu" aria-expanded="false" aria-label="More order actions" title="More info"><span class="orders-detail-tool-icon orders-kebab-icon" aria-hidden="true">⋮</span><small>More Info</small></button>
+                    <div id="tableViewOrderMoreMenu" class="orders-detail-more-menu" role="menu" hidden></div>
+                </div>
+            </div>
+            <div id="tableViewQrOrderWorkflow" class="qr-order-workflow" hidden></div>
+            <div id="tableViewOrderInfoContent" class="table-view-order-info">
+                <div class="table-view-order-summary">
+                    <div><span>Sale channel</span><strong>${esc(order.sale_channel || order.order_type || "-")}</strong></div>
+                    <div><span>Table</span><strong>${esc(tableAndPax)}</strong></div>
+                    <div><span>Status</span><strong>${esc(status)}</strong></div>
+                    <div><span>Payment mode</span><strong>${esc(order.payment_method || "Unpaid")}</strong></div>
+                    ${order.non_chargeable_reason ? `<div><span>Non-chargeable reason</span><strong>${esc(order.non_chargeable_reason)}</strong></div>` : ""}
+                </div>
+                ${customerMarkup}
+                <div class="table-view-order-items"><div class="table-container"><table><thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th></tr></thead><tbody>${itemRows || `<tr><td colspan="4">No items on this order.</td></tr>`}</tbody></table></div></div>
+                <div class="table-view-order-totals">
+                    <div><span>Subtotal</span><strong>${money(order.subtotal)}</strong></div>
+                    <div><span>GST</span><strong>${money(order.gst)}</strong></div>
+                    ${Number(order.discount || 0) > 0 ? `<div><span>${order.discount_adjustment_name || order.marketing_deal_name ? `Discount · ${esc(order.discount_adjustment_name || order.marketing_deal_name)}` : "Discount"}</span><strong>−${money(order.discount)}</strong></div>` : ""}
+                    ${Number(order.service_charge || 0) > 0 ? `<div><span>${order.charge_adjustment_name ? `Charge · ${esc(order.charge_adjustment_name)}` : "Charges"}</span><strong>${money(order.service_charge)}</strong></div>` : ""}
+                    <div class="table-view-total"><span>Total</span><strong>${money(order.total)}</strong></div>
+                    <div><span>Amount collected</span><strong>${money(amountCollected)}</strong></div>
+                    <div class="table-view-due"><span>Amount due</span><strong>${money(amountDue)}</strong></div>
+                </div>
+            </div>
+            <div class="table-view-order-actions">
+                <button type="button" class="order-detail-print-btn" onclick="printTableViewOrder(${orderId})"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 8V3h10v5M7 17H5a2 2 0 0 1-2-2v-4a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2h-2M7 14h10v7H7z"/></svg>Print bill</button>
+                ${!isClosed ? `<button type="button" class="order-detail-checkout-btn" onclick="${isQrOrder ? `checkoutQrOrder(${orderId})` : `payOpenOrder(${orderId})`}"${canCheckout ? "" : ` disabled title="${esc(checkoutTitle)}"`}>Checkout <span aria-hidden="true">→</span></button>` : ""}
+            </div>`;
+        renderQrOrderWorkflow(order, "tableViewQrOrderWorkflow", true);
     } catch (error) {
         if (requestToken === tableViewOrderRequestToken) panel.innerHTML = `<div class="table-view-empty table-view-empty-inline"><span aria-hidden="true">!</span><strong>Couldn’t load this order</strong><p>${esc(error.message || "Refresh the table view and try again.")}</p></div>`;
     }
@@ -4877,10 +5271,11 @@ async function loadTables() {
         const tableViewActive = document.getElementById("table-view")?.classList.contains("active-page");
         if (tableViewActive) {
             if (hasPermission("orders", "view")) {
-                try { currentOrders = await api("/orders"); }
-                catch (error) { currentOrders = []; console.warn("Unable to refresh table orders:", error.message); }
+                try { currentOrders = await api("/orders"); tableViewOrdersLoadError = false; }
+                catch (error) { tableViewOrdersLoadError = true; console.warn("Unable to refresh table orders:", error.message); }
             } else {
                 currentOrders = [];
+                tableViewOrdersLoadError = false;
             }
             if (!restaurantTables.some(table => String(table.table_number) === selectedTableViewNumber)) {
                 selectedTableViewNumber = restaurantTables.find(table => getActiveOrderForTable(table.table_number))?.table_number || restaurantTables[0]?.table_number || "";
@@ -4890,6 +5285,8 @@ async function loadTables() {
 
         window.restaurantTables =
             restaurantTables;
+
+        renderTableAreas();
 
 
         const orderSelect =
@@ -4940,7 +5337,7 @@ async function loadTables() {
                             <article class="table-card">
                                 <div class="table-card-header">
                                     <div class="table-card-heading">
-                                        <span class="table-card-kicker">TABLE</span>
+                                        <span class="table-card-kicker">${table.is_temporary ? "ADHOC TABLE" : "TABLE"}</span>
                                         <h3>${esc(table.table_number)}</h3>
                                     </div>
                                     <span class="table-status ${String(table.status || "Available").toLowerCase()}">
@@ -4960,6 +5357,7 @@ async function loadTables() {
                                         <span class="table-capacity-label">SEATING</span>
                                         <strong>${esc(table.capacity)}</strong>
                                         <span>seats</span>
+                                        ${table.area_name ? `<small class="table-card-area">${esc(table.area_name)}</small>` : ""}
                                     </div>
                                 </div>
 
@@ -4992,6 +5390,7 @@ async function loadTables() {
             billingGrid.innerHTML = restaurantTables.map(function(table) {
                 const activeOrder = getActiveOrderForTable(table.table_number);
                 const status = activeOrder ? "occupied" : String(table.status || "Available").toLowerCase();
+                const areaName = String(table.area_name || appSettings.tableAreas.find(area => area.id === String(table.area_id || ""))?.name || "");
                 const active = tableViewActive
                     ? String(selectedTableViewNumber) === String(table.table_number)
                     : document.getElementById("tableNumber")?.value === table.table_number;
@@ -5000,10 +5399,13 @@ async function loadTables() {
                     <button type="button"
                         class="billing-table-card ${status} ${active ? "selected" : ""}"
                         data-table-number="${esc(table.table_number)}"
+                        data-area-id="${esc(table.area_id || "")}"
                         data-table-status="${status}"
                         onclick="${tableViewActive ? `selectTableViewTable(${JSON.stringify(String(table.table_number)).replace(/"/g, '&quot;')})` : `selectBillingTable(${JSON.stringify(String(table.table_number)).replace(/"/g, '&quot;')}, ${JSON.stringify(String(table.status)).replace(/"/g, '&quot;')})`}">
                         <span class="billing-table-number">${esc(table.table_number)}</span>
                         <span class="billing-table-seat">${esc(table.capacity)} seats</span>
+                        ${areaName ? `<span class="billing-table-area-label">${esc(areaName)}</span>` : ""}
+                        ${table.is_temporary ? `<span class="billing-table-area-label adhoc-table-badge">Adhoc · ${esc(table.server_name || "SYSTEM")}</span>` : ""}
                         <span class="billing-table-status">${esc(label)}</span>
                         ${activeOrder ? `<small class="billing-table-order-ref">${esc(activeOrder.order_number || `Order #${activeOrder.id}`)} · ${money(activeOrder.total)}</small>` : ""}
                     </button>`;
@@ -5127,6 +5529,10 @@ function openAddTableModal() {
 
     }
 
+    renderTableAreaSelects();
+    const area = document.getElementById("newTableArea");
+    if (area) area.value = "";
+
 
     const modal =
         document.getElementById(
@@ -5159,6 +5565,80 @@ function closeAddTableModal() {
 
     }
 
+}
+
+async function openAdhocTableDrawer() {
+    const overlay = document.getElementById("adhocTableOverlay");
+    const drawer = document.getElementById("adhocTableDrawer");
+    if (!overlay || !drawer) return;
+    renderTableAreaSelects();
+    const name = document.getElementById("adhocTableName");
+    const guests = document.getElementById("adhocGuestCount");
+    const area = document.getElementById("adhocTableArea");
+    if (name) name.value = "";
+    if (guests) guests.value = "1";
+    if (area) area.value = "";
+    const server = document.getElementById("adhocTableServer");
+    if (server) {
+        server.innerHTML = '<option value="SYSTEM">SYSTEM</option>';
+        try {
+            const users = await api("/access/users");
+            const staff = (Array.isArray(users) ? users : users.users || []).filter(user => user.active !== false && !user.is_blocked);
+            staff.forEach(user => {
+                const label = String(user.display_name || user.username || "").trim();
+                if (!label || label.toLocaleLowerCase() === "system") return;
+                const option = document.createElement("option");
+                option.value = label;
+                option.textContent = label;
+                server.appendChild(option);
+            });
+        } catch (_) {}
+        server.value = "SYSTEM";
+    }
+    overlay.hidden = false;
+    drawer.hidden = false;
+    document.body.classList.add("adhoc-table-drawer-open");
+    name?.focus();
+}
+
+function closeAdhocTableDrawer() {
+    const overlay = document.getElementById("adhocTableOverlay");
+    const drawer = document.getElementById("adhocTableDrawer");
+    if (overlay) overlay.hidden = true;
+    if (drawer) drawer.hidden = true;
+    document.body.classList.remove("adhoc-table-drawer-open");
+}
+
+function adjustAdhocGuestCount(delta) {
+    const input = document.getElementById("adhocGuestCount");
+    if (!input) return;
+    input.value = String(Math.min(100, Math.max(1, (Number(input.value) || 1) + Number(delta || 0))));
+}
+
+async function saveAdhocTable() {
+    const input = document.getElementById("adhocTableName");
+    const enteredName = String(input?.value || "").trim().replace(/^adhoc(?:\s+|$)/i, "");
+    const tableName = enteredName ? `Adhoc ${enteredName}` : "";
+    const capacity = Number(document.getElementById("adhocGuestCount")?.value);
+    const areaId = document.getElementById("adhocTableArea")?.value || "";
+    const serverName = document.getElementById("adhocTableServer")?.value || "SYSTEM";
+    const button = document.getElementById("adhocTableSaveButton");
+    if (!tableName) return alert("Enter a name for this adhoc table.");
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 100) return alert("Enter a guest count between 1 and 100.");
+    if (button) { button.disabled = true; button.textContent = "Saving…"; }
+    try {
+        await api("/tables", { method: "POST", body: JSON.stringify({ tableNumber: tableName, capacity, areaId, isTemporary: true, serverName }) });
+        closeAdhocTableDrawer();
+        tableViewStatusFilter = "all";
+        tableViewAreaFilter = areaId || "all";
+        selectedTableViewNumber = tableName;
+        await loadTables();
+        selectTableViewTable(tableName);
+    } catch (error) {
+        alert(error.message || "Could not add the adhoc table.");
+    } finally {
+        if (button) { button.disabled = false; button.textContent = "Save"; }
+    }
 }
 
 
@@ -5202,7 +5682,8 @@ async function addNewTable() {
                 body: JSON.stringify({
 
                     tableNumber,
-                    capacity
+                    capacity,
+                    areaId: document.getElementById("newTableArea")?.value || ""
 
                 })
 
@@ -5264,6 +5745,9 @@ function openEditTableModal(id) {
         "editTableCapacity"
     ).value =
         table.capacity;
+
+    renderTableAreaSelects();
+    document.getElementById("editTableArea").value = String(table.area_id || "");
 
 
     document.getElementById(
@@ -5335,7 +5819,8 @@ async function updateTable() {
                 body: JSON.stringify({
 
                     tableNumber,
-                    capacity
+                    capacity,
+                    areaId: document.getElementById("editTableArea")?.value || ""
 
                 })
 
@@ -5949,6 +6434,52 @@ function canKitchenReceiveKOTAlerts(){
     return Boolean(appSettings.kotEnabled !== false && currentUser && hasPermission("kitchen","view"));
 }
 
+function notifyDesktopIncomingOrder(order, eventKey){
+    const desktop=window.cafePOSDesktop;
+    const orderId=Number(order?.id||order?.order_id||order?.orderId||0);
+    if(!desktop?.notifyIncomingOrder||!orderId||appSettings.enableNotifications===false)return;
+    const orderNumber=String(order?.order_number||order?.orderNumber||"New order");
+    const tableNumber=String(order?.table_number||order?.tableNumber||"");
+    let amount="";
+    if(Number(order?.total)>0){try{amount=money(Number(order.total));}catch(_){amount=String(Number(order.total));}}
+    desktop.notifyIncomingOrder({
+        orderId,
+        businessId:String(currentUser?.business_id||""),
+        eventKey:String(eventKey||`order:${orderId}`),
+        orderNumber,
+        tableNumber,
+        amount,
+        ticketNumber:Number(order?.ticket_number||order?.ticketNumber)||null
+    }).then(result=>{
+        if(result?.success===false&&result.error)console.warn("Windows order notification unavailable:",result.error);
+    }).catch(error=>console.warn("Windows order notification failed:",error.message));
+}
+
+let desktopOrderNotificationUnsubscribe=null;
+function setupDesktopOrderNotifications(){
+    const desktop=window.cafePOSDesktop;
+    if(!desktop?.onOrderNotificationClick||desktopOrderNotificationUnsubscribe)return;
+    desktopOrderNotificationUnsubscribe=desktop.onOrderNotificationClick(payload=>{
+        if(!currentUser)return;
+        const notificationBusiness=String(payload?.businessId||"");
+        if(notificationBusiness&&notificationBusiness!==String(currentUser.business_id||""))return;
+        const orderId=Number(payload?.orderId||0);
+        if(!orderId)return;
+        if(hasPermission("orders","view")){
+            showPage("orders");
+            Promise.resolve(updateOrdersTable(true,false)).then(()=>viewOrder(orderId)).catch(error=>console.warn("Could not open the notified order:",error.message));
+        }else if(hasPermission("kitchen","view")){
+            showPage("kitchen");
+            kotState.tab="pending";
+            loadKOT(false).catch(error=>console.warn("Could not open the kitchen for this order:",error.message));
+        }
+    });
+    window.addEventListener("beforeunload",()=>{
+        desktopOrderNotificationUnsubscribe?.();
+        desktopOrderNotificationUnsubscribe=null;
+    },{once:true});
+}
+
 function ensureKOTAlertAudio(){
     try{
         if(!kotAlertAudioContext) kotAlertAudioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -6057,6 +6588,17 @@ function inspectNewKOTAlerts(items){
     if(newCount>0){
         playKOTAlertSound();
         showKOTArrivalToast(newCount);
+        const newOrderTickets=new Map();
+        (items||[]).filter(item=>newlyPendingIds.includes(Number(item.id))).forEach(item=>{
+            const orderId=Number(item.order_id||0),ticketNumber=Number(item.ticket_number||1);
+            if(!orderId)return;
+            const key=`${orderId}:${ticketNumber}`;
+            if(!newOrderTickets.has(key))newOrderTickets.set(key,item);
+        });
+        newOrderTickets.forEach(item=>{
+            const orderId=Number(item.order_id),ticketNumber=Number(item.ticket_number||1);
+            notifyDesktopIncomingOrder(item,ticketNumber>1?`ticket:${orderId}:${ticketNumber}`:`order:${orderId}`);
+        });
         const newIds=new Set(newlyPendingIds);
         const newQrBatches=new Map((items||[]).filter(item=>newIds.has(Number(item.id))&&isQrTrackedOrder(item)&&Number(item.ticket_number||1)>1).map(item=>[`${item.order_id}:${item.ticket_number}`,{orderId:Number(item.order_id),ticketNumber:Number(item.ticket_number)}]));
         if(hasPermission("kitchen","print"))newQrBatches.forEach(ticket=>Promise.resolve().then(()=>autoPrintQrFollowupTicket(ticket)).catch(error=>console.warn("New QR kitchen ticket print failed:",error)));
@@ -6479,8 +7021,10 @@ function renderMenuManagementCards(){
     });
     grid.innerHTML=items.length?items.map(item=>{
         const channel=item.channel_prices||{},variants=item.variants||[],available=item.available!==false;
+        const image=item.image_url||item.imageUrl||'';
+        const visual=image?`<div class="menu-admin-icon has-image"><img class="menu-admin-photo" src="${esc(image)}" alt="${esc(item.name)}" loading="lazy" decoding="async"></div>`:`<div class="menu-admin-icon">${menuIcon(item.category)}</div>`;
         return `<article class="menu-admin-card ${available?'':'disabled'}">
-          <div class="menu-admin-top"><div class="menu-admin-icon">${menuIcon(item.category)}</div><div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
+          <div class="menu-admin-top">${visual}<div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
           <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}${renderMenuItemTagBadges(item.tags)}</div>
           <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div></div>
           <div class="menu-channel-chips">${POS_CHANNELS.filter(saleChannel=>!Array.isArray(item.sales_channels)||item.sales_channels.includes(saleChannel.key)).map(saleChannel=>`<span>${esc(saleChannel.label)} ${money(channel[saleChannel.key]??item.price)}</span>`).join('')}</div>
@@ -6488,6 +7032,7 @@ function renderMenuManagementCards(){
           <div class="menu-admin-actions"><button type="button" class="table-action-btn" onclick="openMenuPriceEditor(${Number(item.id)})">💰 Manage prices</button><button type="button" class="table-action-btn" onclick="editMenuItem(${Number(item.id)})">Edit details</button><label class="menu-availability-toggle"><input type="checkbox" ${available?'checked':''} onchange="setMenuItemAvailability(${Number(item.id)},this.checked)" aria-label="Enable ${esc(item.name)} in the POS"><span>${available?'POS On':'POS Off'}</span></label></div>
         </article>`;
     }).join(''):'<div class="menu-empty-state">No matching menu items.</div>';
+    grid.querySelectorAll('.menu-admin-photo').forEach(image=>image.addEventListener('error',()=>image.closest('.menu-admin-icon')?.remove(),{once:true}));
 }
 
 let menuPriceEditingId=null;
@@ -8079,7 +8624,9 @@ async function selectBillingTable(tableNumber, status) {
     currentBillingPOSModuleKey = "tableView";
     selectedPOSChannelKey = getPOSChannelPreferences().tableView.defaultChannel;
     setOrderType("Dine-in", true);
-    setBillingPaxForTable(tableNumber, document.getElementById("billingPax")?.value || 1);
+    const selectedTable = (restaurantTables || []).find(table => String(table.table_number) === String(tableNumber));
+    const initialPax = selectedTable?.is_temporary ? selectedTable.capacity : document.getElementById("billingPax")?.value || 1;
+    setBillingPaxForTable(tableNumber, initialPax);
     updateBillingTableSelection();
     showPage("new-order");
     await loadMenu();
@@ -8272,6 +8819,7 @@ async function loadSettings() {
     if (!currentUser?.business_id) {
         appSettings.paymentModes = normalizePaymentModes(appSettings.paymentModes);
         renderPaymentModeManager();
+        renderTableAreas();
         return;
     }
     try {
@@ -8303,6 +8851,16 @@ async function loadSettings() {
 
     // Migrate older local caches that kept QR hero data in general POS settings.
     delete appSettings.publicMenuHeroImages;
+    const hadDuplicateMenuAccountCategories=menuAccountsHaveDuplicateCategories(appSettings.menuAccounts);
+    appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
+    if(hadDuplicateMenuAccountCategories){
+        try{
+            const saved=await api("/settings",{method:"PUT",body:JSON.stringify({menuAccounts:appSettings.menuAccounts})});
+            if(Array.isArray(saved?.settings?.menuAccounts))appSettings.menuAccounts=normalizeMenuAccounts(saved.settings.menuAccounts);
+        }catch(error){console.warn("Duplicate menu category assignments could not be cleaned up:",error.message);}
+    }
+    setText("menuAccountCount",appSettings.menuAccounts.length);
+    renderBillingMenuAccountSelect();
     try { localStorage.setItem(settingsLocalStorageKey(), JSON.stringify(appSettings)); } catch (_) {}
 
     syncPOSChannelsFromSettings();
@@ -8373,6 +8931,7 @@ async function loadSettings() {
     renderSalesChannels();
     renderBillingSaleChannelOptions();
     renderBillingAdjustmentAppliesOptions();
+    renderTableAreas();
     applyPermissionsToUI();
 }
 
@@ -8539,7 +9098,7 @@ function resetSettings() {
         cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
         allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
         printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
-        defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5, customerInfoRequirements: {},
+        defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5, customerInfoRequirements: {}, tableAreas: normalizeTableAreas(appSettings.tableAreas), menuAccounts: normalizeMenuAccounts(appSettings.menuAccounts),
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
         qrCleanTableNotification: true, qrCleanTableSound: true, qrCleanTableBuzzer: false,
         qrCallWaiterNotification: true, qrCallWaiterSound: true, qrCallWaiterBuzzer: false,
@@ -10663,6 +11222,20 @@ function printerReceiptText(data,paperWidth="80"){
     add(data.customerName||"Guest");
     const customerCode=data.customerCode||(data.customerId?"#"+data.customerId:"");
     if(customerCode)add(customerCode);
+    if(appSettings.showCustomer!==false){
+        const customerDetails=[];
+        const customerName=clean(data.customerName||data.customer_name||"");
+        if(customerName&&customerName!=="Guest")customerDetails.push(customerName);
+        const customerPhone=clean(data.customerPhone||data.customer_phone||"");
+        if(customerPhone&&appSettings.showCustomerPhone!==false)customerDetails.push(customerPhone);
+        const customerEmail=clean(data.customerEmail||data.customer_email||"");if(customerEmail)customerDetails.push(customerEmail);
+        const customerGstin=clean(data.customerGstin||data.customer_gstin||"");if(customerGstin)customerDetails.push("GSTIN: "+customerGstin);
+        const customerBirthDate=clean(data.customerBirthDate||data.customer_birth_date||"");if(customerBirthDate)customerDetails.push("DOB: "+customerBirthDate);
+        const customerAddress=clean(data.customerAddress||data.customer_address||"");if(customerAddress)customerDetails.push(customerAddress);
+        const customerCity=clean(data.customerCity||data.customer_city||"");if(customerCity)customerDetails.push(customerCity);
+        const customerState=clean(data.customerState||data.customer_state||"");if(customerState)customerDetails.push(customerState);
+        if(customerDetails.length)add("Customer: "+customerDetails.join(" · "));
+    }
     lines.push(divider);
     const totalQty=items.reduce((sum,item)=>sum+Math.max(0,Number(item.quantity||0)),0);
     const invoiceLabel=data.isOpenOrder?(data.orderNumber||"-"):(data.invoiceNumber||data.orderNumber||"-");
@@ -11160,12 +11733,7 @@ function updateRestaurantMenuLinkPreview(){
 }
 
 function qrTableDisplayName(value){
-    const label=String(value||"").trim();
-    if(/^t\d+$/i.test(label))return label.toUpperCase();
-    const tableMatch=label.match(/^table\s+(.+)$/i);
-    if(tableMatch&&/^t?\d+$/i.test(tableMatch[1]))return "T"+tableMatch[1].replace(/^t/i,"");
-    if(/^\d+$/.test(label))return "T"+label;
-    return label;
+    return String(value??"").trim();
 }
 function loadQrPosterImage(source){
     return new Promise((resolve,reject)=>{
@@ -11193,7 +11761,7 @@ async function createGenzTableQrPoster(table,qrDataUrl){
     context.font="900 78px Arial, sans-serif";context.fillStyle="#fffaf1";context.fillText("Your next fave",600,260);
     context.fillStyle="#d9fb55";context.fillText("is one scan away ✦",600,350);
     context.font="700 27px Arial, sans-serif";context.fillStyle="#cec8dc";context.fillText("Scan the code. Pick your mood. We’ll make the good stuff.",600,425,1010);
-    const tableLabel="TABLE "+qrTableDisplayName(table.table_number||table.id);
+    const tableLabel=qrTableDisplayName(table.table_number||table.id);
     context.font="900 26px Arial, sans-serif";
     const badgeWidth=Math.max(210,context.measureText(tableLabel).width+64);
     roundedRect((1200-badgeWidth)/2,466,badgeWidth,62,31,"#ff6cad");
@@ -11456,7 +12024,7 @@ async function renderTableQrCards(){
         return;
     }
     if(select){
-        const options=tableQrMenuTables.map(table=>'<option value="'+Number(table.id)+'">Table '+esc(qrTableDisplayName(table.table_number))+'</option>').join("");
+        const options=tableQrMenuTables.map(table=>'<option value="'+Number(table.id)+'">'+esc(qrTableDisplayName(table.table_number))+'</option>').join("");
         select.innerHTML='<option value="">Choose a table…</option>'+options;
         select.value=tableQrMenuTables.some(table=>String(table.id)===previousValue)?previousValue:"";
     }
@@ -11466,7 +12034,7 @@ async function renderTableQrCards(){
         return;
     }
     grid.innerHTML=[selectedTable].map(table=>{
-        const id=Number(table.id),label="Table "+qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
+        const id=Number(table.id),label=qrTableDisplayName(table.table_number),targetUrl=qrMenuTableUrl(table);
         return '<article class="table-qr-card"><div class="table-qr-card-head"><h4>'+esc(label)+'</h4><span>'+esc(table.status||"Available")+'</span></div>'
             +'<div class="table-qr-preview"><img id="tableQrImage'+id+'" alt="QR code for '+esc(label)+'" hidden><div id="tableQrPlaceholder'+id+'" class="table-qr-placeholder">Generating QR…</div></div>'
             +'<span class="table-qr-link" title="'+esc(targetUrl)+'">'+esc(targetUrl)+'</span>'
@@ -11501,7 +12069,7 @@ function downloadTableMenuQr(tableId){
 function printTableMenuQr(tableId){
     const table=tableQrMenuTables.find(row=>Number(row.id)===Number(tableId)),dataUrl=tableQrMenuPosterData.get(String(tableId));
     if(!table||!dataUrl)return;
-    const tableLabel="Table "+qrTableDisplayName(table.table_number);
+    const tableLabel=qrTableDisplayName(table.table_number);
     const printWindow=window.open("","_blank","width=760,height=900");
     if(!printWindow){alert("Allow pop-ups for this POS page to print a table QR.");return;}
     printWindow.document.write('<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(tableLabel)+' menu QR</title><style>@page{size:A4;margin:10mm}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#eee9f8;font-family:Arial,sans-serif}.sheet{display:grid;place-items:center;width:100%;min-height:275mm}.sheet img{display:block;width:min(170mm,100%);height:auto;max-height:275mm;object-fit:contain}.print-action{position:fixed;top:16px;right:16px;padding:11px 18px;border:0;border-radius:999px;background:#d9fb55;color:#25222f;font-weight:900;cursor:pointer}@media print{body{min-height:auto;background:#fff}.sheet{min-height:0}.sheet img{width:170mm;max-height:275mm}.print-action{display:none}}</style></head><body><main class="sheet"><img src="'+dataUrl+'" alt="'+esc(tableLabel)+' themed menu QR"></main><button class="print-action" onclick="window.print()">Print QR ✦</button><script>window.addEventListener("load",()=>setTimeout(()=>window.print(),300));</script></body></html>');
@@ -11765,7 +12333,7 @@ function showQROrderArrivalToast(arrivals,accepted=false){
 }
 async function pollPOSQrOrderAlerts(){
     if(!currentUser){stopPOSQrOrderAlerts();return;}
-    if(document.visibilityState!=="visible"){
+    if(document.visibilityState!=="visible"&&!window.cafePOSDesktop){
         if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
         return;
     }
@@ -11793,11 +12361,13 @@ async function pollPOSQrOrderAlerts(){
             // kitchen users here instead of relying on the KOT poll's initial seed.
             if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
             else playPOSQrOrderAlertSound();
+            unacceptedArrivals.forEach(order=>notifyDesktopIncomingOrder(order,`order:${Number(order.id)}`));
             showQROrderArrivalToast(unacceptedArrivals);
         }
         if(acceptedOrders.length){
             if(canKitchenReceiveKOTAlerts())playKOTAlertSound();
             else playPOSQrOrderAlertSound();
+            acceptedOrders.forEach(order=>notifyDesktopIncomingOrder(order,`order:${Number(order.id)}`));
             showQROrderArrivalToast(acceptedOrders,true);
         }
         if((newOrdersFound||arrivals.length||updates.length||acceptedOrders.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
