@@ -2083,7 +2083,8 @@ function resolveSaleChannel(settings, channelKey, orderType = null) {
     const key = String(channelKey || "").trim().toLowerCase();
     const channel = channels.find(entry => entry.key === key);
     if (!channel) throw Object.assign(new Error("Choose an active sale channel."), { status: 400 });
-    if (orderType && channel.orderType !== orderType) {
+    const qrChannelSupportsOrderType = channel.qrMenu === true && ["Dine-in", "Takeaway"].includes(orderType);
+    if (orderType && channel.orderType !== orderType && !qrChannelSupportsOrderType) {
         throw Object.assign(new Error("This sale channel does not match the selected order type."), { status: 400 });
     }
     return channel;
@@ -5198,6 +5199,7 @@ app.put("/api/orders/:id/qr-status", async (req, res) => {
         if (!order.public_tracking_token && !/^QR-/i.test(String(order.order_number || ""))) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This workflow is only available for QR orders." }); }
         const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
         const orderSettings = settingsResult.rows[0]?.settings || {};
+        // A QR price channel such as "online" can serve both dine-in and takeaway orders.
         const saleChannel = resolveSaleChannel(orderSettings, order.sales_channel_key || "online", order.order_type || "Takeaway");
         const kotPrintMode = saleChannel.qrMenu ? saleChannel.kotPrintMode : "never";
         const currentStatus = String(order.status || "").trim().toLowerCase();
@@ -5355,10 +5357,19 @@ async function nextBusinessSequenceNumber(client, businessId, seriesKey, startin
 async function nextOrderDisplayNumber(client, businessId, seriesKey, prefix, startingNumber = 1, padding = 4) {
     const width = Math.max(1, Math.min(12, Math.floor(Number(padding) || 4)));
     const safePrefix = String(prefix ?? "").slice(0, 24);
+    // orders.order_number is globally unique, so serialize number allocation across businesses.
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))", ["slash-pos", "orders-order-number"]);
     for (let attempt = 0; attempt < 1000; attempt++) {
         const sequence = await nextBusinessSequenceNumber(client, businessId, seriesKey, startingNumber);
         const displayNumber = safePrefix + String(sequence).padStart(width, "0");
-        const existing = await client.query("SELECT 1 FROM orders WHERE business_id=$1 AND order_number=$2 LIMIT 1", [Number(businessId), displayNumber]);
+        const previousMode = await client.query("SELECT current_setting('app.system_mode', true) AS mode");
+        await client.query("SELECT set_config('app.system_mode','on',true)");
+        let existing;
+        try {
+            existing = await client.query("SELECT 1 FROM orders WHERE order_number=$1 LIMIT 1", [displayNumber]);
+        } finally {
+            await client.query("SELECT set_config('app.system_mode',$1,true)", [previousMode.rows[0]?.mode || "off"]);
+        }
         if (!existing.rows.length) return displayNumber;
     }
     throw new Error("Could not allocate a unique order number. Choose a different prefix or starting number.");
