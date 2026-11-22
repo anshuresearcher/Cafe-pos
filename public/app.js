@@ -1798,8 +1798,8 @@ function setBillingPaxForTable(tableNumber, value = null) {
 
 function addToCart(id,name,price,menuItem=null,variant=null,options=[],basePrice=price,quantity=1,itemDiscountRuleId=null){
     const optionKey=(options||[]).flatMap(set=>set.options||[]).map(option=>String(option.id)).sort().join(',');
-    const cartKey=`${variant?`${id}:${variant.id}`:String(id)}:${optionKey}`; const existing=cart.find(x=>String(x.cartKey)===cartKey);
-    if(existing){existing.quantity+=Math.max(1,Number(quantity)||1);if(itemDiscountRuleId)existing.itemDiscountRuleId=Number(itemDiscountRuleId)||null;} else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),basePrice:Number(basePrice),options:options||[],quantity:Math.max(1,Number(quantity)||1),unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive',itemDiscountRuleId:Number(itemDiscountRuleId)||null});
+    const cartKey=menuItem?.is_open_item?`open:${id}:${Date.now()}:${Math.random().toString(36).slice(2,7)}`:`${variant?`${id}:${variant.id}`:String(id)}:${optionKey}`; const existing=cart.find(x=>String(x.cartKey)===cartKey);
+    if(existing){existing.quantity+=Math.max(1,Number(quantity)||1);if(itemDiscountRuleId)existing.itemDiscountRuleId=Number(itemDiscountRuleId)||null;} else cart.push({id,variantId:variant?.id||null,cartKey,name,price:Number(price),basePrice:Number(basePrice),options:options||[],quantity:Math.max(1,Number(quantity)||1),unit:variant?.unit||menuItem?.unit||'ea',taxRate:Number(menuItem?.tax_rate??5),taxMode:menuItem?.tax_mode==='inclusive'?'inclusive':'exclusive',itemDiscountRuleId:Number(itemDiscountRuleId)||null,isOpenItem:menuItem?.is_open_item===true});
     updateCart();
 }
 
@@ -2314,9 +2314,7 @@ function updateCart() {
 
             <div>
 
-                <div class="cart-item-name">
-                    ${esc(item.name)}
-                </div>
+                <div class="cart-item-name">${esc(item.name)}</div>
                 ${item.options?.length?`<small class="cart-item-options">${esc(formatItemOptionNames(item.options))}</small>`:''}
 
                 <small>
@@ -2346,7 +2344,7 @@ function updateCart() {
             </div>
 
 
-            <strong>
+            <strong class="cart-item-total">
                 ${money(Math.max(0,item.price*item.quantity-lineDiscount))}
             </strong>
 
@@ -2391,12 +2389,17 @@ function normalizePOSChannels(value) {
     const channels = entries.map(channel => {
         const key = String(channel?.key || "").trim().toLowerCase();
         const fixed = defaultsByKey.get(key);
+        const qrMenu = fixed ? fixed.qrMenu === true : channel?.qrMenu === true;
+        const allowedKotModes = qrMenu ? ["accepted", "never"] : ["never", "save", "checkout"];
+        const fallbackKotMode = qrMenu ? "accepted" : (["never", "save", "checkout"].includes(appSettings?.kotPrintMode) ? appSettings.kotPrintMode : "never");
+        const requestedKotMode = String(channel?.kotPrintMode || "");
         return {
             key,
             label: String(fixed?.label || channel?.label || "").trim().slice(0, 60),
             orderType: fixed?.orderType || (channel?.orderType === "Dine-in" ? "Dine-in" : channel?.orderType === "Takeaway" ? "Takeaway" : ""),
-            qrMenu: fixed ? fixed.qrMenu === true : channel?.qrMenu === true,
-            billCopies: Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? fallbackCopies) || 0)))
+            qrMenu,
+            billCopies: Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? fallbackCopies) || 0))),
+            kotPrintMode: allowedKotModes.includes(requestedKotMode) ? requestedKotMode : fallbackKotMode
         };
     }).filter(channel => {
         if (!/^[a-z][a-z0-9_]{1,19}$/.test(channel.key) || !channel.label || !channel.orderType || seen.has(channel.key)) return false;
@@ -2411,6 +2414,13 @@ function syncPOSChannelsFromSettings() {
     appSettings.posSalesChannels = POS_CHANNELS.map(channel => ({ ...channel }));
 }
 function getSaleChannel(key) { return POS_CHANNELS.find(channel => channel.key === String(key || "")) || null; }
+function getKOTPrintModeForChannel(key = currentSaleChannelKey()) {
+    const channel = getSaleChannel(key);
+    if (channel?.qrMenu) return ["accepted", "never"].includes(channel.kotPrintMode) ? channel.kotPrintMode : "accepted";
+    return ["never", "save", "checkout"].includes(channel?.kotPrintMode)
+        ? channel.kotPrintMode
+        : (["never", "save", "checkout"].includes(appSettings?.kotPrintMode) ? appSettings.kotPrintMode : "never");
+}
 function defaultPOSChannelPreferences() {
     const dineIn = POS_CHANNELS.filter(channel => channel.orderType === "Dine-in").map(channel => channel.key);
     const takeaway = POS_CHANNELS.filter(channel => channel.orderType === "Takeaway").map(channel => channel.key);
@@ -2649,6 +2659,10 @@ async function selectBillingMenuItem(item) {
         showProfileToast("This item is not available on the selected sale channel.");
         return;
     }
+    if (item?.is_open_item === true || item?.isOpenItem === true) {
+        openItemOptionPicker(item);
+        return;
+    }
     try{
         await loadMenuOptionSets();
     }catch(error){
@@ -2662,11 +2676,10 @@ function itemOptionSets(item,variant=null){const byId=new Map(menuOptionSets.map
 function openItemOptionPickerLegacy(item,variant=null){
     const variants=getAvailableMenuVariants(item),chosen=variant||((variants.length===1)?variants[0]:null),modal=document.getElementById('itemOptionsModal');
     if(!modal)return;
-    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';
+    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';modal.dataset.isOpenItem=String(item?.is_open_item===true||item?.isOpenItem===true);modal.dataset.openItemName=modal.dataset.isOpenItem?String(item.name||'Open item'):'';modal.dataset.openItemPrice=modal.dataset.isOpenItem?String(resolveMenuPrice(item)):'';
     const instruction=document.getElementById('itemCustomizerInstruction');if(instruction){instruction.value='';instruction.hidden=true;}
     const instructionToggle=document.getElementById('itemCustomizerInstructionToggle');if(instructionToggle){instructionToggle.textContent='＋  Add Cooking Instruction';instructionToggle.setAttribute('aria-expanded','false');}
     const backOrder=document.getElementById('itemCustomizerBackOrder');if(backOrder)backOrder.checked=false;
-    const detailsToggle=document.querySelector('.item-customizer-more-details');if(detailsToggle)detailsToggle.setAttribute('aria-expanded','false');
     const body=document.getElementById('itemOptionsBody');if(body)body.innerHTML='';
     renderItemOptionPicker(item);
     modal.style.display='flex';
@@ -2722,26 +2735,29 @@ function confirmItemOptionsLegacy(){
 function openItemOptionPicker(item,variant=null){
     const variants=getAvailableMenuVariants(item),chosen=variant||((variants.length===1)?variants[0]:null),modal=document.getElementById('itemOptionsModal');
     if(!modal)return;
-    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';
+    modal.dataset.menuId=String(item.id);modal.dataset.variantId=String(chosen?.id||'');modal.dataset.quantity='1';modal.dataset.detailsOpen='false';modal.dataset.cookingInstruction='';modal.dataset.itemDiscountRuleId='';modal.dataset.isOpenItem=String(item?.is_open_item===true||item?.isOpenItem===true);modal.dataset.openItemName=modal.dataset.isOpenItem?String(item.name||'Open item'):'';modal.dataset.openItemPrice=modal.dataset.isOpenItem?String(resolveMenuPrice(item)):'';
+    const nameTitle=document.getElementById('itemOptionsTitle'),nameEdit=document.getElementById('itemOptionsOpenNameEdit'),nameInput=document.getElementById('itemOptionsOpenName'),nameActions=document.getElementById('itemOptionsOpenNameActions');if(nameTitle)nameTitle.hidden=false;if(nameEdit)nameEdit.hidden=true;if(nameInput)nameInput.hidden=true;if(nameActions)nameActions.hidden=true;
+    const priceDisplay=document.getElementById('itemOptionsOpenPriceDisplay'),priceEditor=document.getElementById('itemOptionsOpenPriceEditor');if(priceDisplay)priceDisplay.hidden=false;if(priceEditor)priceEditor.hidden=true;
     const instruction=document.getElementById('itemCustomizerInstruction');if(instruction){instruction.value='';instruction.hidden=true;}
     const instructionToggle=document.getElementById('itemCustomizerInstructionToggle');if(instructionToggle){instructionToggle.textContent='＋  Add Cooking Instruction';instructionToggle.setAttribute('aria-expanded','false');}
     const backOrder=document.getElementById('itemCustomizerBackOrder');if(backOrder)backOrder.checked=false;
-    const detailsToggle=document.querySelector('.item-customizer-more-details');if(detailsToggle)detailsToggle.setAttribute('aria-expanded','false');
     const discount=document.getElementById('itemCustomizerDiscount');if(discount)discount.hidden=true;
     const body=document.getElementById('itemOptionsBody');if(body)body.innerHTML='';
     renderItemOptionPicker(item);modal.style.display='flex';
 }
 function renderItemOptionPicker(item){
     const modal=document.getElementById('itemOptionsModal'),body=document.getElementById('itemOptionsBody');if(!modal||!body||!item)return;
-    const variants=getAvailableMenuVariants(item),variant=variants.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null,sets=itemOptionSets(item,variant),basePrice=resolveMenuPrice(item,variant),image=item.image_url||item.imageUrl||'';
+    const isOpenItem=modal.dataset.isOpenItem==='true',variants=isOpenItem?[]:getAvailableMenuVariants(item),variant=variants.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null,sets=isOpenItem?[]:itemOptionSets(item,variant),basePrice=isOpenItem?Math.max(0,Number(modal.dataset.openItemPrice)||0):resolveMenuPrice(item,variant),image=item.image_url||item.imageUrl||'';
     const selectedOptions=new Set([...body.querySelectorAll('input:checked[data-option-id]')].map(input=>String(input.dataset.optionId)));
-    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=variant?`${item.name} — ${variant.name}`:item.name;
-    const title=document.getElementById('itemOptionsTitle');if(title)title.textContent=`Customise ${item.name}`;
+    modal.dataset.basePrice=String(basePrice);modal.dataset.itemName=isOpenItem?String(modal.dataset.openItemName||item.name):variant?`${item.name} — ${variant.name}`:item.name;
+    const title=document.getElementById('itemOptionsTitle');if(title){title.textContent=isOpenItem?String(modal.dataset.openItemName||item.name||'Open item'):`Customise ${item.name}`;title.hidden=false;}
+    const openName=document.getElementById('itemOptionsOpenName'),nameEdit=document.getElementById('itemOptionsOpenNameEdit'),nameActions=document.getElementById('itemOptionsOpenNameActions');if(openName){openName.hidden=true;openName.value=isOpenItem?String(modal.dataset.openItemName||item.name||''):'';}if(nameEdit)nameEdit.hidden=!isOpenItem;if(nameActions)nameActions.hidden=true;
     const mark=document.getElementById('itemOptionsNature');if(mark){const tags=(Array.isArray(item.tags)?item.tags:[]).map(tag=>String(tag).toLowerCase().replace(/[\s_-]+/g,'')),nonVeg=tags.some(tag=>tag.includes('nonveg')||tag.includes('egg'))||String(item.nature||'').toLowerCase().includes('non-veg'),veg=tags.some(tag=>tag==='veg'||tag==='vegetarian');mark.hidden=!(nonVeg||veg);mark.classList.toggle('is-non-veg',nonVeg);mark.setAttribute('aria-label',nonVeg?'Non-vegetarian item':'Vegetarian item');}
     const variantsMarkup=variants.length>1?`<fieldset class="item-option-set item-variant-section"><legend><span class="item-customizer-set-title">Quantity <small class="required">REQUIRED</small></span><span class="item-option-chevron" aria-hidden="true">⌃</span></legend><div class="item-variant-options">${variants.map(entry=>`<label class="item-variant-choice ${String(entry.id)===String(variant?.id)?'is-selected':''}"><input type="radio" name="itemCustomizerVariant" value="${esc(entry.id)}" ${String(entry.id)===String(variant?.id)?'checked':''}><span><strong>${esc(entry.name)}</strong><small>${esc(entry.unit||item.unit||'ea')}</small></span><b>${money(resolveMenuPrice(item,entry))}</b></label>`).join('')}</div></fieldset>`:'';
     const optionMarkup=sets.map(set=>{const min=Number(set.minSelections||0),max=Number(set.maxSelections||1),selectedCount=(set.options||[]).filter(option=>selectedOptions.has(String(option.id))).length;return `<fieldset class="item-option-set" data-set-id="${esc(set.id)}" data-max-selections="${max}"><legend><span class="item-customizer-set-title">${esc(set.name)} <small class="item-option-count">${selectedCount}/${max}</small></span><small class="${min?'required':'optional'}">${min?'REQUIRED':'OPTIONAL'}</small><span class="item-option-chevron" aria-hidden="true">⌃</span></legend><div class="item-option-list">${(set.options||[]).map(option=>`<label><span class="item-customizer-option-mark" aria-hidden="true"></span><span class="item-customizer-option-copy">${esc(option.name)}<small>${Number(option.price||0)>0?`+ ${money(option.price)}`:'Included'}</small></span><input type="${max===1?'radio':'checkbox'}" name="item-option-${esc(set.id)}" data-set-id="${esc(set.id)}" data-option-id="${esc(option.id)}" value="${esc(option.id)}" ${selectedOptions.has(String(option.id))?'checked':''}></label>`).join('')}</div></fieldset>`;}).join('');
-    const detailsOpen=modal.dataset.detailsOpen==='true',selectedAddonTotal=[...body.querySelectorAll('input:checked[data-option-id]')].reduce((sum,input)=>sum+Number(sets.flatMap(set=>set.options||[]).find(option=>String(option.id)===String(input.dataset.optionId))?.price||0),0);
-    body.innerHTML=`<div id="itemCustomizerDetails" class="item-customizer-details" ${detailsOpen?'':'hidden'}><div class="item-customizer-image">${image?`<img src="${esc(image)}" alt="${esc(item.name)}">`:`<span>${menuIcon(item.category)||'✦'}</span>`}</div><div><span class="menu-eyebrow">${esc(item.category||'MENU ITEM')}</span><p>${esc(item.description||'No additional item details.')}</p></div></div><div class="item-customizer-rate-row"><span>Rate: <strong id="itemOptionsRate">${money(basePrice)}</strong></span><span>Item Price: <strong id="itemOptionsUnitPrice">${variants.length>1&&!variant?'Choose a size':money(basePrice+selectedAddonTotal)}</strong></span></div>${variantsMarkup}${optionMarkup}`;
+    const selectedAddonTotal=[...body.querySelectorAll('input:checked[data-option-id]')].reduce((sum,input)=>sum+Number(sets.flatMap(set=>set.options||[]).find(option=>String(option.id)===String(input.dataset.optionId))?.price||0),0);
+    body.innerHTML=`<div class="item-customizer-rate-row"><span>Rate: <strong id="itemOptionsRate">${money(basePrice)}</strong></span><span>Item Price: <strong id="itemOptionsUnitPrice">${variants.length>1&&!variant?'Choose a size':money(basePrice+selectedAddonTotal)}</strong></span></div>${variantsMarkup}${optionMarkup}`;
+    if(isOpenItem){const rateRow=body.querySelector('.item-customizer-rate-row');if(rateRow){rateRow.classList.add('open-item-customizer-rate');rateRow.innerHTML=`<span id="itemOptionsOpenPriceDisplay" class="open-item-price-display">Rate: <strong id="itemOptionsRate">${money(basePrice)}</strong><button type="button" class="open-item-edit-button" title="Edit item price" aria-label="Edit item price" onclick="beginOpenItemCustomizerEdit('price')">✎</button></span><span id="itemOptionsOpenPriceEditor" class="open-item-price-editor" hidden><label for="itemOptionsOpenPrice">Rate <input id="itemOptionsOpenPrice" type="number" min="0" step="0.01" value="${esc(String(modal.dataset.openItemPrice??basePrice))}" aria-label="Open item price"></label><button type="button" class="open-item-edit-save" title="Save item price" aria-label="Save item price" onclick="finishOpenItemCustomizerEdit('price',true)">✓</button><button type="button" class="open-item-edit-cancel" title="Cancel item price edit" aria-label="Cancel item price edit" onclick="finishOpenItemCustomizerEdit('price',false)">✕</button></span><span>Item Price: <strong id="itemOptionsUnitPrice">${money(basePrice+selectedAddonTotal)}</strong></span>`;}const openPrice=document.getElementById('itemOptionsOpenPrice');if(openPrice)openPrice.oninput=()=>updateOpenItemCustomizerField('price',openPrice.value);}
     const discountSelect=document.getElementById('itemCustomizerDiscount');if(discountSelect){const rules=availableItemDiscountRules();discountSelect.innerHTML=`<option value="">No item discount</option>${rules.map(rule=>`<option value="${esc(rule.id)}">${esc(rule.name)} · ${rule.calculation==='percent'?`${esc(rule.value)}%`:money(rule.value)}</option>`).join('')}`;discountSelect.value=modal.dataset.itemDiscountRuleId||'';discountSelect.onchange=()=>{modal.dataset.itemDiscountRuleId=discountSelect.value;updateItemOptionsTotal();};}
     body.onchange=event=>{if(event.target.matches('input[name="itemCustomizerVariant"]')){modal.dataset.variantId=String(event.target.value);renderItemOptionPicker(item);return;}body.querySelectorAll('.item-option-set[data-set-id]').forEach(section=>{const chosen=section.querySelectorAll('input[data-set-id]:checked').length,count=section.querySelector('.item-option-count');if(count)count.textContent=`${chosen}/${section.dataset.maxSelections||1}`;});updateItemOptionsTotal();};
     body.onclick=event=>{const caret=event.target.closest('.item-option-chevron');if(!caret)return;const section=caret.closest('.item-option-set');if(!section)return;section.classList.toggle('is-collapsed');caret.textContent=section.classList.contains('is-collapsed')?'⌄':'⌃';};
@@ -2750,10 +2766,12 @@ function renderItemOptionPicker(item){
     const addButton=document.getElementById('confirmItemOptionsButton');if(addButton)addButton.disabled=variants.length>1&&!variant;
     updateItemOptionsTotal();
 }
-function toggleItemCustomizerDetails(){const modal=document.getElementById('itemOptionsModal'),details=document.getElementById('itemCustomizerDetails'),button=document.querySelector('.item-customizer-more-details');if(!modal||!details||!button)return;details.hidden=!details.hidden;modal.dataset.detailsOpen=String(!details.hidden);button.setAttribute('aria-expanded',String(!details.hidden));}
 function toggleItemCustomizerInstruction(){const input=document.getElementById('itemCustomizerInstruction'),button=document.getElementById('itemCustomizerInstructionToggle');if(!input||!button)return;input.hidden=!input.hidden;button.setAttribute('aria-expanded',String(!input.hidden));button.textContent=input.hidden?'＋  Add Cooking Instruction':'−  Hide Cooking Instruction';if(!input.hidden)input.focus();}
 function toggleItemCustomizerDiscount(){const select=document.getElementById('itemCustomizerDiscount');if(!select)return;if(!availableItemDiscountRules().length){showProfileToast('No item level discounts are set up for this sale channel.');return;}select.hidden=!select.hidden;if(!select.hidden)select.focus();}
 function adjustItemOptionsQuantity(change){const modal=document.getElementById('itemOptionsModal');if(!modal)return;modal.dataset.quantity=String(Math.max(1,Math.min(999,(Number(modal.dataset.quantity)||1)+Number(change||0))));const quantity=document.getElementById('itemOptionsQuantity');if(quantity)quantity.textContent=modal.dataset.quantity;updateItemOptionsTotal();}
+function beginOpenItemCustomizerEdit(field){const modal=document.getElementById('itemOptionsModal');if(!modal||modal.dataset.isOpenItem!=='true')return;if(field==='name'){const title=document.getElementById('itemOptionsTitle'),edit=document.getElementById('itemOptionsOpenNameEdit'),input=document.getElementById('itemOptionsOpenName'),actions=document.getElementById('itemOptionsOpenNameActions');if(!title||!edit||!input||!actions)return;input.value=modal.dataset.openItemName||'';title.hidden=true;edit.hidden=true;input.hidden=false;actions.hidden=false;input.focus();input.select();return;}if(field==='price'){const display=document.getElementById('itemOptionsOpenPriceDisplay'),editor=document.getElementById('itemOptionsOpenPriceEditor'),input=document.getElementById('itemOptionsOpenPrice');if(!display||!editor||!input)return;input.value=modal.dataset.openItemPrice??modal.dataset.basePrice??'0';display.hidden=true;editor.hidden=false;input.focus();input.select();}}
+function finishOpenItemCustomizerEdit(field,save=true){const modal=document.getElementById('itemOptionsModal');if(!modal||modal.dataset.isOpenItem!=='true')return;if(field==='name'){const title=document.getElementById('itemOptionsTitle'),edit=document.getElementById('itemOptionsOpenNameEdit'),input=document.getElementById('itemOptionsOpenName'),actions=document.getElementById('itemOptionsOpenNameActions');if(!title||!edit||!input||!actions)return;if(save){const name=String(input.value||'').trim().slice(0,160);if(!name)return alert('Enter an item name.');modal.dataset.openItemName=name;modal.dataset.itemName=name;title.textContent=name;}else input.value=modal.dataset.openItemName||'';title.hidden=false;edit.hidden=false;input.hidden=true;actions.hidden=true;return;}if(field==='price'){const display=document.getElementById('itemOptionsOpenPriceDisplay'),editor=document.getElementById('itemOptionsOpenPriceEditor'),input=document.getElementById('itemOptionsOpenPrice');if(!display||!editor||!input)return;if(save){const raw=String(input.value??'').trim(),price=Number(raw);if(!raw||!Number.isFinite(price)||price<0)return alert('Enter a valid item price.');modal.dataset.openItemPrice=String(price);modal.dataset.basePrice=String(price);}else{input.value=modal.dataset.openItemPrice||'0';modal.dataset.basePrice=modal.dataset.openItemPrice||'0';}display.hidden=false;editor.hidden=true;updateItemOptionsTotal();}}
+function updateOpenItemCustomizerField(field,value){const modal=document.getElementById('itemOptionsModal');if(!modal||modal.dataset.isOpenItem!=='true'||field!=='price')return;const raw=String(value??'').trim();if(!raw)return;const price=Number(raw);if(!Number.isFinite(price)||price<0)return;modal.dataset.basePrice=String(price);updateItemOptionsTotal();}
 function updateItemOptionsTotal(){
     const modal=document.getElementById('itemOptionsModal'),total=document.getElementById('itemOptionsTotal');if(!modal||!total)return;
     const item=currentMenu.find(entry=>Number(entry.id)===Number(modal.dataset.menuId)),variant=item?.variants?.find(entry=>String(entry.id)===String(modal.dataset.variantId))||null,sets=itemOptionSets(item,variant),base=Number(modal.dataset.basePrice||0),extra=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')].reduce((sum,input)=>sum+Number(sets.flatMap(set=>set.options||[]).find(option=>String(option.id)===String(input.dataset.optionId))?.price||0),0),quantity=Math.max(1,Number(modal.dataset.quantity)||1),gross=(base+extra)*quantity,rate=appSettings.gstCalculationEnabled===false?0:Math.max(0,Number(item?.tax_rate??appSettings.gstRate??0)),net=appSettings.gstCalculationEnabled!==false&&item?.tax_mode==='inclusive'&&rate?gross/(1+rate/100):gross,rule=getSelectedBillingAdjustment(modal.dataset.itemDiscountRuleId),rawDiscount=rule?.calculation==='percent'?net*Math.max(0,Number(rule.value||0))/100:Math.max(0,Number(rule?.value||0))*quantity;
@@ -2762,7 +2780,8 @@ function updateItemOptionsTotal(){
     const unitLabel=document.getElementById('itemOptionsUnitPrice');if(unitLabel)unitLabel.textContent=Array.isArray(item?.variants)&&item.variants.length>1&&!variant?'Choose a size':money(base+extra);
 }
 function confirmItemOptions(){
-    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')],sets=itemOptionSets(item,variant),selections=[];
+    const modal=document.getElementById('itemOptionsModal'),menuId=Number(modal?.dataset.menuId),item=currentMenu.find(candidate=>Number(candidate.id)===menuId),variant=item?.variants?.find(candidate=>String(candidate.id)===modal?.dataset.variantId),selected=[...document.querySelectorAll('#itemOptionsBody input:checked[data-option-id]')],sets=modal?.dataset.isOpenItem==='true'?[]:itemOptionSets(item,variant),selections=[];
+    if(modal?.dataset.isOpenItem==='true'){const name=String(document.getElementById('itemOptionsOpenName')?.value||'').trim().slice(0,160),rawPrice=String(document.getElementById('itemOptionsOpenPrice')?.value??'').trim(),price=Number(rawPrice);if(!name)return alert('Enter an item name before adding it to the bill.');if(!rawPrice||!Number.isFinite(price)||price<0)return alert('Enter a valid item price before adding it to the bill.');modal.dataset.openItemName=name;modal.dataset.itemName=name;modal.dataset.openItemPrice=String(price);modal.dataset.basePrice=String(price);}
     if(getAvailableMenuVariants(item).length>1&&!variant)return alert('Choose a size or variant before adding this item.');
     for(const set of sets){const chosen=selected.filter(input=>String(input.dataset.setId)===String(set.id)),min=Number(set.minSelections||0),max=Number(set.maxSelections||1);if(chosen.length<min||chosen.length>max)return alert(`Choose ${min===max?min:`${min} to ${max}`} option${max===1?'':'s'} for ${set.name}.`);if(chosen.length)selections.push({setId:String(set.id),setName:set.name,options:chosen.map(input=>{const option=(set.options||[]).find(value=>String(value.id)===input.dataset.optionId);return {id:String(option.id),name:option.name,price:Number(option.price||0)};})});}
     const instruction=String(document.getElementById('itemCustomizerInstruction')?.value||'').trim().slice(0,250);if(instruction)selections.push({setId:'__slash_custom_instruction__',setName:'Cooking Instruction',options:[{id:`instruction_${Date.now().toString(36)}_${Math.random().toString(36).slice(2,7)}`,name:instruction,price:0}]});
@@ -3268,6 +3287,7 @@ function getCurrentCheckoutBreakdown() {
 async function openPayment() {
     const newOrderPage = document.getElementById("new-order");
     if (!newOrderPage?.classList.contains("active-page")) return;
+    if (!hasFeaturePermission("record_payment_and_settle_order")) return alert("You do not have permission to record payments or settle orders. Ask your manager for access.");
     if (!cart.length) return alert("Please add at least one item.");
     if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) return alert("Please select a table for Dine-in.");
 
@@ -3453,6 +3473,7 @@ let clearNewOrderDraftAfterPayment = false;
 
 async function completeOrder(paymentMethod, paymentOptions = {}) {
     if (completingOrder) return;
+    if (!hasFeaturePermission("record_payment_and_settle_order")) return alert("You do not have permission to record payments or settle orders. Ask your manager for access.");
     if (!cart.length) return alert("There are no items in the order.");
     const priorOrder = currentOpenOrderData?.order || {};
     const isCompletedDueCollection = Boolean(
@@ -3467,6 +3488,10 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
     const gst = b.gst;
     const total = b.total;
     const isQrExistingOrder = Boolean(currentOpenOrderId && isQrTrackedOrder(priorOrder));
+    const orderSaleChannelKey = priorOrder.sales_channel_key || currentSaleChannelKey();
+    const orderKotPrintMode = getKOTPrintModeForChannel(orderSaleChannelKey);
+    const invalidOpenItem = cart.find(item => item.isOpenItem && (!String(item.name || "").trim() || !Number.isFinite(Number(item.price)) || Number(item.price) < 0));
+    if (invalidOpenItem) return alert("Enter a valid name and price for each open item.");
     const paymentsToRecord = Array.isArray(paymentOptions.payments) ? paymentOptions.payments : [{ method: paymentMethod, amount: total }];
 
     try {
@@ -3485,7 +3510,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             cacheBillingCustomer(billingCustomer);
         }
         const orderPayload = {
-            orderType, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
+            orderType, saleChannelKey: orderSaleChannelKey, tableNumber, pax: orderType === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst, total, paymentMethod,
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null,
             discount: b.orderDiscount, serviceCharge: b.serviceCharge,
             discountAdjustmentId: b.discountId, chargeAdjustmentId: b.chargeId,
@@ -3508,7 +3533,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             keepOpen: Boolean(paymentOptions.keepOpen),
             nonChargeable: Boolean(paymentOptions.nonChargeable),
             nonChargeableReason: String(paymentOptions.nonChargeableReason || ""),
-            createKot: !isNewOrder && !isCompletedDueCollection && kotEnabled && !isQrExistingOrder,
+            createKot: !isNewOrder && !isCompletedDueCollection && kotEnabled && !isQrExistingOrder && orderKotPrintMode === "checkout",
             customerId: billingCustomer?.id || currentOpenOrderData?.order?.customer_id || null
         };
         let settlement;
@@ -3562,7 +3587,7 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const tableInput = document.getElementById("tableNumber");
         if (tableInput) tableInput.value = "";
         updateCart();
-        if (kotEnabled && appSettings.kotPrintMode === "checkout" && !paymentOptions.keepOpen && !isQrExistingOrder) {
+        if (kotEnabled && orderKotPrintMode === "checkout" && !paymentOptions.keepOpen && !isQrExistingOrder) {
             Promise.resolve().then(() => printKOT(order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
         }
         window.currentBillData = {
@@ -3621,6 +3646,8 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
 }
 async function saveOpenOrder() {
     if (!cart.length) return alert("Please add at least one item to save the order.");
+    const invalidOpenItem = cart.find(item => item.isOpenItem && (!String(item.name || "").trim() || !Number.isFinite(Number(item.price)) || Number(item.price) < 0));
+    if (invalidOpenItem) return alert("Enter a valid name and price for each open item.");
     if (orderType === "Dine-in" && !document.getElementById("tableNumber")?.value) {
         return alert("Please select a table for Dine-in.");
     }
@@ -3630,6 +3657,8 @@ async function saveOpenOrder() {
     const openOrderData = currentOpenOrderData;
     const orderTypeToSave = orderType;
     const orderNotes = document.getElementById("billingOrderNotes")?.value.trim() || "";
+    const orderSaleChannelKey = openOrderData?.order?.sales_channel_key || currentSaleChannelKey();
+    const orderKotPrintMode = getKOTPrintModeForChannel(orderSaleChannelKey);
 
     const subtotal = calculateSubtotal();
     const b = getBillingBreakdown();
@@ -3671,7 +3700,7 @@ async function saveOpenOrder() {
             const result = await api(`/orders/${openOrderId}`, {
                 method: "PUT",
                 body: JSON.stringify({
-                    orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
+                    orderType: orderTypeToSave, saleChannelKey: orderSaleChannelKey, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal, gst: b.gst, total: b.total,
                     paymentMethod: openOrderData?.order?.payment_method || null,
                     customerId: billingCustomer?.id || openOrderData?.order?.customer_id || null,
                     discount: b.orderDiscount,
@@ -3683,7 +3712,7 @@ async function saveOpenOrder() {
                     marketingDealId: b.marketingDealId,
                     marketingDealName: b.marketingDealName,
                     notes: orderNotes || null,
-                    createKot: appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save",
+                    createKot: appSettings.kotEnabled !== false && orderKotPrintMode === "save",
                     items,
                     itemCancellationReasons: cartItemCancellationReasons.slice()
                 })
@@ -3696,7 +3725,7 @@ async function saveOpenOrder() {
             await loadTables(); await updateDashboard(); await updateOrdersTable();
             const savedStatus = String(result.order.status || "").toLowerCase();
             showProfileToast(savedStatus === "completed" ? "Bill changes saved successfully." : "Order saved successfully.");
-            if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
+            if (appSettings.kotEnabled !== false && orderKotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
             return;
         }
 
@@ -3704,7 +3733,7 @@ async function saveOpenOrder() {
         const result = await api("/orders", {
             method: "POST",
             body: JSON.stringify({
-                orderNumber, orderType: orderTypeToSave, saleChannelKey: currentSaleChannelKey(), tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
+                orderNumber, orderType: orderTypeToSave, saleChannelKey: orderSaleChannelKey, tableNumber, pax: orderTypeToSave === "Dine-in" ? Number(document.getElementById("billingPax")?.value || 1) : null, subtotal,
                 gst: b.gst, total: b.total, paymentMethod: null,
                 customerId: billingCustomer?.id || null,
                 discount: b.orderDiscount, serviceCharge: b.serviceCharge,
@@ -3714,7 +3743,7 @@ async function saveOpenOrder() {
                 marketingDealId: b.marketingDealId,
                 marketingDealName: b.marketingDealName,
                 notes: orderNotes || null,
-                initialStatus: "Open", createKot: appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save", items
+                initialStatus: "Open", createKot: appSettings.kotEnabled !== false && orderKotPrintMode === "save", items
             })
         });
 
@@ -3724,7 +3753,7 @@ async function saveOpenOrder() {
         updateCart();
         await loadTables(); await updateDashboard(); await updateOrdersTable();
         showProfileToast("Order saved successfully.");
-        if (appSettings.kotEnabled !== false && appSettings.kotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
+        if (appSettings.kotEnabled !== false && orderKotPrintMode === "save") Promise.resolve().then(() => printKOT(result.order.id,undefined,undefined,{auto:true})).catch(error => console.warn("Kitchen ticket print failed:", error));
     } catch (error) {
         console.error(error);
         alert("Failed to save open order: " + error.message);
@@ -3752,7 +3781,8 @@ async function payOpenOrder(orderId) {
             unit: item.unit || 'ea',
             taxRate: Number(item.tax_rate ?? 5),
             taxMode: item.tax_mode === 'inclusive' ? 'inclusive' : 'exclusive',
-            itemDiscountRuleId: Number(item.item_discount_rule_id)||null
+            itemDiscountRuleId: Number(item.item_discount_rule_id)||null,
+            isOpenItem: item.is_open_item === true || item.isOpenItem === true
         }));
         orderType = order.order_type || "Dine-in";
         currentBillingPOSModuleKey = order.table_number ? "tableView" : "newOrder";
@@ -4588,8 +4618,8 @@ function renderQrOrderWorkflow(order, panelId = "qrOrderWorkflow", tableView = f
 
 async function updateQrOrderWorkflow(orderId, status, returnToTableView = false) {
     try {
-        await api(`/orders/${Number(orderId)}/qr-status`, { method: "PUT", body: JSON.stringify({ status }) });
-        if (status === "Preparing" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId,undefined,undefined,{auto:true});
+        const result = await api(`/orders/${Number(orderId)}/qr-status`, { method: "PUT", body: JSON.stringify({ status }) });
+        if (status === "Preparing" && result.kotPrintMode === "accepted" && appSettings.kotEnabled !== false && hasPermission("kitchen", "print")) await printKOT(orderId,undefined,undefined,{auto:true});
         await updateOrdersTable(true, false);
         if (returnToTableView) await loadTables();
         else await viewOrder(orderId);
@@ -7051,7 +7081,10 @@ async function loadMenuManagement(){
         renderMenuOptionSetsOverview();
         const list=document.querySelector('#menu .menu-list');
         if(!list)return;
-        list.innerHTML=`<div class="menu-modern-head"><div><strong>${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;
+        const previousCategory=String(document.getElementById('menuManagementCategory')?.value||'');
+        const categories=[...new Set([...(menuCategories||[]).map(category=>String(category.name||'').trim()),...currentMenu.map(item=>String(item.category||'').trim())].filter(Boolean))].sort((a,b)=>a.localeCompare(b));
+        list.innerHTML=`<div class="menu-modern-head"><div><strong id="menuManagementFilteredCount">${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementCategory" aria-label="Filter menu items by category" onchange="filterMenuManagement()"><option value="">All categories</option>${categories.map(category=>`<option value="${esc(category)}">${esc(category)}</option>`).join('')}</select><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;
+        if(categories.includes(previousCategory))document.getElementById('menuManagementCategory').value=previousCategory;
         renderMenuManagementCards();
         renderMenuCategoryMaster();
     }catch(e){console.error('Menu management failed:',e);}
@@ -7063,17 +7096,19 @@ function renderMenuManagementCards(){
     if(!grid)return;
     const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
     const nature=String(document.getElementById('menuManagementNature')?.value||'');
+    const category=String(document.getElementById('menuManagementCategory')?.value||'').trim().toLocaleLowerCase();
     const items=currentMenu.filter(item=>{
         const hay=`${item.name} ${item.sku||''} ${item.description||''} ${(item.tags||[]).join(' ')} ${item.category} ${item.nature} ${(item.variants||[]).map(v=>v.name).join(' ')}`.toLowerCase();
-        return(!q||hay.includes(q))&&(!nature||item.nature===nature);
+        return(!q||hay.includes(q))&&(!nature||item.nature===nature)&&(!category||String(item.category||'').trim().toLocaleLowerCase()===category);
     });
+    const count=document.getElementById('menuManagementFilteredCount');if(count)count.textContent=String(items.length);
     grid.innerHTML=items.length?items.map(item=>{
         const channel=item.channel_prices||{},variants=item.variants||[],available=item.available!==false;
         const image=item.image_url||item.imageUrl||'';
         const visual=image?`<div class="menu-admin-icon has-image"><img class="menu-admin-photo" src="${esc(image)}" alt="${esc(item.name)}" loading="lazy" decoding="async"></div>`:`<div class="menu-admin-icon">${menuIcon(item.category)}</div>`;
         return `<article class="menu-admin-card ${available?'':'disabled'}">
           <div class="menu-admin-top">${visual}<div><h3>${esc(item.name)}</h3><p>${esc(item.category)} · ${esc(item.nature||'Goods')} · ${esc(item.unit||'ea')}</p></div><span class="menu-availability ${available?'active':'inactive'}">${available?'Available':'Hidden from menu'}</span></div>
-          <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.description?`<p>${esc(item.description)}</p>`:''}${renderMenuItemTagBadges(item.tags)}</div>
+          <div class="menu-item-description-meta"><span class="menu-admin-sku">SKU · ${esc(item.sku||'—')}</span>${item.is_open_item===true?'<span class="menu-open-item-badge">Open item · editable on bill</span>':''}${item.description?`<p>${esc(item.description)}</p>`:''}${renderMenuItemTagBadges(item.tags)}</div>
           <div class="menu-admin-price-row"><div><small>Base</small><strong>${money(item.price)}</strong></div><div><small>Tax</small><strong>${esc(menuTaxLabel(item))} · ${esc(item.tax_mode||'exclusive')}</strong></div></div>
           <div class="menu-channel-chips">${POS_CHANNELS.filter(saleChannel=>!Array.isArray(item.sales_channels)||item.sales_channels.includes(saleChannel.key)).map(saleChannel=>`<span>${esc(saleChannel.label)} ${money(channel[saleChannel.key]??item.price)}</span>`).join('')}</div>
           ${variants.length?`<div class="menu-variant-list"><strong>Variants</strong>${variants.map(v=>`<span>${esc(v.name)} · ${money(resolveMenuPrice(item,v))}</span>`).join('')}</div>`:''}
@@ -7146,6 +7181,7 @@ function openAddMenuModal(item=null){
     document.getElementById('menuPrice').value=item?.price??'';
     document.getElementById('menuCategory').value=item?.category||'';
     document.getElementById('menuNature').value=item?.nature||'Goods';
+    document.getElementById('menuIsOpenItem').checked=item?.is_open_item===true||item?.isOpenItem===true;
     document.getElementById('menuUnit').value=item?.unit||'ea';
     document.getElementById('menuTaxProfile').value=Number(item?.tax_rate||5)===0?'0':Number(item?.tax_rate||5)===18?'18':Number(item?.tax_rate||5)===28?'28':'5';
     document.getElementById('menuTaxMode').value=item?.tax_mode||'exclusive';
@@ -7158,7 +7194,15 @@ function openAddMenuModal(item=null){
     if(optionDisclosure)optionDisclosure.open=false;
     renderMenuOptionSetPicker(item?.option_set_ids||[]);
     renderMenuVariantsEditor(item?.variants||[]);
+    syncMenuOpenItemFields();
     document.getElementById('addMenuModal').style.display='flex';
+}
+function syncMenuOpenItemFields(){
+    const openItem=document.getElementById('menuIsOpenItem')?.checked===true;
+    const variants=document.getElementById('menuVariantsSection');
+    const options=document.getElementById('menuItemOptionsSection');
+    if(variants)variants.hidden=openItem;
+    if(options)options.hidden=openItem;
 }
 function closeAddMenuModal(){document.getElementById('addMenuModal').style.display='none';document.getElementById('menuTagPicker')?.removeAttribute('open');editingMenuItemId=null;currentMenuImageData=null;pendingMenuImageBlob=null;menuImageWasCleared=false;releaseImagePreviewUrl(menuImagePreviewUrl);menuImagePreviewUrl=null;setImageUploadStatus('menuImageUploadStatus','','');}
 function menuVariantEditorRow(variant={}){const selected=new Set((variant.option_set_ids||variant.optionSetIds||[]).map(String));const options=menuOptionSets.length?menuOptionSets.map(set=>`<label class="variant-option-set-choice"><input class="variant-option-set" type="checkbox" value="${esc(set.id)}" ${selected.has(String(set.id))?'checked':''}><span><strong>${esc(set.name)}</strong><small>${Number(set.minSelections||0)}–${Number(set.maxSelections||1)} choices · ${(set.options||[]).length} options</small></span></label>`).join(''):'<div class="variant-option-set-empty">Create option sets first. Item-wide options are inherited by every variant.</div>';return `<div class="variant-editor-card"><div class="variant-editor-row"><input class="variant-name" placeholder="Variant (Small / Large)" value="${esc(variant.name||'')}"><input class="variant-sku" placeholder="SKU" value="${esc(variant.sku||'')}"><input class="variant-price" type="number" min="0" step="0.01" placeholder="Base price" value="${variant.price??''}"><select class="variant-unit"><option value="ea" ${variant.unit==='ea'?'selected':''}>ea</option><option value="g" ${variant.unit==='g'?'selected':''}>g</option><option value="kg" ${variant.unit==='kg'?'selected':''}>kg</option><option value="ml" ${variant.unit==='ml'?'selected':''}>ml</option><option value="lt" ${variant.unit==='lt'?'selected':''}>lt</option></select><button type="button" class="cancel-btn variant-remove" onclick="this.closest('.variant-editor-card').remove()">✕</button></div><details class="variant-editor-details"><summary>Channel prices &amp; add-ons for this size</summary><div class="variant-editor-panel"><div class="variant-channel-price-grid">${POS_CHANNELS.map(channel=>`<label>${esc(channel.label)} price<input class="variant-channel-price" type="number" min="0" step="0.01" data-channel="${esc(channel.key)}" value="${variant.channel_prices?.[channel.key]??variant.channelPrices?.[channel.key]??''}" placeholder="Use base price"></label>`).join('')}</div><div><span class="menu-eyebrow">VARIANT ADD-ONS</span><p class="access-muted">Item-wide add-ons still apply. Select extra option sets for this variant only.</p><div class="variant-option-set-list">${options}</div></div></div></details></div>`;}
@@ -7205,6 +7249,7 @@ function moveMenuOptionSetSelection(index,direction){
 function updateMenuOptionSetDisclosure(){const summary=document.getElementById('menuOptionSetSelectionSummary');if(!summary)return;const count=menuOptionSetSelectionOrder.length;summary.textContent=count?`${count} option set${count===1?'':'s'} selected · order applied to billing and QR menu`:menuOptionSets.length?'Choose and arrange saved option sets':'No saved option sets yet';}
 async function saveMenuItemV2(){
     const wasEditing=Boolean(editingMenuItemId),name=document.getElementById('menuName').value.trim(),price=Number(document.getElementById('menuPrice').value),category=document.getElementById('menuCategory').value.trim();
+    const isOpenItem=document.getElementById('menuIsOpenItem')?.checked===true;
     if(!name||!Number.isFinite(price)||price<0||!category)return alert('Enter valid menu details.');
     const taxMap={0:{rate:0,cgst:0,sgst:0,igst:0,label:'Tax 0%'},5:{rate:5,cgst:2.5,sgst:2.5,igst:5,label:'GST 5%'},18:{rate:18,cgst:9,sgst:9,igst:18,label:'GST 18%'},28:{rate:28,cgst:14,sgst:14,igst:28,label:'GST 28%'}};
     const t=taxMap[document.getElementById('menuTaxProfile').value]||taxMap[5],channelPrices={};
@@ -7219,7 +7264,7 @@ async function saveMenuItemV2(){
         if(variantName)variants.push({name:variantName,sku:row.querySelector('.variant-sku')?.value.trim(),price:variantPrice,unit:row.querySelector('.variant-unit')?.value||'ea',channelPrices:variantChannelPrices,optionSetIds:[...row.querySelectorAll('.variant-option-set:checked')].map(input=>input.value)});
     }
     const existing=editingMenuItemId?currentMenu.find(x=>Number(x.id)===Number(editingMenuItemId)):null;
-    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants,optionSetIds:menuOptionSetSelectionOrder.slice(),available:existing?existing.available!==false:true};
+    const payload={name,sku:document.getElementById('menuSku').value.trim(),description:document.getElementById('menuDescription').value.trim(),tags:selectedMenuItemTags(existing?.tags||[]),price,category,nature:document.getElementById('menuNature').value,unit:document.getElementById('menuUnit').value,taxRate:t.rate,cgstRate:t.cgst,sgstRate:t.sgst,igstRate:t.igst,taxLabel:t.label,taxMode:document.getElementById('menuTaxMode').value,channelPrices,salesChannels,variants:isOpenItem?[]:variants,optionSetIds:isOpenItem?[]:menuOptionSetSelectionOrder.slice(),isOpenItem,available:existing?existing.available!==false:true};
     try{
         const saved=await api(editingMenuItemId?`/menu/${editingMenuItemId}`:'/menu',{method:editingMenuItemId?'PUT':'POST',body:JSON.stringify(payload)});
         const itemId=Number(saved?.menu?.id||editingMenuItemId||0);
@@ -7686,6 +7731,7 @@ const ACCESS_FEATURE_PERMISSIONS = [
     ["override_discount", "Override Discount", "Billing"],
     ["pos_preferences", "Pos Preferences", "Settings"],
     ["record_payment_and_settle_bill", "Record payment and settle bill", "Payments"],
+    ["record_payment_and_settle_order", "Record payment and settle order", "Payments"],
     ["reprint_kots", "Reprint KOTs", "Printing"],
     ["reprint_invoice_after_settlement", "Reprint invoice After Settlement", "Printing"],
     ["restrict_delivery_status_update", "Restrict delivery status update", "Orders"],
@@ -8804,8 +8850,9 @@ function readCustomerInfoRequirementsFromForm() {
 function renderSalesChannels() {
     const list = document.getElementById("salesChannelsList");
     if (!list) return;
-    list.innerHTML = POS_CHANNELS.map(channel => {const isBuiltIn=BUILT_IN_POS_CHANNEL_KEYS.has(channel.key);return `<article class="sales-channel-card">
+    list.innerHTML = POS_CHANNELS.map(channel => {const isBuiltIn=BUILT_IN_POS_CHANNEL_KEYS.has(channel.key);const kotMode=getKOTPrintModeForChannel(channel.key);const kotOptions=channel.qrMenu?`<option value="never" ${kotMode==="never"?'selected':''}>Do not auto-print</option><option value="accepted" ${kotMode==="accepted"?'selected':''}>Auto print when order is accepted</option>`:`<option value="never" ${kotMode==="never"?'selected':''}>Do not auto-print</option><option value="save" ${kotMode==="save"?'selected':''}>Print when order is saved</option><option value="checkout" ${kotMode==="checkout"?'selected':''}>Print on checkout</option>`;const kotHint=channel.qrMenu?"Controls automatic KOT printing after the guest order is accepted.":"Controls automatic KOT printing for this sale channel.";return `<article class="sales-channel-card">
         <div class="sales-channel-card-top"><div><h4>${esc(channel.label)}</h4><p>${channel.orderType === "Dine-in" ? "Dine-in / table flow" : "Takeaway / delivery flow"}</p></div><span class="sales-channel-badge">${channel.qrMenu ? "QR Menu" : "POS channel"}</span></div>
+        <div class="sales-channel-kot-mode"><label for="saleChannelKotMode_${esc(channel.key)}">KOT printing</label><select id="saleChannelKotMode_${esc(channel.key)}" onchange="saveSalesChannelKotPrintMode('${esc(channel.key)}',this.value)">${kotOptions}</select><small>${kotHint}</small></div>
         <div class="sales-channel-bill-copies"><label for="saleChannelCopies_${esc(channel.key)}">Bill copies on order close</label><input id="saleChannelCopies_${esc(channel.key)}" type="number" min="0" max="20" step="1" value="${Math.min(20,Math.max(0,Number(channel.billCopies)||0))}" onchange="saveSalesChannelBillCopies('${esc(channel.key)}',this.value)"><small>0 skips automatic printing · up to 20 copies</small></div>
         ${isBuiltIn?'<div class="sales-channel-protected">Built-in channel · name and order flow are protected</div>':`<div class="sales-channel-actions"><button type="button" onclick="openSalesChannelModal('${esc(channel.key)}')">Edit</button><button type="button" onclick="deleteSalesChannel('${esc(channel.key)}')">Delete</button></div>`}
     </article>`;}).join("");
@@ -8869,6 +8916,14 @@ async function saveSalesChannelBillCopies(key, value) {
         renderSalesChannels();
         showProfileToast(error.message || "Could not save bill copies.");
     }
+}
+async function saveSalesChannelKotPrintMode(key, value) {
+    const channel=getSaleChannel(key);
+    const allowed=channel?.qrMenu?["never","accepted"]:["never","save","checkout"];
+    if(!channel||!allowed.includes(String(value||""))){showProfileToast("Choose a valid KOT printing option for this channel.");renderSalesChannels();return;}
+    const next=POS_CHANNELS.map(entry=>entry.key===key?{...entry,kotPrintMode:value}:{...entry});
+    try{await persistSalesChannels(next);showProfileToast(`${getSaleChannel(key)?.label||"Sale channel"}: KOT printing saved.`);}
+    catch(error){renderSalesChannels();showProfileToast(error.message||"Could not save KOT printing.");}
 }
 async function saveSalesChannel() {
     const editingKey = document.getElementById("salesChannelEditingKey").value;

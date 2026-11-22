@@ -4010,6 +4010,19 @@ body:has(#new-order.active-page) .billing-menu-panel .menu-grid[data-view="tile"
 .item-customizer-quantity{display:flex;align-items:center;gap:10px}
 .item-customizer-quantity button{width:34px;height:34px;border:1px solid #dce3ec;border-radius:9px;background:#f8fafc;color:#233247;font-size:18px;cursor:pointer}
 .item-customizer-quantity strong{min-width:16px;text-align:center;color:#243246;font-size:14px}
+.item-customizer-title-row [hidden]{display:none!important}
+.item-customizer-open-name{width:min(560px,55vw);height:38px;padding:7px 10px;border:1px solid #d9dce2;border-radius:8px;background:#fff;color:#17212f;font:inherit;font-size:14px;font-weight:700}
+.item-customizer-open-name:focus,.open-item-customizer-rate input:focus{outline:0;border-color:#3478f6;box-shadow:0 0 0 2px #3478f622}
+.open-item-edit-button{display:inline-grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:5px;background:transparent;color:#3478f6;font:inherit;font-size:17px;line-height:1;cursor:pointer}
+.open-item-edit-button:hover{background:#edf4ff}
+.open-item-edit-actions,.open-item-price-editor{display:inline-flex;align-items:center;gap:5px}
+.open-item-edit-actions[hidden],.open-item-price-display[hidden],.open-item-price-editor[hidden]{display:none!important}
+.open-item-edit-actions button,.open-item-price-editor>button{display:inline-grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:5px;font-size:15px;font-weight:800;cursor:pointer}
+.open-item-edit-save{background:#4c8e24;color:#fff}
+.open-item-edit-cancel{background:#f0f2f5;color:#374151}
+.open-item-price-display{display:inline-flex;align-items:center;gap:5px}
+.open-item-customizer-rate label{display:inline-flex;align-items:center;gap:7px;font-weight:700}
+.open-item-customizer-rate input{width:90px;height:30px;padding:4px 7px;border:1px solid #d9dce2;border-radius:7px;background:#fff;color:#17212f;font:inherit;font-size:12px;font-weight:700}
 .item-customizer-total{margin-left:auto;color:#1d2939;font-size:17px;white-space:nowrap}
 #confirmItemOptionsButton:disabled{opacity:.48;cursor:not-allowed}
 .bill-print-item-discount{display:block!important;margin-top:3px;color:#14815e!important;font-size:10px!important;font-weight:650}
@@ -4046,7 +4059,6 @@ body:has(#new-order.active-page) .billing-category-sidebar .category-dot{display
 .item-customizer-nature:after{content:"";position:absolute;inset:3px;border-radius:50%;background:#338d36}
 .item-customizer-nature.is-non-veg{border-color:#c8443c}
 .item-customizer-nature.is-non-veg:after{background:#c8443c}
-.item-customizer-more-details{display:block;margin:2px 0 0 22px;padding:0;border:0;background:transparent;color:#3478f6;font-size:11px;cursor:pointer}
 .item-customizer-header-actions{display:flex;align-items:center;gap:12px}
 #itemOptionsModal .item-customizer-header-actions .close-btn{width:34px;height:34px;flex:0 0 34px;padding:0;border:0;border-radius:50%;background:#f2f3f5;color:#777;}
 #itemOptionsModal .item-customizer-quantity{display:flex;align-items:center;gap:6px;padding:4px 8px;border:1px solid #d9dce2;border-radius:9px;background:#fff;box-shadow:0 1px 3px #00000012}
@@ -4271,3 +4283,24 @@ body.adhoc-table-drawer-open{overflow:hidden}
 .billing-menu-account-wrap select option:checked{background:#e9efff;color:#244caa}
 @media(max-width:700px){.menu-account-card{align-items:flex-start;flex-direction:column}.menu-account-card .table-actions{width:100%}.menu-account-card .table-actions button{flex:1}.menu-account-category-options{grid-template-columns:1fr 1fr}}
 @media(max-width:430px){.menu-account-category-options{grid-template-columns:1fr}.menu-account-editor-actions{display:grid;grid-template-columns:1fr}.billing-menu-account-wrap select{font-size:10px}}
+
+/* Web POS menu filters, open-item billing fields, and per-channel KOT rules */
+.menu-modern-actions{flex-wrap:wrap}.menu-modern-actions select{min-width:140px}
+.menu-open-item-choice{display:flex;align-items:flex-start;gap:10px;width:100%;padding:12px 14px;border:1px solid #dbe3ee;border-radius:12px;background:linear-gradient(135deg,#f8fbff,#fff);cursor:pointer}
+.menu-open-item-choice input{margin:3px 0 0;accent-color:#3978ec}
+.menu-open-item-choice span,.menu-open-item-choice strong,.menu-open-item-choice small{display:block}
+.menu-open-item-choice strong{color:#172033;font-size:13px}.menu-open-item-choice small{margin-top:3px;color:#697586;font-size:11px;line-height:1.45}
+.menu-open-item-badge{display:inline-flex;margin:5px 0;padding:4px 8px;border-radius:999px;background:#edf4ff;color:#2455a5;font-size:10px;font-weight:750}
+.sales-channel-kot-mode{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;padding:11px;border:1px solid #e5e7ef;border-radius:11px;background:linear-gradient(135deg,#f8f9fc,#fff)}
+.sales-channel-kot-mode label{color:#354052;font-size:11px;font-weight:750}
+.sales-channel-kot-mode select{width:100%;min-height:36px;padding:7px 30px 7px 9px;border:1px solid #d8dce7;border-radius:9px;background:#fff;color:#202b37;font:inherit;font-size:12px;font-weight:650}
+.sales-channel-kot-mode select:focus{outline:0;border-color:#7054cf;box-shadow:0 0 0 3px #7054cf20}
+.sales-channel-kot-mode small{color:#858b98;font-size:10px;line-height:1.4}
+@media(max-width:800px){.menu-modern-actions{display:grid;grid-template-columns:1fr 1fr}.menu-modern-actions input{grid-column:1/-1}.menu-modern-actions select{min-width:0;width:100%}}
+@media(max-width:520px){.cart-item{gap:7px}.cart-item>strong{font-size:12px}}
+
+/* Slightly larger billing item images with a quiet, defined edge. */
+body:has(#new-order.active-page) .billing-menu-panel .menu-grid:not([data-view="tile"]) .food-card{grid-template-columns:64px minmax(0,1fr);min-height:78px;gap:10px}
+body:has(#new-order.active-page) .billing-menu-panel .menu-grid:not([data-view="tile"]) .food-card-image{box-sizing:border-box;width:64px;height:64px!important;overflow:hidden;border:1px solid #dce2eb;border-radius:8px;background:#f5f6f8;box-shadow:0 1px 2px rgba(15,23,42,.07)}
+body:has(#new-order.active-page) .billing-menu-panel .menu-grid:not([data-view="tile"]) .food-card-image img{width:100%;height:100%;object-fit:cover}
+body:has(#new-order.active-page) .billing-menu-panel .menu-grid:not([data-view="tile"]) .food-card-image .food-icon{font-size:38px}

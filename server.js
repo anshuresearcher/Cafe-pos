@@ -1024,6 +1024,7 @@ async function featurePermissionsForRequest(req) {
 
     if (path === "/orders" && method === "POST") {
         add("create_new_order");
+        if (checkout && Object.keys(checkout).length) add("record_payment_and_settle_order");
         if (/^open$/i.test(String(body.initialStatus || body.status || "")) || checkout.keepOpen === true || body.keepOpen === true) add("save_or_hold_an_order");
         if (isNonChargeable) {
             add("apply_non_chargeable_sales");
@@ -1033,7 +1034,7 @@ async function featurePermissionsForRequest(req) {
         if (String(checkout.paymentMode || body.paymentMode || "").toLowerCase() === "split" || (Array.isArray(checkout.payments) && checkout.payments.length > 1)) add("split_bill");
     }
     if (/^\/orders\/\d+\/settle$/.test(path) && method === "POST") {
-        add("record_payment_and_settle_bill");
+        add("record_payment_and_settle_order");
         if (isNonChargeable) add("apply_non_chargeable_sales");
         if (String(body.paymentMode || body.payment_mode || "").toLowerCase() === "partial" && body.keepOpen !== true) add("close_order_with_balance_amount");
         if (String(body.paymentMode || body.payment_mode || "").toLowerCase() === "split" || (Array.isArray(body.payments) && body.payments.length > 1)) add("split_bill");
@@ -1042,6 +1043,7 @@ async function featurePermissionsForRequest(req) {
     if (/^\/orders\/\d+\/cancel$/.test(path) && isWrite) add("cancel_sale");
     if ((path === "/orders" || path.startsWith("/orders/")) && method === "GET" && /^(closed|completed|settled)$/i.test(String(req.query?.status || req.query?.tab || ""))) add("view_closed_orders");
     if (orderIdPath && ["PUT", "PATCH"].includes(method)) {
+        if (body.checkout && typeof body.checkout === "object") add("record_payment_and_settle_order");
         if (body.status && /cancel/i.test(String(body.status))) add("cancel_sale");
         if (body.status && /void/i.test(String(body.status))) add("void_sale");
         if (body.restoreCancelled === true || body.restore_cancelled === true) add("uncancel_sale");
@@ -1295,6 +1297,7 @@ async function ensureBusinessTables() {
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS sku VARCHAR(80)`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`);
     await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb`);
+    await pool.query(`ALTER TABLE menu ADD COLUMN IF NOT EXISTS is_open_item BOOLEAN NOT NULL DEFAULT FALSE`);
     await pool.query(`UPDATE menu SET sku='SKU-' || LPAD(id::text,8,'0') WHERE sku IS NULL OR BTRIM(sku)=''`);
     await pool.query(`ALTER TABLE menu ALTER COLUMN sku SET NOT NULL`);
     await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_menu_business_sku_unique ON menu(business_id, upper(sku))`);
@@ -1993,7 +1996,7 @@ const DEFAULT_SALES_CHANNELS = [
     { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true }
 ];
 
-function normalizeSalesChannels(value, fallbackBillCopies = 0) {
+function normalizeSalesChannels(value, fallbackBillCopies = 0, fallbackKotPrintMode = "never") {
     const source = Array.isArray(value) ? value : [];
     const defaultsByKey = new Map(DEFAULT_SALES_CHANNELS.map(channel => [channel.key, channel]));
     const sourceByKey = new Map(source.map(entry => [String(entry?.key || "").trim().toLowerCase(), entry]));
@@ -2009,14 +2012,18 @@ function normalizeSalesChannels(value, fallbackBillCopies = 0) {
         seen.add(key);
         const requestedCopies = Number(entry?.billCopies ?? fallbackBillCopies);
         const billCopies = Number.isFinite(requestedCopies) ? Math.min(20, Math.max(0, Math.floor(requestedCopies))) : 0;
-        channels.push({ key, label, orderType, qrMenu: fixed ? fixed.qrMenu === true : entry?.qrMenu === true, billCopies });
+        const qrMenu = fixed ? fixed.qrMenu === true : entry?.qrMenu === true;
+        const validKotModes = qrMenu ? ["accepted", "never"] : ["never", "save", "checkout"];
+        const fallbackMode = qrMenu ? "accepted" : (validKotModes.includes(fallbackKotPrintMode) ? fallbackKotPrintMode : "never");
+        const kotPrintMode = validKotModes.includes(String(entry?.kotPrintMode || "")) ? String(entry.kotPrintMode) : fallbackMode;
+        channels.push({ key, label, orderType, qrMenu, billCopies, kotPrintMode });
     }
     return channels;
 }
 
 function salesChannelsForSettings(settings) {
     const fallbackCopies = settings?.autoPrint === true ? settings?.billCopies : 0;
-    return normalizeSalesChannels(settings?.posSalesChannels, fallbackCopies);
+    return normalizeSalesChannels(settings?.posSalesChannels, fallbackCopies, settings?.kotPrintMode);
 }
 
 const BILLING_SNAPSHOT_KEYS = [
@@ -2571,9 +2578,6 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
-        const verifiedPhone = qrGuestPhone(guestCustomerDetails.phone);
-        const verifiedGuestSession = await getQrGuestSession(req, res, token, businessId, tableNumber, verifiedPhone);
-        if (!verifiedGuestSession) return res.status(401).json({ error: "Your phone verification session has expired. Please verify your WhatsApp number again." });
         const availability = qrMenuOrderingAvailability(publication, publication.business_name);
         if (!availability.orderingOpen) return res.status(403).json({ error: availability.closedMessage });
         const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
@@ -3649,6 +3653,7 @@ app.post(
             await client.query('BEGIN');
             const name = String(req.body.name || '').trim();
             const price = Number(req.body.price);
+            const isOpenItem = req.body.isOpenItem === true || req.body.is_open_item === true;
             const category = String(req.body.category || '').trim();
             const nature = ['Goods','Service'].includes(req.body.nature) ? req.body.nature : 'Goods';
             const unit = String(req.body.unit || 'ea').trim() || 'ea';
@@ -3657,9 +3662,9 @@ app.post(
             const tax = normaliseTaxPayload(req.body);
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
-            const variants = cleanVariants(req.body.variants);
+            const variants = isOpenItem ? [] : cleanVariants(req.body.variants);
             const imageUrl = cleanMenuImage(req.body.imageUrl);
-            const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
+            const optionSetIds = isOpenItem ? [] : cleanMenuOptionSetIds(req.body.optionSetIds);
             const tags = cleanMenuTags(req.body.tags);
             const requestedSku = cleanMenuSku(req.body.sku);
             const sku = requestedSku || await generateUniqueMenuSku(client, Number(req.user.business_id));
@@ -3672,10 +3677,10 @@ app.post(
             const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
             const salesChannels = cleanMenuSalesChannels(req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const result = await client.query(`
-                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id,sku,description,sales_channels,tags)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb)
+                INSERT INTO menu(name,price,category,available,kot_group_id,nature,unit,tax_rate,cgst_rate,sgst_rate,igst_rate,tax_mode,tax_label,channel_prices,image_url,option_set_ids,business_id,sku,description,sales_channels,tags,is_open_item)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21::jsonb,$22)
                 RETURNING *
-            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(tags)]);
+            `, [name, price, category, available, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), businessId, sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), isOpenItem]);
             await replaceMenuVariants(client, result.rows[0].id, variants);
             await client.query('COMMIT');
             res.status(201).json({ success: true, menu: result.rows[0] });
@@ -3877,14 +3882,17 @@ app.put(
             const tax = normaliseTaxPayload(req.body);
             const taxMode = ['inclusive','exclusive'].includes(req.body.taxMode) ? req.body.taxMode : 'exclusive';
             const channelPrices = cleanChannelPrices(req.body.channelPrices);
+            const requestedIsOpenItem = req.body.isOpenItem ?? req.body.is_open_item;
             const variants = cleanVariants(req.body.variants);
-            const currentImage = await client.query("SELECT image_url,sku,description,tags,sales_channels,kot_group_id FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
+            const currentImage = await client.query("SELECT image_url,sku,description,tags,sales_channels,kot_group_id,is_open_item FROM menu WHERE id=$1 AND business_id=$2 FOR UPDATE", [req.params.id, Number(req.user.business_id)]);
             if (!currentImage.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Menu item not found" }); }
+            const isOpenItem = requestedIsOpenItem === undefined ? currentImage.rows[0].is_open_item === true : requestedIsOpenItem === true;
+            const savedVariants = isOpenItem ? [] : variants;
             const kotGroupId = req.body.kotGroupId === undefined ? currentImage.rows[0].kot_group_id : (req.body.kotGroupId ? Number(req.body.kotGroupId) : null);
             const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)]);
             const salesChannels = cleanMenuSalesChannels(req.body.salesChannels === undefined ? currentImage.rows[0].sales_channels : req.body.salesChannels, settingsResult.rows[0]?.settings || {});
             const imageUrl = cleanMenuImage(req.body.imageUrl, currentImage.rows[0].image_url);
-            const optionSetIds = cleanMenuOptionSetIds(req.body.optionSetIds);
+            const optionSetIds = isOpenItem ? [] : cleanMenuOptionSetIds(req.body.optionSetIds);
             const sku = req.body.sku === undefined ? currentImage.rows[0].sku : cleanMenuSku(req.body.sku) || await generateUniqueMenuSku(client, Number(req.user.business_id));
             const description = req.body.description === undefined ? currentImage.rows[0].description : String(req.body.description || "").trim().slice(0, 2000);
             const tags = req.body.tags === undefined ? cleanMenuTags(currentImage.rows[0].tags) : cleanMenuTags(req.body.tags);
@@ -3895,14 +3903,14 @@ app.put(
             const result = await client.query(`
                 UPDATE menu SET name=$1, price=$2, category=$3, kot_group_id=$4,
                     nature=$5, unit=$6, tax_rate=$7, cgst_rate=$8, sgst_rate=$9, igst_rate=$10,
-                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15, sku=$16, description=$17, sales_channels=$18,tags=$19::jsonb
-                WHERE id=$20 AND business_id=$21 RETURNING *
-            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), req.params.id, Number(req.user.business_id)]);
+                    tax_mode=$11, tax_label=$12, channel_prices=$13, image_url=$14, option_set_ids=$15, sku=$16, description=$17, sales_channels=$18,tags=$19::jsonb,is_open_item=$20
+                WHERE id=$21 AND business_id=$22 RETURNING *
+            `, [name, price, category, kotGroupId, nature, unit, tax.taxRate, tax.cgstRate, tax.sgstRate, tax.igstRate, taxMode, tax.taxLabel, JSON.stringify(channelPrices), imageUrl, JSON.stringify(optionSetIds), sku, description, JSON.stringify(salesChannels), JSON.stringify(tags), isOpenItem, req.params.id, Number(req.user.business_id)]);
             if (!result.rows.length) {
                 await client.query('ROLLBACK');
                 return res.status(404).json({ error: "Menu item not found" });
             }
-            await replaceMenuVariants(client, req.params.id, variants);
+            await replaceMenuVariants(client, req.params.id, savedVariants);
             await client.query('COMMIT');
             res.json({ success: true, menu: result.rows[0] });
         } catch (e) {
@@ -4373,7 +4381,7 @@ async function recordOrderActivity(db, orderId, eventType, description, req) {
     `, [Number(orderId), String(eventType).slice(0, 100), String(description || ""), actor, businessId, Number(req?.user?.id) || null]);
 }
 
-async function createKOTForOrder(db, businessId, orderId) {
+async function createKOTForOrder(db, businessId, orderId, { queueDevicePrint = true } = {}) {
     const items = await db.query(`
         SELECT oi.id AS order_item_id,oi.menu_id,oi.item_name,oi.quantity,oi.options,m.category,m.kot_group_id
         FROM order_items oi
@@ -4398,16 +4406,18 @@ async function createKOTForOrder(db, businessId, orderId) {
         return `($${offset+1},$${offset+2},$${offset+3},$${offset+4},$${offset+5},$${offset+6}::jsonb,$${offset+7},$${offset+8})`;
     });
     await db.query(`INSERT INTO kot(order_id,item_name,quantity,status,kot_group_id,options,order_item_id,ticket_number) VALUES ${rows.join(",")}`,values);
-    const devicePrinting = await db.query(
-        "SELECT enabled FROM kot_device_print_hosts WHERE business_id=$1 LIMIT 1",
-        [Number(businessId)]
-    );
-    if (devicePrinting.rows[0]?.enabled === true) {
-        await db.query(`
-            INSERT INTO kot_device_print_jobs(business_id,order_id,ticket_number)
-            VALUES($1,$2,$3)
-            ON CONFLICT(business_id,order_id,ticket_number) DO NOTHING
-        `, [Number(businessId), Number(orderId), ticketNumber]);
+    if (queueDevicePrint) {
+        const devicePrinting = await db.query(
+            "SELECT enabled FROM kot_device_print_hosts WHERE business_id=$1 LIMIT 1",
+            [Number(businessId)]
+        );
+        if (devicePrinting.rows[0]?.enabled === true) {
+            await db.query(`
+                INSERT INTO kot_device_print_jobs(business_id,order_id,ticket_number)
+                VALUES($1,$2,$3)
+                ON CONFLICT(business_id,order_id,ticket_number) DO NOTHING
+            `, [Number(businessId), Number(orderId), ticketNumber]);
+        }
     }
     return { count: items.rows.length, ticketNumber };
 }
@@ -4423,12 +4433,15 @@ function canonicalKotLineValue(value) {
 function kotLineIdentity(item) {
     const menuId = Number(item.menu_id ?? item.menuId) || null;
     const variantId = Number(item.variant_id ?? item.variantId) || null;
-    return JSON.stringify([menuId, variantId, canonicalKotLineValue(item.options || [])]);
+    const openItemName = item.is_open_item === true || item.isOpenItem === true
+        ? String(item.item_name ?? item.name ?? "").trim().toLocaleLowerCase()
+        : null;
+    return JSON.stringify([menuId, variantId, openItemName, canonicalKotLineValue(item.options || [])]);
 }
 
-async function replaceOrderItemsPreservingKOT(db, businessId, orderId, items, { createMissingTickets = false, itemCancellationReasons = [], allowedCancellationReasons = [] } = {}) {
+async function replaceOrderItemsPreservingKOT(db, businessId, orderId, items, { createMissingTickets = false, queueDevicePrint = true, itemCancellationReasons = [], allowedCancellationReasons = [] } = {}) {
     const oldItems = await db.query(
-        "SELECT id,menu_id,variant_id,item_name,quantity,options FROM order_items WHERE order_id=$1 AND business_id=$2 ORDER BY id FOR UPDATE",
+        "SELECT oi.id,oi.menu_id,oi.variant_id,oi.item_name,oi.quantity,oi.options,m.is_open_item FROM order_items oi LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2 WHERE oi.order_id=$1 AND oi.business_id=$2 ORDER BY oi.id FOR UPDATE OF oi",
         [Number(orderId), Number(businessId)]
     );
     const oldItemsById = new Map(oldItems.rows.map(item => [Number(item.id), item]));
@@ -4534,7 +4547,7 @@ async function replaceOrderItemsPreservingKOT(db, businessId, orderId, items, { 
         }
     }
 
-    if (createMissingTickets) await createKOTForOrder(db, businessId, orderId);
+    if (createMissingTickets) await createKOTForOrder(db, businessId, orderId, { queueDevicePrint });
     return { items: inserted.rows, cancellationEvents };
 }
 
@@ -4560,7 +4573,7 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
     const channel = saleChannel.key;
     const menuIds = [...new Set(items.map(item => item.menuId))];
     const menuRows = await db.query(`
-        SELECT id,name,price,channel_prices,sales_channels,unit,tax_rate,tax_mode,category,kot_group_id,option_set_ids
+        SELECT id,name,price,channel_prices,sales_channels,unit,tax_rate,tax_mode,category,kot_group_id,option_set_ids,is_open_item
         FROM menu WHERE business_id=$1 AND id=ANY($2::int[]) AND available=TRUE
     `, [Number(businessId), menuIds]);
     const menuById = new Map(menuRows.rows.map(row => [Number(row.id), row]));
@@ -4580,10 +4593,21 @@ async function calculatePosOrderTotals(db, businessId, sourceItems, orderType, s
         const variantPrices = variant?.channel_prices && typeof variant.channel_prices === "object" ? variant.channel_prices : {};
         const basePrice = Number(variant ? (variantPrices[channel] ?? variant.price) : (menuPrices[channel] ?? menu.price));
         if (!Number.isFinite(basePrice) || basePrice < 0) throw new Error("One of the menu prices is invalid.");
+        if (menu.is_open_item === true && (item.variantId || item.options.length)) {
+            throw Object.assign(new Error("Open items cannot use variants or add-on options."), { status: 400 });
+        }
+        const openItemName = String(item.source?.name || "").trim().slice(0, 160);
+        const openItemPrice = Number(item.source?.price ?? item.source?.basePrice);
+        if (menu.is_open_item === true && (!openItemName || !Number.isFinite(openItemPrice) || openItemPrice < 0)) {
+            throw Object.assign(new Error("Enter a valid name and price for every open item."), { status: 400 });
+        }
         const assignedOptionIds = [...new Set([...(Array.isArray(menu.option_set_ids) ? menu.option_set_ids : []), ...(Array.isArray(variant?.option_set_ids) ? variant.option_set_ids : [])].map(String))];
-        const optionData = await normalizeOrderItemOptions(db, businessId, { ...menu, option_set_ids: assignedOptionIds }, item.options);
-        item.name = String(menu.name || "Item") + (variant?.name ? ` - ${variant.name}` : "");
-        item.price = basePrice + optionData.addOnPrice;
+        const optionData = menu.is_open_item === true
+            ? { options: [], addOnPrice: 0 }
+            : await normalizeOrderItemOptions(db, businessId, { ...menu, option_set_ids: assignedOptionIds }, item.options);
+        item.name = menu.is_open_item === true ? openItemName : String(menu.name || "Item") + (variant?.name ? ` - ${variant.name}` : "");
+        item.price = menu.is_open_item === true ? openItemPrice : basePrice + optionData.addOnPrice;
+        item.isOpenItem = menu.is_open_item === true;
         item.unit = variant?.unit || menu.unit || "ea";
         item.taxRate = settings.gstCalculationEnabled === false ? 0 : Math.max(0, Number(menu.tax_rate || 0));
         item.taxMode = menu.tax_mode === "inclusive" ? "inclusive" : "exclusive";
@@ -4727,6 +4751,12 @@ app.post(
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.discountAdjustmentId, saleChannel.key);
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.chargeAdjustmentId, saleChannel.key);
             const createKot = createKotRequested && businessSettings.kotEnabled !== false;
+            const checkoutWasSubmitted = Boolean(b.checkout && typeof b.checkout === "object");
+            const queueKotForDevice = saleChannel.qrMenu
+                ? saleChannel.kotPrintMode === "accepted"
+                : checkoutWasSubmitted
+                    ? saleChannel.kotPrintMode === "checkout" && b.checkout?.keepOpen !== true
+                    : saleChannel.kotPrintMode === "save";
             orderNumber = await nextOrderDisplayNumber(
                 client, businessId, "pos_order", String(businessSettings.orderPrefix ?? "ORD-").slice(0, 24),
                 Number(businessSettings.orderSequenceStart || 1), Number(businessSettings.orderNumberPadding || 4)
@@ -4943,7 +4973,7 @@ app.post(
                 INSERT INTO order_items(order_id,menu_id,variant_id,item_name,price,quantity,line_total,unit,tax_rate,tax_mode,options)
                 VALUES ${itemRows.join(",")}
             `, itemValues);
-            if (createKot) await createKOTForOrder(client, businessId, order.id);
+            if (createKot) await createKOTForOrder(client, businessId, order.id, { queueDevicePrint: queueKotForDevice });
 
 
             if (orderType === "Dine-in") {
@@ -5162,10 +5192,14 @@ app.put("/api/orders/:id/qr-status", async (req, res) => {
     try {
         await client.query("BEGIN");
         await applyTenantDbContext(client);
-        const found = await client.query("SELECT id,order_number,public_tracking_token,status FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE", [orderId, businessId]);
+        const found = await client.query("SELECT id,order_number,public_tracking_token,status,sales_channel_key,order_type FROM orders WHERE id=$1 AND business_id=$2 FOR UPDATE", [orderId, businessId]);
         const order = found.rows[0];
         if (!order) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Order not found." }); }
         if (!order.public_tracking_token && !/^QR-/i.test(String(order.order_number || ""))) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This workflow is only available for QR orders." }); }
+        const settingsResult = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
+        const orderSettings = settingsResult.rows[0]?.settings || {};
+        const saleChannel = resolveSaleChannel(orderSettings, order.sales_channel_key || "online", order.order_type || "Takeaway");
+        const kotPrintMode = saleChannel.qrMenu ? saleChannel.kotPrintMode : "never";
         const currentStatus = String(order.status || "").trim().toLowerCase();
         const targetStatus = nextStatus.toLowerCase();
         if (currentStatus !== targetStatus) {
@@ -5175,8 +5209,7 @@ app.put("/api/orders/:id/qr-status", async (req, res) => {
                 return res.status(409).json({ error: currentStatus === "ready" ? "This QR order is already ready for checkout." : "QR orders must be accepted before they can be marked ready." });
             }
             if (currentStatus === "pending" && nextStatus === "Preparing") {
-                const settings = await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [businessId]);
-                if (settings.rows[0]?.settings?.kotEnabled !== false) await createKOTForOrder(client, businessId, orderId);
+                if (orderSettings.kotEnabled !== false) await createKOTForOrder(client, businessId, orderId, { queueDevicePrint: kotPrintMode === "accepted" });
             }
             await client.query("UPDATE orders SET status=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND business_id=$3", [nextStatus, orderId, businessId]);
             const kotStatus = nextStatus === "Preparing" ? "Preparing" : "Ready";
@@ -5190,7 +5223,7 @@ app.put("/api/orders/:id/qr-status", async (req, res) => {
             await recordOrderActivity(client, orderId, nextStatus === "Preparing" ? "QR order accepted" : "QR order marked ready", nextStatus === "Preparing" ? "QR order accepted and sent to preparation." : "QR order marked ready for checkout.", req);
         }
         await client.query("COMMIT");
-        res.json({ success: true, status: nextStatus });
+        res.json({ success: true, status: nextStatus, kotPrintMode });
     } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
         console.error("QR order workflow update failed:", error);
@@ -5438,7 +5471,13 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         WHERE id=$4 AND business_id=$5 RETURNING *
     `, [methodLabel, nextStatus, nonChargeable ? nonChargeableReason : null, normalizedOrderId, businessId]);
     const savedOrder = orderUpdate.rows[0];
-    if (!keepOpen && body.createKot === true && order.checkout_settings?.kotEnabled !== false) await createKOTForOrder(client, businessId, normalizedOrderId);
+    if (!keepOpen && body.createKot === true && order.checkout_settings?.kotEnabled !== false) {
+        const channel = salesChannelsForSettings(order.checkout_settings).find(entry => entry.key === String(order.sales_channel_key || ""));
+        const queueDevicePrint = channel?.qrMenu
+            ? channel.kotPrintMode === "accepted"
+            : channel?.kotPrintMode === "checkout";
+        await createKOTForOrder(client, businessId, normalizedOrderId, { queueDevicePrint });
+    }
     const paymentDescription = nonChargeable
         ? `Non-chargeable sale recorded · ${nonChargeableReason}.`
         : normalizedPayments.map(payment => `${payment.method}: ${payment.amount.toFixed(2)}`).join(" · ");
@@ -5542,7 +5581,7 @@ app.get("/api/orders/:id", async (req, res) => {
             [orderId, businessId]
         );
         const itemsQuery = pool.query(
-            "SELECT oi.*,m.category FROM order_items oi LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2 WHERE oi.order_id=$1 ORDER BY oi.id",
+            "SELECT oi.*,m.category,m.is_open_item FROM order_items oi LEFT JOIN menu m ON m.id=oi.menu_id AND m.business_id=$2 WHERE oi.order_id=$1 ORDER BY oi.id",
             [orderId, businessId]
         );
         const [orderResult, itemsResult] = await Promise.all([orderQuery, itemsQuery]);
@@ -5639,6 +5678,9 @@ app.put(
             const appliedDiscount = calculation.discount;
             const appliedServiceCharge = calculation.serviceCharge;
             const shouldCreateKot = createKot === true && orderSettings.kotEnabled !== false;
+            const queueDevicePrint = saleChannel.qrMenu
+                ? saleChannel.kotPrintMode === "accepted"
+                : saleChannel.kotPrintMode === "save";
             if (existingOrder.status === "Cancelled") throw new Error("Cancelled orders cannot be edited.");
             if (existingOrder.status === "Completed") {
                 if (existingOrder.bill_printed_at ? !(canEditAfterPrint || canEditClosed) : !canEditClosed) {
@@ -5763,6 +5805,7 @@ app.put(
                 .map(value => String(value || "").trim().slice(0, 120)).filter(Boolean))].slice(0, 30);
             const itemReplacement = await replaceOrderItemsPreservingKOT(client, Number(req.user.business_id), orderId, normalizedItems, {
                 createMissingTickets: shouldCreateKot && existingOrder.status !== "Completed",
+                queueDevicePrint,
                 itemCancellationReasons,
                 allowedCancellationReasons: allowedItemCancellationReasons
             });
@@ -9434,7 +9477,7 @@ const ACCESS_FEATURE_PERMISSIONS_SERVER = [
     "pos_feature.manage_sold_out_items", "pos_feature.manage_weighing_scale", "pos_feature.manual_close_of_day",
     "pos_feature.mark_out_of_stock", "pos_feature.modify_prepaid_balance", "pos_feature.open_order_printing",
     "pos_feature.order_reprint", "pos_feature.override_batch_selection_in_pos", "pos_feature.override_discount",
-    "pos_feature.pos_preferences", "pos_feature.record_payment_and_settle_bill", "pos_feature.reprint_kots",
+    "pos_feature.pos_preferences", "pos_feature.record_payment_and_settle_bill", "pos_feature.record_payment_and_settle_order", "pos_feature.reprint_kots",
     "pos_feature.reprint_invoice_after_settlement", "pos_feature.restrict_delivery_status_update", "pos_feature.restrict_manual_batch_verification",
     "pos_feature.return_sale", "pos_feature.save_or_hold_an_order", "pos_feature.send_digital_bill", "pos_feature.split_bill",
     "pos_feature.transfer_items_after_bill_print", "pos_feature.transfer_items_before_bill_print", "pos_feature.uncancel_sale",
