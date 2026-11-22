@@ -178,10 +178,11 @@ let appSettings = {
     showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
     gstCalculationEnabled: true,
     paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
-    defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: STARTER_PAYMENT_MODES.map(mode => ({ ...mode })), orderPrefix: "ORD-", invoicePrefix: "INV-",
+    defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: STARTER_PAYMENT_MODES.map(mode => ({ ...mode })), orderPrefix: "ORD-", orderSequenceStart: 1, orderNumberPadding: 4,
+    qrOrderPrefix: "QR-", qrOrderSequenceStart: 1, qrOrderNumberPadding: 4, invoicePrefix: "INV-", invoiceSequenceStart: 1, invoiceNumberPadding: 6,
     nonChargeableReasons: DEFAULT_NON_CHARGEABLE_REASONS.slice(),
     cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
-    allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
+    allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial", billPrintFontSize: 10, kotPrintFontSize: 12,
     printKitchenOnOrder: false, kotPrintMode: "never", printAllTicketsFromDevice: false, billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
     defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5,
     customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
@@ -235,7 +236,7 @@ function formatItemOptionNames(options) {
 
 function normalizeOrderBillItems(items, order = {}) {
     const source = Array.isArray(items) ? items : [];
-    const isQrOrder = String(order?.order_number || "").toUpperCase().startsWith("QR-");
+    const isQrOrder = Boolean(order?.public_tracking_token) || String(order?.order_number || "").toUpperCase().startsWith("QR-");
     const normalized = source.map(item => {
         const quantity = Math.max(1, Number(item?.quantity ?? item?.qty ?? 1));
         const lineTotal = Number(item?.line_total ?? item?.total ?? 0);
@@ -620,6 +621,12 @@ function hasPermission(moduleKey, action="view") {
     if (!currentUser) return false;
     if (currentUser.is_owner === true && currentUser.permissions_override === null) return true;
     return currentUser.permissions?.[`${moduleKey}.${action}`] === true;
+}
+function hasFeaturePermission(featureKey) {
+    if (!currentUser) return false;
+    if (currentUser.is_owner === true && currentUser.permissions_override === null) return true;
+    const key = String(featureKey || "").startsWith("pos_feature.") ? String(featureKey) : accessFeaturePermissionKey(featureKey);
+    return currentUser.permissions?.[key] === true;
 }
 window.loginDeviceRegistered = false;
 window.setLoginDeviceRegistrationState = function (registered) {
@@ -3527,6 +3534,26 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         const completedOrder = settlement.order || order;
         const invoice = settlement.invoice || null;
         const paymentSummary = settlement.paymentSummary || {};
+        const settlementTotal = Number(completedOrder.total ?? total);
+        const savedAllocations = Array.isArray(paymentSummary.allocations) ? paymentSummary.allocations : [];
+        const fallbackAllocationTotals = new Map();
+        if (!paymentOptions.nonChargeable) {
+            [...(Array.isArray(previousPaymentAllocations) ? previousPaymentAllocations : []), ...paymentsToRecord].forEach(entry => {
+                const method = String(entry?.method || paymentMethod || "Payment");
+                const amount = Math.max(0, Number(entry?.amount || 0));
+                if (amount > 0) fallbackAllocationTotals.set(method, (fallbackAllocationTotals.get(method) || 0) + amount);
+            });
+        }
+        const fallbackAllocations = [...fallbackAllocationTotals.entries()].map(([method, amount]) => ({ method, amount }));
+        const settlementAllocations = savedAllocations.length ? savedAllocations : fallbackAllocations;
+        const allocationsCollected = settlementAllocations.reduce((sum, entry) => sum + Number(entry?.amount || 0), 0);
+        const settlementCollected = settlementAllocations.length ? allocationsCollected
+            : paymentSummary.amountCollected !== undefined ? Number(paymentSummary.amountCollected || 0)
+            : Math.max(0, settlementTotal - Number(paymentSummary.amountDue || 0));
+        const settlementDue = paymentOptions.nonChargeable || /non.?chargeable/i.test(String(paymentMethod || "")) ? 0
+            : settlementAllocations.length || paymentSummary.amountCollected !== undefined
+                ? Math.max(0, Math.round((settlementTotal - settlementCollected) * 100) / 100)
+                : Number(paymentSummary.amountDue || 0);
         closePayment();
         cart = [];
         cartItemCancellationReasons = [];
@@ -3540,7 +3567,10 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
         }
         window.currentBillData = {
             orderId: completedOrder.id || order.id,
-            billingSettingsSnapshot: completedOrder.billing_settings_snapshot || order.billing_settings_snapshot || billingSettingsSnapshotForChannel(),
+            billingSettingsSnapshot: {
+                ...billingSettingsSnapshotForChannel(completedOrder.sale_channel_key || order.sale_channel_key || selectedPOSChannelKey),
+                ...(completedOrder.billing_settings_snapshot || order.billing_settings_snapshot || {})
+            },
             isOpenOrder: Boolean(paymentOptions.keepOpen),
             orderNumber: completedOrder.order_number || orderNumber,
             invoiceNumber: invoice?.invoice_number || null,
@@ -3567,16 +3597,16 @@ async function completeOrder(paymentMethod, paymentOptions = {}) {
             customerAddress: completedOrder.customer_address || billingCustomer?.address || customerDetails.address || null,
             customerCity: completedOrder.customer_city || billingCustomer?.city || customerDetails.city || null,
             customerState: completedOrder.customer_state || billingCustomer?.state || customerDetails.state || null,
-            paymentAllocations: paymentSummary.allocations || [],
+            paymentAllocations: settlementAllocations,
             cashierName: currentUser?.display_name || currentUser?.username || "",
-            amountCollected: Number(paymentSummary.amountCollected || 0),
-            amountDue: Number(paymentSummary.amountDue || 0),
+            amountCollected: settlementCollected,
+            amountDue: settlementDue,
             items: billItems
         };
         showPage("new-order");
         showProfileToast(paymentOptions.keepOpen ? "Payment recorded · balance due" : paymentOptions.paymentMode === "partial" ? "Order closed · balance due" : "Sale completed");
         const channelBillCopies = Number(window.currentBillData.billingSettingsSnapshot?.billCopies || 0);
-        if (!paymentOptions.keepOpen && channelBillCopies > 0) Promise.resolve().then(() => window.printThermalBill()).catch(error => console.warn("Bill print failed:", error));
+        if (!paymentOptions.keepOpen && channelBillCopies > 0) Promise.resolve().then(() => window.printThermalBill({ auto: true })).catch(error => console.warn("Bill print failed:", error));
         if (hasPermission("dashboard")) updateDashboard().catch(error=>console.warn("Dashboard refresh failed:",error.message));
     } catch (error) {
         console.error(error);
@@ -4149,7 +4179,7 @@ window.printThermalBill = async function(options = {}) {
     if (!data) return alert("No bill is available to print.");
     if (!manualPrint && billCopies === 0) { showProfileToast("Automatic bill printing skipped · copies set to 0"); return; }
 
-    if (!(window.cafePrinters || []).some(printer => printer.is_default && printer.active !== false) && data.orderId) {
+    if ((options.auto || !(window.cafePrinters || []).some(printer => printer.is_default && printer.active !== false)) && data.orderId) {
         try { window.cafePrinters = await api("/printers?source=order"); }
         catch (error) { showProfileToast("Could not load an order printer: " + error.message); return; }
     }
@@ -4190,7 +4220,9 @@ window.printThermalBill = async function(options = {}) {
                     printerName: defaultPrinter.name,
                     receipt,
                     paperWidth: defaultPrinter.paper_width || billSettings.paperWidth || "80",
-                    copies: billCopies
+                    copies: billCopies,
+                    fontSize: billSettings.billPrintFontSize || 10,
+                    bold: true
                 });
                 if (!result?.success) throw new Error(result?.error || "Windows could not send the bill to the selected printer.");
                 await markBillPrinted();
@@ -4198,16 +4230,13 @@ window.printThermalBill = async function(options = {}) {
                 return;
             }
             const serviceUrl = window.CAFE_PRINT_SERVICE_URL || "http://127.0.0.1:18181";
-            let result = {};
-            for (let copy = 0; copy < billCopies; copy++) {
-                const response = await fetch(serviceUrl + "/print", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ printerName: defaultPrinter.name, receipt, paperWidth: defaultPrinter.paper_width || billSettings.paperWidth || "80" })
-                });
-                result = await response.json().catch(function(){ return {}; });
-                if (!response.ok) throw new Error(result.error || "Windows print service rejected the job.");
-            }
+            const response = await fetch(serviceUrl + "/print", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ printerName: defaultPrinter.name, receipt, paperWidth: defaultPrinter.paper_width || billSettings.paperWidth || "80", fontSize: billSettings.billPrintFontSize || 10, bold: true, copies: billCopies })
+            });
+            const result = await response.json().catch(function(){ return {}; });
+            if (!response.ok) throw new Error(result.error || "Windows print service rejected the job.");
             await markBillPrinted();
             showProfileToast(result.outputFile ? "PDF saved to " + result.outputFile : "Bill sent to " + defaultPrinter.name + ".");
             return;
@@ -4225,7 +4254,7 @@ window.printThermalBill = async function(options = {}) {
 
         if (defaultPrinter.connection_type === "bluetooth") {
             const receipt = receiptTextWithBillingSnapshot(data, defaultPrinter.paper_width || billSettings.paperWidth || "80");
-            for (let copy = 0; copy < billCopies; copy++) await sendBluetoothPrinterText(defaultPrinter, receipt, false);
+            for (let copy = 0; copy < billCopies; copy++) await sendBluetoothPrinterText(defaultPrinter, receipt, false, { fontSize: billSettings.billPrintFontSize || 10, bold: true });
             await markBillPrinted();
             showProfileToast("Bill sent to " + defaultPrinter.name + ".");
             return;
@@ -4596,7 +4625,7 @@ async function viewOrder(orderId) {
         const items = sourceItems.map(item => {
             const qty = Math.max(1, Number(item.quantity || 1));
             const missingLineValues = Number(item.price || 0) === 0 && Number(item.line_total || 0) === 0;
-            if (String(order.order_number || "").startsWith("QR-") && sourceItems.length === 1 && missingLineValues && Number(order.total || 0) > 0) {
+            if ((Boolean(order.public_tracking_token) || String(order.order_number || "").startsWith("QR-")) && sourceItems.length === 1 && missingLineValues && Number(order.total || 0) > 0) {
                 const gross = Number(order.subtotal || 0) + Number(order.gst || 0);
                 return { ...item, price: gross / qty, line_total: gross };
             }
@@ -6896,39 +6925,57 @@ async function printKOT(orderId, onlyGroupId, ticketNumber, options={}){
                 ? !Number(ticket.kot_group_id)
                 : Number(ticket.kot_group_id) === Number(onlyGroupId));
         }
-        if(!tickets.length){if(options.quiet)throw new Error("No KOT ticket was found for this print job.");alert("KOT not found.");return {success:false};}
+        if(!tickets.length){if(options.quiet||options.auto)throw new Error("No KOT ticket was found for this print job.");alert("KOT not found.");return {success:false};}
         const buckets=new Map();
         tickets.forEach(ticket=>{const key=ticket.kot_group_id?String(ticket.kot_group_id):"unassigned";if(!buckets.has(key))buckets.set(key,[]);buckets.get(key).push(ticket);});
         for(const [groupId,groupTickets] of buckets){
-            const first=groupTickets[0],groupName=first.kot_group_name||"Kitchen";
+            const first=groupTickets[0];
             const ticketTime = parsePOSDate(first.created_at || Date.now());
-            const receipt=[appSettings.restaurantName||"SLASH POS","KITCHEN ORDER TICKET",`KOT #${first.id}`,`Ticket: #${Number(first.ticket_number||1)}`,`Group: ${groupName}`,`Order: ${first.order_number||orderId}`,`Type: ${first.order_type||"-"}`,`Table: ${first.table_number||"-"}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}`,`Received: ${formatKOTAge(ticketTime)} · ${formatPOSDateTime(ticketTime)}`];
+            const kotHeading = "KITCHEN ORDER TICKET";
+            const printerLineWidth = Number(appSettings.paperWidth) <= 58 ? 32 : 48;
+            const centeredKotHeading = " ".repeat(Math.max(0, Math.floor((printerLineWidth - kotHeading.length) / 2))) + kotHeading;
+            const receipt=[centeredKotHeading,`Ticket: #${Number(first.ticket_number||1)}`,`Type: ${first.order_type||"-"}`,`Received: ${formatKOTAge(ticketTime)} · ${formatPOSDateTime(ticketTime)}`];
             const orderNote=String(first.order_notes||"").trim();
             if(orderNote)receipt.push("Order note: "+orderNote);
             receipt.push("--------------------------------");
             groupTickets.forEach(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0);receipt.push(`${quantity<=0&&cancelled>0?"CANCELLED: ":""}${item.item_name||"Item"} x${quantity}${cancelled>0?` (cancelled x${cancelled})`:""}`);if(options)receipt.push(`  + ${options}`);});
             receipt.push("--------------------------------", "KITCHEN COPY", "", "");
             const text=receipt.join("\n");
-            const printerId=Number(first.printer_id||0);
-            if(printerId&&first.printer_connection_type==="local"){
+            let assignedPrinter=(window.cafePrinters||[]).find(printer=>Number(printer.id)===Number(first.printer_id||0));
+            if(options.auto&&!Number(first.printer_id||0)){
+                let availablePrinters=Array.isArray(window.cafePrinters)?window.cafePrinters:[];
+                if(!availablePrinters.some(printer=>printer.is_default&&printer.active!==false)){
+                    availablePrinters=await api("/printers?source=order");
+                    window.cafePrinters=availablePrinters;
+                }
+                assignedPrinter=availablePrinters.find(printer=>printer.is_default&&printer.active!==false)||null;
+                if(!assignedPrinter)throw new Error("No default printer is configured for unassigned KOT items.");
+            }
+            const printerId=Number(assignedPrinter?.id||first.printer_id||0);
+            const printerType=assignedPrinter?.connection_type||first.printer_connection_type||"";
+            const printerName=assignedPrinter?.name||first.printer_name||"";
+            const printerPaperWidth=assignedPrinter?.paper_width||first.printer_paper_width||appSettings.paperWidth||"80";
+            const kotFontSize=Math.min(24,Math.max(8,Math.round(Number(appSettings.kotPrintFontSize)||12)));
+            if(printerId&&printerType==="local"){
                 if(window.cafePOSDesktop?.printReceipt){
-                    const result=await window.cafePOSDesktop.printReceipt({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"});
+                    const result=await window.cafePOSDesktop.printReceipt({printerName,receipt:text,paperWidth:printerPaperWidth,fontSize:kotFontSize,bold:true});
                     if(!result?.success)throw new Error(result?.error||"Windows could not send the KOT to the selected printer.");
                 }else{
-                    const response=await fetch((window.CAFE_PRINT_SERVICE_URL||"http://127.0.0.1:18181")+"/print",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printerName:first.printer_name,receipt:text,paperWidth:first.printer_paper_width||appSettings.paperWidth||"80"})});
+                    const response=await fetch((window.CAFE_PRINT_SERVICE_URL||"http://127.0.0.1:18181")+"/print",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({printerName,receipt:text,paperWidth:printerPaperWidth,fontSize:kotFontSize,bold:true,copies:1})});
                     const result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||"Windows print service rejected the KOT.");
                 }
-            }else if(printerId&&first.printer_connection_type==="network"){
-                await api(`/printers/${printerId}/print?source=kot`,{method:"POST",body:JSON.stringify({receipt:text,settings:appSettings})});
-            }else if(printerId&&first.printer_connection_type==="bluetooth"){
-                if(options.quiet)throw new Error(`Bluetooth printer “${first.printer_name||""}” needs an interactive connection. Assign a local or network printer for automatic counter printing.`);
-                await sendBluetoothPrinterText({name:first.printer_name,bluetooth_name:first.printer_bluetooth_name,service_uuid:first.printer_service_uuid,characteristic_uuid:first.printer_characteristic_uuid},text);
+            }else if(printerId&&printerType==="network"){
+                await api(`/printers/${printerId}/print?source=kot`,{method:"POST",body:JSON.stringify({receipt:text,settings:{...appSettings,kotPrintFontSize:kotFontSize},copies:1})});
+            }else if(printerId&&printerType==="bluetooth"){
+                if(options.auto&&!window.cafePOSDesktop)throw new Error(`Bluetooth printer “${printerName}” needs a manual connection in the browser. Assign a local or network printer for automatic KOT printing.`);
+                if(options.quiet)throw new Error(`Bluetooth printer “${printerName}” needs an interactive connection. Assign a local or network printer for automatic counter printing.`);
+                await sendBluetoothPrinterText({...assignedPrinter,name:printerName,bluetooth_name:assignedPrinter?.bluetooth_name||first.printer_bluetooth_name,service_uuid:assignedPrinter?.service_uuid||first.printer_service_uuid,characteristic_uuid:assignedPrinter?.characteristic_uuid||first.printer_characteristic_uuid},text,true,{fontSize:kotFontSize,bold:true});
             }else{
-                if(options.quiet)throw new Error(`No local or network printer is assigned to the “${groupName}” KOT group.`);
+                if(options.auto||options.quiet)throw new Error("No printer is assigned to this KOT group and no usable default printer is available.");
                 const win=window.open("","_blank","width=420,height=700");
                 if(!win)return alert("Please allow pop-ups to print KOT.");
                 const noteHtml=first.order_notes?'<p class="order-note"><strong>Order note:</strong> '+esc(first.order_notes)+'</p>':'';const rows=groupTickets.map(item=>{const options=formatItemOptionNames(item.options),quantity=Number(item.quantity||0),cancelled=Number(item.cancelled_quantity||0),fullyCancelled=quantity<=0&&cancelled>0;return `<div class="item ${fullyCancelled?"cancelled":""}"><span>${fullyCancelled?`<del>${esc(item.item_name||"Item")}</del>`:esc(item.item_name||"Item")}${options?`<small>${esc(options)}</small>`:""}</span><strong>${cancelled?`<del>(${cancelled})</del> `:""}${quantity>0?`× ${quantity}`:cancelled?"0":"× 0"}</strong></div>`;}).join("");
-                win.document.write(`<!doctype html><html><head><title>KOT ${esc(first.order_number||orderId)} · Ticket ${Number(first.ticket_number||1)}</title><style>body{font:16px Arial;width:300px;margin:0 auto;padding:15px;color:#111}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.order-note{padding:8px;border:1px dashed #777;font-weight:bold}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:normal;margin-top:4px}.item.cancelled{color:#777}.item del{color:#777}.footer{text-align:center;font-weight:bold}</style></head><body><h2>${esc(appSettings.restaurantName||"SLASH POS")}</h2><div class="center">KITCHEN ORDER TICKET · ${esc(groupName)}</div><div class="line"></div><p>Ticket: <b>#${Number(first.ticket_number||1)}</b><br>Order: <b>${esc(first.order_number||orderId)}</b><br>Type: ${esc(first.order_type||"-")} · Table: ${esc(first.table_number||"-")}${Number(first.pax)>0?` · ${Number(first.pax)} PAX`:""}<br>Received: <b>${esc(formatKOTAge(ticketTime))}</b><br>${esc(formatPOSDateTime(ticketTime))}</p>${noteHtml}<div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
+                win.document.write(`<!doctype html><html><head><title>KITCHEN ORDER TICKET · #${Number(first.ticket_number||1)}</title><style>body{font:${kotFontSize}px Arial;width:300px;margin:0 auto;padding:15px;color:#111;font-weight:700}h2,.center{text-align:center}.line{border-top:1px dashed;margin:12px 0}.order-note{padding:8px;border:1px dashed #777;font-weight:bold}.item{display:flex;justify-content:space-between;gap:12px;margin:12px 0;font-weight:bold}.item small{display:block;font-weight:bold;margin-top:4px}.item.cancelled{color:#777}.item del{color:#777}.footer{text-align:center;font-weight:bold}</style></head><body><h2>KITCHEN ORDER TICKET</h2><div class="center">Ticket: <b>#${Number(first.ticket_number||1)}</b></div><div class="line"></div><p>Type: ${esc(first.order_type||"-")}<br>Received: <b>${esc(formatKOTAge(ticketTime))}</b><br>${esc(formatPOSDateTime(ticketTime))}</p>${noteHtml}<div class="line"></div>${rows}<div class="line"></div><div class="footer">KITCHEN COPY</div><script>window.onload=()=>window.print()<\/script></body></html>`);
                 win.document.close();
             }
         }
@@ -6936,6 +6983,7 @@ async function printKOT(orderId, onlyGroupId, ticketNumber, options={}){
         return {success:true};
     }catch(error){
         if(options.quiet)throw error;
+        if(options.auto){showProfileToast("Automatic KOT print failed: "+(error?.message||"Check the printer setup and try again."));return {success:false,error};}
         if(isBluetoothSelectionCancelled(error)){
             showProfileToast("Bluetooth printer selection was cancelled. Choose a printer to send the KOT.");
             return {success:false,error};
@@ -7600,6 +7648,65 @@ const ACCESS_MODULES = [
 
 const ACCESS_ACTIONS = ["view", "create", "edit", "delete", "export", "print"];
 
+// Independent POS capabilities requested for access profiles; these are not
+// aliases for the module/action permissions above.
+const ACCESS_FEATURE_PERMISSIONS = [
+    ["allow_edit_delete_customer_note", "Allow to edit/delete customer note", "Customers"],
+    ["apply_discount", "Apply Discount", "Billing"],
+    ["apply_non_chargeable_sales", "Apply Non Chargeable Sales", "Billing"],
+    ["back_order_feature", "Back Order Feature", "Orders"],
+    ["block_unblock_customer", "Block/Unblock Customer", "Customers"],
+    ["cancel_sale", "Cancel Sale", "Orders"],
+    ["cash_management", "Cash Management", "Payments"],
+    ["cash_register", "Cash Register", "Payments"],
+    ["close_order_with_balance_amount", "Close Order With Balance Amount", "Payments"],
+    ["close_open_orders_after_end_of_business_day", "Close the open orders post the end of business day", "Orders"],
+    ["create_new_order", "Create New Order", "Orders"],
+    ["create_non_chargeable_sales", "Create Non Chargeable Sales", "Billing"],
+    ["create_orders_on_reserved_table", "Create orders on Reserved Table", "Orders"],
+    ["disable_payment_save", "Disable Payment Save’", "Payments"],
+    ["edit_charge", "Edit Charge", "Billing"],
+    ["edit_charge_after_bill_print", "Edit Charge after Bill print", "Billing"],
+    ["edit_coupons_offers_after_bill_print", "Edit Coupons/offers after Bill print", "Billing"],
+    ["edit_customer_after_bill_print", "Edit Customer after Bill print", "Customers"],
+    ["edit_order_after_bill_print", "Edit Order after Bill print", "Orders"],
+    ["edit_service_ticket", "Edit Service Ticket", "Orders"],
+    ["edit_online_orders_uneditable_sale_items", "Edit online order's uneditable sale items", "Orders"],
+    ["edit_order_after_print", "Edit order after print", "Orders"],
+    ["manage_printers", "Manage Printers", "Printing"],
+    ["manage_rista_cards", "Manage Rista Cards", "Customers"],
+    ["manage_sold_out_items", "Manage Sold Out Items", "Menu"],
+    ["manage_weighing_scale", "Manage Weighing Scale", "Menu"],
+    ["manual_close_of_day", "Manual Close of Day", "Orders"],
+    ["mark_out_of_stock", "Mark Out of Stock", "Menu"],
+    ["modify_prepaid_balance", "Modify Prepaid Balance", "Customers"],
+    ["open_order_printing", "Open order printing", "Printing"],
+    ["order_reprint", "Order Reprint", "Printing"],
+    ["override_batch_selection_in_pos", "Override Batch Selection in POS", "Menu"],
+    ["override_discount", "Override Discount", "Billing"],
+    ["pos_preferences", "Pos Preferences", "Settings"],
+    ["record_payment_and_settle_bill", "Record payment and settle bill", "Payments"],
+    ["reprint_kots", "Reprint KOTs", "Printing"],
+    ["reprint_invoice_after_settlement", "Reprint invoice After Settlement", "Printing"],
+    ["restrict_delivery_status_update", "Restrict delivery status update", "Orders"],
+    ["restrict_manual_batch_verification", "Restrict manual batch verification", "Menu"],
+    ["return_sale", "Return Sale", "Orders"],
+    ["save_or_hold_an_order", "Save or Hold an order", "Orders"],
+    ["send_digital_bill", "Send Digital Bill", "Printing"],
+    ["split_bill", "Split Bill", "Payments"],
+    ["transfer_items_after_bill_print", "Transfer Items In Order After Bill Print", "Orders"],
+    ["transfer_items_before_bill_print", "Transfer Items In Order Before Bill Print", "Orders"],
+    ["uncancel_sale", "Uncancel Sale", "Orders"],
+    ["unvoid_sale", "Unvoid Sale", "Orders"],
+    ["update_closed_orders", "Update Closed Orders", "Orders"],
+    ["view_closed_orders", "View Closed Orders", "Orders"],
+    ["void_sale", "Void Sale", "Orders"]
+];
+
+function accessFeaturePermissionKey(featureKey) {
+    return "pos_feature." + featureKey;
+}
+
 function accessPermissionKey(moduleKey, action) {
     return moduleKey + "." + action;
 }
@@ -7617,6 +7724,9 @@ function defaultAccessPermissions() {
     permissions["orders.edit_closed"] = false;
     permissions["orders.cancel_closed"] = false;
     permissions["dashboard.view"] = true;
+    ACCESS_FEATURE_PERMISSIONS.forEach(function(feature) {
+        permissions[accessFeaturePermissionKey(feature[0])] = false;
+    });
     return permissions;
 }
 
@@ -7865,6 +7975,22 @@ function buildAccessPermissionEditor(permissions) {
         ];
         orderControls.innerHTML = controls.map(([key, label]) => `<label class="order-permission-check"><input type="checkbox" data-permission-key="${key}" ${normalized[key] ? "checked" : ""}><span>${label}</span></label>`).join("");
     }
+    const featureControls = document.getElementById("accessFeaturePermissionEditor");
+    if (featureControls) {
+        const groups = [...new Set(ACCESS_FEATURE_PERMISSIONS.map(feature => feature[2]))];
+        featureControls.innerHTML = groups.map(group => `
+            <section class="access-feature-group">
+                <h4>${esc(group)}</h4>
+                <div class="access-feature-grid">
+                    ${ACCESS_FEATURE_PERMISSIONS.filter(feature => feature[2] === group).map(feature => {
+                        const key = accessFeaturePermissionKey(feature[0]);
+                        const checked = normalized[key] === true;
+                        return `<label class="access-feature-row"><span class="access-feature-name">${esc(feature[1])}</span><input type="checkbox" data-permission-key="${key}" aria-label="${esc(feature[1])}" ${checked ? "checked" : ""}><span class="access-feature-state" aria-hidden="true"></span></label>`;
+                    }).join("")}
+                </div>
+            </section>
+        `).join("");
+    }
 }
 
 function readAccessPermissionEditor() {
@@ -7873,6 +7999,9 @@ function readAccessPermissionEditor() {
         permissions[input.dataset.permissionKey] = input.checked;
     });
     document.querySelectorAll("#accessOrderPermissionEditor input[data-permission-key]").forEach(function(input) {
+        permissions[input.dataset.permissionKey] = input.checked;
+    });
+    document.querySelectorAll("#accessFeaturePermissionEditor input[data-permission-key]").forEach(function(input) {
         permissions[input.dataset.permissionKey] = input.checked;
     });
     return permissions;
@@ -8902,12 +9031,16 @@ async function loadSettings() {
     setSettingValue("settingCurrency", appSettings.currency);
     setSettingValue("settingGstRate", appSettings.gstRate);
     setSettingValue("settingDefaultPayment", appSettings.defaultPayment);
-    setSettingValue("settingOrderPrefix", appSettings.orderPrefix); setSettingValue("settingInvoicePrefix", appSettings.invoicePrefix);
+    setSettingValue("settingOrderPrefix", appSettings.orderPrefix); setSettingValue("settingOrderSequenceStart", appSettings.orderSequenceStart || 1); setSettingValue("settingOrderNumberPadding", appSettings.orderNumberPadding || 4);
+    setSettingValue("settingQrOrderPrefix", appSettings.qrOrderPrefix); setSettingValue("settingQrOrderSequenceStart", appSettings.qrOrderSequenceStart || 1); setSettingValue("settingQrOrderNumberPadding", appSettings.qrOrderNumberPadding || 4);
+    setSettingValue("settingInvoicePrefix", appSettings.invoicePrefix); setSettingValue("settingInvoiceSequenceStart", appSettings.invoiceSequenceStart || 1); setSettingValue("settingInvoiceNumberPadding", appSettings.invoiceNumberPadding || 6);
     setSettingValue("settingNonChargeableReasons", normalizeNonChargeableReasons(appSettings.nonChargeableReasons || DEFAULT_NON_CHARGEABLE_REASONS).join("\n"));
     setSettingValue("settingCancellationReasons", normalizeCancellationReasons(appSettings.cancellationReasons || DEFAULT_CANCELLATION_REASONS).join("\n"));
     setSettingValue("settingAllowZeroAmount", appSettings.allowZeroAmount);
     setSettingValue("settingTotalRoundingMode", ["none", "nearest", "up", "down"].includes(appSettings.totalRoundingMode) ? appSettings.totalRoundingMode : appSettings.roundTotals ? "nearest" : "none");
     setSettingValue("settingLogoUrl", appSettings.logoUrl); setSettingValue("settingUpiId", appSettings.upiId); setSettingValue("settingReceiptFont", appSettings.receiptFont);
+    setSettingValue("settingBillPrintFontSize", Math.min(24, Math.max(8, Math.round(Number(appSettings.billPrintFontSize) || 10))));
+    setSettingValue("settingKotPrintFontSize", Math.min(24, Math.max(8, Math.round(Number(appSettings.kotPrintFontSize) || 12))));
     setSettingValue("settingKotPrintMode", ["never", "save", "checkout"].includes(appSettings.kotPrintMode) ? appSettings.kotPrintMode : appSettings.printKitchenOnOrder ? "checkout" : "never");
     setSettingValue("settingBillCopies", Math.min(20, Math.max(0, Number(appSettings.billCopies) || 0)));
     setSettingValue("settingEnableReceiptSound", appSettings.enableReceiptSound);
@@ -8966,7 +9099,7 @@ function businessLogoUrl() {
 
 function billingSettingsSnapshotForChannel(channelKey = selectedPOSChannelKey) {
     const channel = getSaleChannel(channelKey);
-    const keys = ["restaurantName","businessLegalName","businessType","address","phone","gstin","fssai","header","footer","showInvoice","showCustomer","showCustomerPhone","showOrder","showOrderType","showTable","showTimestamp","showGST","showPayment","showQR","uppercaseItems","wrapItems","gstCalculationEnabled","currency","gstRate","paperWidth","autoPrint","autoClose","logoUrl","upiId","receiptFont","customerMessage","showItemNotes","totalRoundingMode","roundTotals","designerShowNotes","designerShowInvoiceMeta","designerCompact","accentLabel","showPoweredByCafePilot"];
+    const keys = ["restaurantName","businessLegalName","businessType","address","phone","gstin","fssai","header","footer","showInvoice","showCustomer","showCustomerPhone","showOrder","showOrderType","showTable","showTimestamp","showGST","showPayment","showQR","uppercaseItems","wrapItems","gstCalculationEnabled","currency","gstRate","paperWidth","autoPrint","autoClose","logoUrl","upiId","receiptFont","billPrintFontSize","kotPrintFontSize","customerMessage","showItemNotes","totalRoundingMode","roundTotals","designerShowNotes","designerShowInvoiceMeta","designerCompact","accentLabel","showPoweredByCafePilot"];
     const snapshot = {};
     keys.forEach(key => { if (Object.prototype.hasOwnProperty.call(appSettings || {}, key)) snapshot[key] = appSettings[key]; });
     snapshot.billCopies = Math.min(20, Math.max(0, Math.floor(Number(channel?.billCopies ?? (appSettings.autoPrint === true ? appSettings.billCopies : 0)) || 0)));
@@ -9011,13 +9144,23 @@ async function saveSettings() {
         gstRate: Number(readSettingValue("settingGstRate")) || 0,
         defaultPayment: readSettingValue("settingDefaultPayment") || preferredPaymentMethod(),
         paymentModes: normalizePaymentModes(appSettings.paymentModes),
-        orderPrefix: readSettingValue("settingOrderPrefix") || "ORD-", invoicePrefix: readSettingValue("settingInvoicePrefix") || "INV-",
+        orderPrefix: String(readSettingValue("settingOrderPrefix") ?? "ORD-").trim(),
+        orderSequenceStart: Math.max(1, Math.floor(Number(readSettingValue("settingOrderSequenceStart")) || 1)),
+        orderNumberPadding: Math.max(1, Math.min(12, Math.floor(Number(readSettingValue("settingOrderNumberPadding")) || 4))),
+        qrOrderPrefix: String(readSettingValue("settingQrOrderPrefix") ?? "QR-").trim(),
+        qrOrderSequenceStart: Math.max(1, Math.floor(Number(readSettingValue("settingQrOrderSequenceStart")) || 1)),
+        qrOrderNumberPadding: Math.max(1, Math.min(12, Math.floor(Number(readSettingValue("settingQrOrderNumberPadding")) || 4))),
+        invoicePrefix: String(readSettingValue("settingInvoicePrefix") ?? "INV-").trim(),
+        invoiceSequenceStart: Math.max(1, Math.floor(Number(readSettingValue("settingInvoiceSequenceStart")) || 1)),
+        invoiceNumberPadding: Math.max(1, Math.min(12, Math.floor(Number(readSettingValue("settingInvoiceNumberPadding")) || 6))),
         nonChargeableReasons: normalizeNonChargeableReasons(String(readSettingValue("settingNonChargeableReasons") || "").split(/\r?\n/)),
         cancellationReasons: normalizeCancellationReasons(String(readSettingValue("settingCancellationReasons") || "").split(/\r?\n/)),
         allowZeroAmount: readSettingValue("settingAllowZeroAmount"),
         totalRoundingMode: readSettingValue("settingTotalRoundingMode") || "none",
         roundTotals: (readSettingValue("settingTotalRoundingMode") || "none") !== "none",
         logoUrl: readSettingValue("settingLogoUrl") || "", upiId: readSettingValue("settingUpiId") || "", receiptFont: readSettingValue("settingReceiptFont") || "Arial",
+        billPrintFontSize: Math.min(24, Math.max(8, Math.round(Number(readSettingValue("settingBillPrintFontSize")) || 10))),
+        kotPrintFontSize: Math.min(24, Math.max(8, Math.round(Number(readSettingValue("settingKotPrintFontSize")) || 12))),
         kotPrintMode: ["never", "save", "checkout"].includes(readSettingValue("settingKotPrintMode")) ? readSettingValue("settingKotPrintMode") : "never",
         printKitchenOnOrder: readSettingValue("settingKotPrintMode") === "checkout",
         billCopies: Math.min(20, Math.max(0, Math.floor(Number(readSettingValue("settingBillCopies")) || 0))),
@@ -9093,10 +9236,11 @@ function resetSettings() {
         showGST: true, showPayment: true, showQR: true, uppercaseItems: false, wrapItems: true,
         gstCalculationEnabled: true,
         paperWidth: "80", autoPrint: false, autoClose: true, currency: "₹", gstRate: 5,
-        defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: normalizePaymentModes(STARTER_PAYMENT_MODES), orderPrefix: "ORD-", invoicePrefix: "INV-",
+        defaultPayment: STARTER_PAYMENT_MODES[0].name, paymentModes: normalizePaymentModes(STARTER_PAYMENT_MODES), orderPrefix: "ORD-", orderSequenceStart: 1, orderNumberPadding: 4,
+        qrOrderPrefix: "QR-", qrOrderSequenceStart: 1, qrOrderNumberPadding: 4, invoicePrefix: "INV-", invoiceSequenceStart: 1, invoiceNumberPadding: 6,
         nonChargeableReasons: DEFAULT_NON_CHARGEABLE_REASONS.slice(),
         cancellationReasons: DEFAULT_CANCELLATION_REASONS.slice(),
-        allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial",
+        allowZeroAmount: false, roundTotals: false, totalRoundingMode: "none", logoUrl: "", upiId: "", receiptFont: "Arial", billPrintFontSize: 10, kotPrintFontSize: 12,
         printKitchenOnOrder: false, kotPrintMode: "never", billCopies: 1, enableReceiptSound: false, openingTime: "09:00", closingTime: "23:00",
         defaultOrderType: "Takeaway", allowOrderNotes: true, showItemNotes: true, lowStockThreshold: 5, customerInfoRequirements: {}, tableAreas: normalizeTableAreas(appSettings.tableAreas), menuAccounts: normalizeMenuAccounts(appSettings.menuAccounts),
         customerMessage: "Thank you for visiting!", enableNotifications: true, enableKOTSound: true, kotAlertInterval: 5,
@@ -11201,8 +11345,9 @@ function printerReceiptText(data,paperWidth="80"){
     const items=Array.isArray(data.items)?data.items:[];
     const allocations=Array.isArray(data.paymentAllocations)?data.paymentAllocations:[];
     const taxBreakdown=Array.isArray(data.taxBreakdown)?data.taxBreakdown:buildBillTaxBreakdown(data.items,data.discount,data.gst);
-    const amountCollected=data.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(data.amountCollected||0);
-    const amountDue=data.amountDue===undefined?Math.max(0,Number(data.total||0)-amountCollected):Number(data.amountDue||0);
+    const allocationTotal=allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0);
+    const amountCollected=allocations.length?allocationTotal:data.amountCollected===undefined?allocationTotal:Number(data.amountCollected||0);
+    const amountDue=/non.?chargeable/i.test(String(data.paymentMethod||""))?0:Math.max(0,Math.round((Number(data.total||0)-amountCollected)*100)/100);
     const wrap=(value,limit=width)=>{const words=clean(value).split(/\s+/);const result=[];let line="";for(let word of words){while(word.length>limit){if(line)result.push(line);result.push(word.slice(0,limit));word=word.slice(limit);line="";}if(!word)continue;const next=line?line+" "+word:word;if(next.length>limit){if(line)result.push(line);line=word;}else line=next;}if(line)result.push(line);return result;};
     const pair=(label,value)=>{const right=String(value??"");const left=String(label||"");if(left.length+right.length+1<=width)return[left.padEnd(width-right.length)+right];return[...wrap(left),...wrap(right).map((line,index)=>index===0?line.padStart(width):line)];};
     const divider="-".repeat(width),lines=[];
@@ -11314,7 +11459,7 @@ function setupDesktopBluetoothPicker(){
     });
     window.addEventListener("beforeunload",()=>{stopDevices?.();stopFinished?.();},{once:true});
 }
-async function sendBluetoothPrinterText(printer,text,center=true){
+async function sendBluetoothPrinterText(printer,text,center=true,printOptions={}){
     if(!navigator.bluetooth)throw new Error("Bluetooth printing is unavailable. Use a Windows Bluetooth printer or a browser with Bluetooth support.");
     const serviceUuid=printer.service_uuid||printer.serviceUuid||"000018f0-0000-1000-8000-00805f9b34fb";
     const characteristicUuid=printer.characteristic_uuid||printer.characteristicUuid||"00002af1-0000-1000-8000-00805f9b34fb";
@@ -11341,10 +11486,15 @@ async function sendBluetoothPrinterText(printer,text,center=true){
         const service=await server.getPrimaryService(serviceUuid);
         const characteristic=await service.getCharacteristic(characteristicUuid);
         const bytes=new TextEncoder().encode(text);
-        const payload=new Uint8Array(bytes.length+11);
-        payload.set(center?[0x1b,0x40,0x1b,0x61,0x01]:[0x1b,0x40,0x1b,0x61,0x00],0);
-        payload.set(bytes,5);
-        payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],5+bytes.length);
+        const size=Math.min(24,Math.max(8,Math.round(Number(printOptions.fontSize)||10)));
+        const scale=size<=12?1:size<=17?2:3;
+        const format=[0x1b,0x40,0x1b,0x61,center?0x01:0x00,0x1d,0x21,(scale-1)<<4,0x1b,0x45,printOptions.bold===false?0x00:0x01];
+        const reset=[0x1b,0x45,0x00,0x1d,0x21,0x00];
+        const payload=new Uint8Array(format.length+bytes.length+reset.length+6);
+        payload.set(format,0);
+        payload.set(bytes,format.length);
+        payload.set(reset,format.length+bytes.length);
+        payload.set([0x0a,0x0a,0x0a,0x1d,0x56,0x00],format.length+bytes.length+reset.length);
         const writeChunk=chunk=>characteristic.writeValueWithoutResponse?characteristic.writeValueWithoutResponse(chunk):characteristic.writeValue(chunk);
         for(let i=0;i<payload.length;i+=20)await writeChunk(payload.slice(i,i+20));
     }finally{if(device.gatt.connected)device.gatt.disconnect();}

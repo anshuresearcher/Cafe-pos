@@ -2550,6 +2550,21 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 .option-set-items-empty{padding:12px;border:1px dashed #dce2e6;border-radius:9px;text-align:center}
 .kot-group-multi{min-height:125px}
 .order-permission-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(205px,1fr));gap:8px}
+.access-feature-permissions{margin-top:18px;padding:14px;border:1px solid #e2e7ed;border-radius:12px;background:#f8fafc}
+.access-feature-permissions h3{margin:0 0 4px;font-size:16px}
+.access-feature-permissions>.access-muted{margin:0 0 12px}
+.access-feature-group+.access-feature-group{margin-top:14px}
+.access-feature-group h4{margin:0 0 7px;color:#526172;font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.access-feature-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:7px}
+.access-feature-row{position:relative;display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:42px;padding:8px 10px;border:1px solid #e2e7ed;border-radius:9px;background:#fff;cursor:pointer}
+.access-feature-row:hover{border-color:#9db3ca;background:#fdfefe}
+.access-feature-row input{position:absolute;width:1px;height:1px;opacity:0}
+.access-feature-name{font-size:12px;font-weight:600;color:#273444;line-height:1.35}
+.access-feature-state{display:flex;flex:0 0 27px;width:27px;height:27px;align-items:center;justify-content:center;border:1px solid #f1b7b7;border-radius:50%;background:#fff4f4;color:#c53030;font-size:18px;font-weight:800;line-height:1}
+.access-feature-state::before{content:"×"}
+.access-feature-row input:checked+.access-feature-state{border-color:#a5d8bc;background:#eaf8ef;color:#167543}
+.access-feature-row input:checked+.access-feature-state::before{content:"✓"}
+.access-feature-row input:focus-visible+.access-feature-state{outline:3px solid rgba(59,130,246,.35);outline-offset:2px}
 .cart-item-options{display:block;margin-top:3px;color:#687680}
 #billItemsBody small{display:inline-block;margin-top:3px;color:#59646b}
 .item-option-set{margin:12px 0;padding:12px;border:1px solid #e3e8eb;border-radius:11px;background:#fbfcfd}

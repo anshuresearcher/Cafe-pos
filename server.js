@@ -992,6 +992,84 @@ function permissionForRequest(req) {
     }
     return null;
 }
+
+async function featurePermissionsForRequest(req) {
+    const path = String(req.path || "").replace(/^\/api(?=\/)/, "");
+    const method = String(req.method || "GET").toUpperCase();
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const required = [];
+    const add = key => required.push("pos_feature." + key);
+    const isWrite = method !== "GET" && method !== "HEAD";
+    const checkout = body.checkout && typeof body.checkout === "object" ? body.checkout : {};
+    const isNonChargeable = [body.paymentMethod, body.payment_method, body.paymentMode, body.payment_mode, body.saleType, body.sale_type,
+        checkout.paymentMethod, checkout.paymentMode]
+        .some(value => /non[ -]?chargeable/i.test(String(value || ""))) || body.nonChargeable === true || body.non_chargeable === true || checkout.nonChargeable === true;
+    const hasDiscount = Boolean(body.discountAdjustmentId || body.marketingDealId || checkout.discountAdjustmentId || checkout.marketingDealId)
+        || Number(body.discount || body.discountAmount || body.discount_amount || checkout.discount || 0) > 0
+        || [body.items, checkout.items].some(items => Array.isArray(items) && items.some(item => item && (item.itemDiscountRuleId || item.item_discount_rule_id)));
+    const orderIdPath = /^\/orders\/\d+(?:\/|$)/.test(path);
+
+    if (path === "/settings" && isWrite) add("pos_preferences");
+    if ((path === "/printers" || path.startsWith("/printers/")) && isWrite) add("manage_printers");
+    if ((path === "/qr-service-requests" || path.startsWith("/qr-service-requests/")) && isWrite) add("edit_service_ticket");
+    if ((path === "/billing-adjustments" || path.startsWith("/billing-adjustments/")) && isWrite) add("edit_charge");
+    if (path.startsWith("/loyalty/") && isWrite) {
+        add("manage_rista_cards");
+        if (path.includes("/adjust")) add("modify_prepaid_balance");
+    }
+    if (/^\/menu\/\d+\/qr-stock$/.test(path) && isWrite) {
+        add("manage_sold_out_items");
+        if (body.inStock === false) add("mark_out_of_stock");
+    }
+
+    if (path === "/orders" && method === "POST") {
+        add("create_new_order");
+        if (/^open$/i.test(String(body.initialStatus || body.status || "")) || checkout.keepOpen === true || body.keepOpen === true) add("save_or_hold_an_order");
+        if (isNonChargeable) {
+            add("apply_non_chargeable_sales");
+            add("create_non_chargeable_sales");
+        }
+        if (hasDiscount) add("apply_discount");
+        if (String(checkout.paymentMode || body.paymentMode || "").toLowerCase() === "split" || (Array.isArray(checkout.payments) && checkout.payments.length > 1)) add("split_bill");
+    }
+    if (/^\/orders\/\d+\/settle$/.test(path) && method === "POST") {
+        add("record_payment_and_settle_bill");
+        if (isNonChargeable) add("apply_non_chargeable_sales");
+        if (String(body.paymentMode || body.payment_mode || "").toLowerCase() === "partial" && body.keepOpen !== true) add("close_order_with_balance_amount");
+        if (String(body.paymentMode || body.payment_mode || "").toLowerCase() === "split" || (Array.isArray(body.payments) && body.payments.length > 1)) add("split_bill");
+        if (hasDiscount) add("apply_discount");
+    }
+    if (/^\/orders\/\d+\/cancel$/.test(path) && isWrite) add("cancel_sale");
+    if ((path === "/orders" || path.startsWith("/orders/")) && method === "GET" && /^(closed|completed|settled)$/i.test(String(req.query?.status || req.query?.tab || ""))) add("view_closed_orders");
+    if (orderIdPath && ["PUT", "PATCH"].includes(method)) {
+        if (body.status && /cancel/i.test(String(body.status))) add("cancel_sale");
+        if (body.status && /void/i.test(String(body.status))) add("void_sale");
+        if (body.restoreCancelled === true || body.restore_cancelled === true) add("uncancel_sale");
+        if (body.restoreVoided === true || body.restore_voided === true) add("unvoid_sale");
+        if (hasDiscount || body.itemDiscounts || body.item_discounts) add("apply_discount");
+        if (body.chargeAdjustmentId !== undefined || body.charge_amount !== undefined) add("edit_charge");
+        const orderId = Number(path.match(/^\/orders\/(\d+)/)?.[1]);
+        const state = Number.isInteger(orderId) && orderId > 0 && Number(req.user?.business_id) > 0
+            ? (await pool.query("SELECT status,bill_printed_at,customer_id,public_tracking_token FROM orders WHERE id=$1 AND business_id=$2", [orderId, Number(req.user.business_id)])).rows[0]
+            : null;
+        const isClosed = String(state?.status || "").toLowerCase() === "completed";
+        const billPrinted = Boolean(state?.bill_printed_at);
+        if (isClosed) add("update_closed_orders");
+        if (billPrinted) {
+            if (body.items !== undefined || body.orderType !== undefined || body.tableNumber !== undefined) add("edit_order_after_print");
+            if (body.customerId !== undefined && Number(body.customerId || 0) !== Number(state?.customer_id || 0)) add("edit_customer_after_bill_print");
+            if (hasDiscount || body.marketingDealId !== undefined) add("edit_coupons_offers_after_bill_print");
+            if (body.chargeAdjustmentId !== undefined || body.charge_amount !== undefined) add("edit_charge_after_bill_print");
+            if (body.transferItems === true || body.transfer_items === true) add("transfer_items_after_bill_print");
+        } else if (body.transferItems === true || body.transfer_items === true) {
+            add("transfer_items_before_bill_print");
+        }
+        if (state?.public_tracking_token && body.items !== undefined) add("edit_online_orders_uneditable_sale_items");
+    }
+    if (path === "/settings/sales-channels" && isWrite) add("pos_preferences");
+    return [...new Set(required)];
+}
+
 async function requireAuth(req, res, next) {
     try {
         if (req.path === "/public/device/register" || req.path.startsWith("/support/")) return next();
@@ -1084,7 +1162,7 @@ async function requireAuth(req, res, next) {
         if (restrictedAddon && !licenseHasAddon(req.license, restrictedAddon)) {
             return res.status(403).json({ error: restrictedAddon + " is a paid add-on that is not active for this business", code: "LICENSE_ADDON_REQUIRED", addon: restrictedAddon });
         }
-        return tenantContext.run({ businessId: Number(user.business_id) }, () => {
+        return tenantContext.run({ businessId: Number(user.business_id) }, async () => {
             const required = permissionForRequest(req);
             if (!required) return res.status(403).json({ error: 'Permission denied: no permission mapping exists for this endpoint' });
             const permissions = user.permissions && typeof user.permissions === "object" ? user.permissions : {};
@@ -1096,6 +1174,10 @@ async function requireAuth(req, res, next) {
             const ownerDefaults = user.is_owner === true && user.permissions_override === null;
             if (!ownerDefaults && !hasRequestedPermission) {
                 return res.status(403).json({ error: "Permission denied: " + required });
+            }
+            if (!ownerDefaults) {
+                const deniedFeature = (await featurePermissionsForRequest(req)).find(key => permissions[key] !== true);
+                if (deniedFeature) return res.status(403).json({ error: "Permission denied: " + deniedFeature });
             }
             return next();
         });
@@ -1115,6 +1197,14 @@ async function ensureInvoiceTables() {
         business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
         next_number BIGINT NOT NULL DEFAULT 1 CHECK(next_number > 0),
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    await pool.query(`CREATE TABLE IF NOT EXISTS business_sequence_counters (
+        business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+        series_key VARCHAR(20) NOT NULL,
+        next_number BIGINT NOT NULL DEFAULT 1 CHECK(next_number > 0),
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (business_id, series_key)
     )`);
 
     const check = await pool.query(`
@@ -2651,7 +2741,10 @@ app.post("/public-menu/:token/orders", async (req, res) => {
                     order = updatedResult.rows[0];
                     isAppendedOrder = true;
                 } else {
-                    const orderNumber = "QR-" + Date.now().toString(36).toUpperCase() + "-" + crypto.randomBytes(3).toString("hex").toUpperCase();
+                    const orderNumber = await nextOrderDisplayNumber(
+                        client, businessId, "slash_order", String(businessSettings.qrOrderPrefix ?? "QR-").slice(0, 24),
+                        Number(businessSettings.qrOrderSequenceStart || 1), Number(businessSettings.qrOrderNumberPadding || 4)
+                    );
                     const orderResult = await client.query(
                         "INSERT INTO orders(order_number,order_type,table_number,subtotal,gst,total,payment_method,status,notes,pax,public_tracking_token,public_session_key,discount,marketing_deal_id,marketing_deal_name,discount_adjustment_id,discount_adjustment_name,customer_id,sales_channel_key,sales_channel_name,billing_settings_snapshot) VALUES($1,$2,$3,$4,$5,$6,'Unpaid','Pending',$7,1,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb) RETURNING id,order_number,table_number,total,status",
                         [orderNumber, orderType, assignedTableNumber, subtotal, gst, total, note || "QR order", trackingToken, sessionKey, 0, null, null, null, null, guestCustomer.id, priceChannel, qrChannel?.label || "Slash", JSON.stringify(billingSettingsSnapshot)]
@@ -2737,7 +2830,7 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
                     FROM payments
                     WHERE business_id=o.business_id AND order_id=o.id AND payment_status='Success'
                 ) paid ON TRUE
-                WHERE o.business_id=$1 AND o.id=$2 AND o.public_tracking_token=$3 AND o.order_number LIKE 'QR-%' LIMIT 1`,
+                WHERE o.business_id=$1 AND o.id=$2 AND o.public_tracking_token=$3 LIMIT 1`,
                 [businessId, orderId, trackingToken]);
             const order = orderResult.rows[0];
             if (!order) return null;
@@ -4292,8 +4385,8 @@ async function createKOTForOrder(db, businessId, orderId) {
     if (!items.rows.length) return 0;
     const groups = await db.query(`SELECT id,category_names,item_ids,sort_order FROM kot_groups WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,id`, [Number(businessId)]);
     const activeGroupIds = new Set(groups.rows.map(group => Number(group.id)));
-    const ticketSequenceResult = await db.query(`SELECT COALESCE(MAX(ticket_number),0)+1 AS ticket_number FROM kot WHERE business_id=$1 AND order_id=$2`, [Number(businessId), Number(orderId)]);
-    const ticketNumber = Number(ticketSequenceResult.rows[0]?.ticket_number || 1);
+    const ticketSequenceResult = await db.query(`SELECT COALESCE(MAX(ticket_number),0)+1 AS ticket_number FROM kot WHERE business_id=$1`, [Number(businessId)]);
+    const ticketNumber = await nextBusinessSequenceNumber(db, businessId, "kot", Number(ticketSequenceResult.rows[0]?.ticket_number || 1));
     const values=[];
     const rows=items.rows.map((item,index)=>{
         const itemRoute=groups.rows.find(group=>Number(item.menu_id)>0&&Array.isArray(group.item_ids)&&group.item_ids.map(Number).includes(Number(item.menu_id)));
@@ -4634,8 +4727,10 @@ app.post(
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.discountAdjustmentId, saleChannel.key);
             await assertBillingAdjustmentAvailableForChannel(client, businessId, b.chargeAdjustmentId, saleChannel.key);
             const createKot = createKotRequested && businessSettings.kotEnabled !== false;
-            const orderPrefix = String(businessSettings.orderPrefix || "ORD-").slice(0, 24);
-            orderNumber = orderPrefix + Date.now().toString().slice(-8) + crypto.randomBytes(2).toString("hex").toUpperCase();
+            orderNumber = await nextOrderDisplayNumber(
+                client, businessId, "pos_order", String(businessSettings.orderPrefix ?? "ORD-").slice(0, 24),
+                Number(businessSettings.orderSequenceStart || 1), Number(businessSettings.orderNumberPadding || 4)
+            );
 
             if (orderType === "Dine-in") {
 
@@ -5212,15 +5307,48 @@ app.get("/api/orders/:id/payment-summary", async (req,res)=>{
     }
 });
 
-async function nextInvoiceSequenceNumber(client, businessId) {
+async function nextBusinessSequenceNumber(client, businessId, seriesKey, startingNumber = 1) {
+    const start = Math.max(1, Math.floor(Number(startingNumber) || 1));
     const result = await client.query(`
-        INSERT INTO invoice_number_counters(business_id,next_number)
-        VALUES($1,2)
-        ON CONFLICT(business_id) DO UPDATE
-        SET next_number=invoice_number_counters.next_number+1,updated_at=CURRENT_TIMESTAMP
+        INSERT INTO business_sequence_counters(business_id,series_key,next_number)
+        VALUES($1,$2,$3+1)
+        ON CONFLICT(business_id,series_key) DO UPDATE
+        SET next_number=business_sequence_counters.next_number+1,updated_at=CURRENT_TIMESTAMP
         RETURNING next_number-1 AS number
-    `, [Number(businessId)]);
-    return Number(result.rows[0]?.number || 1);
+    `, [Number(businessId), String(seriesKey), start]);
+    return Number(result.rows[0]?.number || start);
+}
+
+async function nextOrderDisplayNumber(client, businessId, seriesKey, prefix, startingNumber = 1, padding = 4) {
+    const width = Math.max(1, Math.min(12, Math.floor(Number(padding) || 4)));
+    const safePrefix = String(prefix ?? "").slice(0, 24);
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const sequence = await nextBusinessSequenceNumber(client, businessId, seriesKey, startingNumber);
+        const displayNumber = safePrefix + String(sequence).padStart(width, "0");
+        const existing = await client.query("SELECT 1 FROM orders WHERE business_id=$1 AND order_number=$2 LIMIT 1", [Number(businessId), displayNumber]);
+        if (!existing.rows.length) return displayNumber;
+    }
+    throw new Error("Could not allocate a unique order number. Choose a different prefix or starting number.");
+}
+
+async function nextInvoiceSequenceNumber(client, businessId, startingNumber = 1, prefix = "INV-", padding = 6) {
+    const start = Math.max(1, Math.floor(Number(startingNumber) || 1));
+    const width = Math.max(1, Math.min(12, Math.floor(Number(padding) || 6)));
+    const safePrefix = String(prefix ?? "").slice(0, 24);
+    for (let attempt = 0; attempt < 1000; attempt++) {
+        const result = await client.query(`
+            INSERT INTO invoice_number_counters(business_id,next_number)
+            VALUES($1,$2+1)
+            ON CONFLICT(business_id) DO UPDATE
+            SET next_number=invoice_number_counters.next_number+1,updated_at=CURRENT_TIMESTAMP
+            RETURNING next_number-1 AS number
+        `, [Number(businessId), start]);
+        const number = Number(result.rows[0]?.number || start);
+        const invoiceNumber = safePrefix + String(number).padStart(width, "0");
+        const existing = await client.query("SELECT 1 FROM invoices WHERE business_id=$1 AND invoice_number=$2 LIMIT 1", [Number(businessId), invoiceNumber]);
+        if (!existing.rows.length) return number;
+    }
+    throw new Error("Could not allocate a unique invoice number. Choose a different prefix or starting number.");
 }
 
 async function settleOrderWithClient(client, req, orderId, businessId, body = {}) {
@@ -5347,8 +5475,10 @@ async function settleOrderWithClient(client, req, orderId, businessId, body = {}
         const updatedInvoice = await client.query(`UPDATE invoices SET customer_id=COALESCE($1,customer_id),payment_method=$2,status=$3 WHERE id=$4 RETURNING *`, [customerId, invoiceMethod, status, invoice.id]);
         invoice = updatedInvoice.rows[0];
     } else {
-        const sequence = await nextInvoiceSequenceNumber(client, businessId);
-        const invoiceNumber = String(checkoutSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequence).padStart(6, "0");
+        const invoicePrefix = String(checkoutSettings.invoicePrefix ?? "INV-").slice(0, 24);
+        const invoicePadding = Number(checkoutSettings.invoiceNumberPadding || 6);
+        const sequence = await nextInvoiceSequenceNumber(client, businessId, checkoutSettings.invoiceSequenceStart, invoicePrefix, invoicePadding);
+        const invoiceNumber = invoicePrefix + String(sequence).padStart(Math.max(1, Math.min(12, invoicePadding || 6)), "0");
         const createdInvoice = await client.query(`
             INSERT INTO invoices(invoice_number,order_id,customer_id,invoice_date,subtotal,gst,total,payment_method,status)
             VALUES($1,$2,$3,CURRENT_TIMESTAMP,$4,$5,$6,$7,$8) RETURNING *
@@ -6299,9 +6429,11 @@ app.post(
             // GENERATE INVOICE NUMBER
             // -----------------------------------------
 
-            const sequenceNumber = await nextInvoiceSequenceNumber(client, Number(req.user.business_id));
             const invoiceSettings = (await client.query("SELECT settings FROM app_settings WHERE business_id=$1 LIMIT 1", [Number(req.user.business_id)])).rows[0]?.settings || {};
-            const invoiceNumber = String(invoiceSettings.invoicePrefix || "INV-").slice(0, 24) + String(sequenceNumber).padStart(6, "0");
+            const invoicePrefix = String(invoiceSettings.invoicePrefix ?? "INV-").slice(0, 24);
+            const invoicePadding = Number(invoiceSettings.invoiceNumberPadding || 6);
+            const sequenceNumber = await nextInvoiceSequenceNumber(client, Number(req.user.business_id), invoiceSettings.invoiceSequenceStart, invoicePrefix, invoicePadding);
+            const invoiceNumber = invoicePrefix + String(sequenceNumber).padStart(Math.max(1, Math.min(12, invoicePadding || 6)), "0");
 
 
             // -----------------------------------------
@@ -9290,6 +9422,24 @@ const ACCESS_MODULES_SERVER = [
 ];
 const ACCESS_ACTIONS_SERVER = ["view", "create", "edit", "delete", "export", "print"];
 const ACCESS_ORDER_PERMISSIONS_SERVER = ["orders.edit_open", "orders.print_open", "orders.edit_after_print", "orders.edit_closed", "orders.cancel_closed"];
+const ACCESS_FEATURE_PERMISSIONS_SERVER = [
+    "pos_feature.allow_edit_delete_customer_note", "pos_feature.apply_discount", "pos_feature.apply_non_chargeable_sales",
+    "pos_feature.back_order_feature", "pos_feature.block_unblock_customer", "pos_feature.cancel_sale",
+    "pos_feature.cash_management", "pos_feature.cash_register", "pos_feature.close_order_with_balance_amount",
+    "pos_feature.close_open_orders_after_end_of_business_day", "pos_feature.create_new_order", "pos_feature.create_non_chargeable_sales",
+    "pos_feature.create_orders_on_reserved_table", "pos_feature.disable_payment_save", "pos_feature.edit_charge",
+    "pos_feature.edit_charge_after_bill_print", "pos_feature.edit_coupons_offers_after_bill_print", "pos_feature.edit_customer_after_bill_print",
+    "pos_feature.edit_order_after_bill_print", "pos_feature.edit_service_ticket", "pos_feature.edit_online_orders_uneditable_sale_items",
+    "pos_feature.edit_order_after_print", "pos_feature.manage_printers", "pos_feature.manage_rista_cards",
+    "pos_feature.manage_sold_out_items", "pos_feature.manage_weighing_scale", "pos_feature.manual_close_of_day",
+    "pos_feature.mark_out_of_stock", "pos_feature.modify_prepaid_balance", "pos_feature.open_order_printing",
+    "pos_feature.order_reprint", "pos_feature.override_batch_selection_in_pos", "pos_feature.override_discount",
+    "pos_feature.pos_preferences", "pos_feature.record_payment_and_settle_bill", "pos_feature.reprint_kots",
+    "pos_feature.reprint_invoice_after_settlement", "pos_feature.restrict_delivery_status_update", "pos_feature.restrict_manual_batch_verification",
+    "pos_feature.return_sale", "pos_feature.save_or_hold_an_order", "pos_feature.send_digital_bill", "pos_feature.split_bill",
+    "pos_feature.transfer_items_after_bill_print", "pos_feature.transfer_items_before_bill_print", "pos_feature.uncancel_sale",
+    "pos_feature.unvoid_sale", "pos_feature.update_closed_orders", "pos_feature.view_closed_orders", "pos_feature.void_sale"
+];
 
 function defaultPermissionsServer() {
     const p = {};
@@ -9299,6 +9449,7 @@ function defaultPermissionsServer() {
         }
     }
     for (const key of ACCESS_ORDER_PERMISSIONS_SERVER) p[key] = !["orders.edit_closed", "orders.cancel_closed"].includes(key);
+    for (const key of ACCESS_FEATURE_PERMISSIONS_SERVER) p[key] = false;
     p["dashboard.view"] = true;
     return p;
 }
@@ -9321,6 +9472,7 @@ function managerPermissionsServer() {
     ];
     allow.push("orders.edit_open", "orders.print_open", "orders.edit_after_print");
     allow.forEach(k => p[k] = true);
+    ACCESS_FEATURE_PERMISSIONS_SERVER.forEach(k => p[k] = true);
     return p;
 }
 
@@ -9385,6 +9537,20 @@ async function ensureAccessTables() {
             || CASE WHEN name='Cashier' AND NOT (COALESCE(permissions,'{}'::jsonb) ? 'printer.print') THEN '{"printer.print":true}'::jsonb ELSE '{}'::jsonb END
         WHERE name IN ('Manager','Cashier')
     `);
+    // Add new feature permissions to existing built-in profiles using their
+    // role defaults. Custom profiles stay disabled until configured.
+    for (const profile of builtInProfileDefinitions()) {
+        const featureDefaults = Object.fromEntries(ACCESS_FEATURE_PERMISSIONS_SERVER.map(key => [key, profile.permissions[key] === true]));
+        await pool.query(`
+            UPDATE access_profiles AS existing
+            SET permissions = COALESCE(existing.permissions, '{}'::jsonb) || COALESCE((
+                SELECT jsonb_object_agg(feature.key, feature.value)
+                FROM jsonb_each($1::jsonb) AS feature(key, value)
+                WHERE NOT (COALESCE(existing.permissions, '{}'::jsonb) ? feature.key)
+            ), '{}'::jsonb)
+            WHERE LOWER(existing.name)=LOWER($2)
+        `, [JSON.stringify(featureDefaults), profile.name]);
+    }
     console.log("✅ Access table structure ready");
 }
 
@@ -9396,6 +9562,7 @@ function builtInProfileDefinitions() {
         { name: "Cashier", description: "Counter and cashier access", permissions: (() => {
             const p = defaultPermissionsServer();
             ["dashboard.view","new_order.view","new_order.create","customers.view","customers.create","payments.view","payments.create","orders.view","kitchen.view","kitchen.print","printer.view","printer.print"].forEach(k => p[k] = true);
+            ACCESS_FEATURE_PERMISSIONS_SERVER.forEach(k => p[k] = true);
             return p;
         })() }
     ];
@@ -10057,6 +10224,41 @@ app.put(
             // stale browser copies so regular settings saves stay small.
             delete settings.publicMenuHeroImages;
             const businessId = Number(req.user.business_id);
+            const priorSettingsRow = await pool.query("SELECT settings FROM app_settings WHERE business_id=$1", [businessId]);
+            const priorSettings = priorSettingsRow.rows[0]?.settings || {};
+            const numberSeries = [
+                { key: "pos_order", prefix: "orderPrefix", start: "orderSequenceStart", padding: "orderNumberPadding", defaults: ["ORD-", 1, 4] },
+                { key: "slash_order", prefix: "qrOrderPrefix", start: "qrOrderSequenceStart", padding: "qrOrderNumberPadding", defaults: ["QR-", 1, 4] },
+                { key: "invoice", prefix: "invoicePrefix", start: "invoiceSequenceStart", padding: "invoiceNumberPadding", defaults: ["INV-", 1, 6] }
+            ];
+            for (const series of numberSeries) {
+                const supplied = [series.prefix, series.start, series.padding].some(key => Object.prototype.hasOwnProperty.call(settings, key));
+                if (!supplied) continue;
+                const [defaultPrefix, defaultStart, defaultPadding] = series.defaults;
+                const oldPrefix = String(priorSettings[series.prefix] ?? defaultPrefix).trim();
+                const oldStart = Math.max(1, Math.floor(Number(priorSettings[series.start]) || defaultStart));
+                const oldPadding = Math.max(1, Math.min(12, Math.floor(Number(priorSettings[series.padding]) || defaultPadding)));
+                const prefix = String(settings[series.prefix] ?? oldPrefix).trim();
+                const start = Number(settings[series.start] ?? oldStart);
+                const padding = Number(settings[series.padding] ?? oldPadding);
+                if (prefix.length > 24 || /[\r\n]/.test(prefix)) return res.status(400).json({ error: "Number-series prefixes must be 24 characters or fewer and stay on one line." });
+                if (!Number.isSafeInteger(start) || start < 1 || start > 9007199254740991) return res.status(400).json({ error: "Starting numbers must be positive whole numbers." });
+                if (!Number.isInteger(padding) || padding < 1 || padding > 12) return res.status(400).json({ error: "Number width must be between 1 and 12 digits." });
+                settings[series.prefix] = prefix;
+                settings[series.start] = start;
+                settings[series.padding] = padding;
+                const resetSeries = prefix !== oldPrefix || start !== oldStart;
+                if (!resetSeries) continue;
+                const existingIds = series.key === "invoice"
+                    ? await pool.query(`SELECT 1 FROM invoices WHERE business_id=$1 AND LEFT(invoice_number,CHAR_LENGTH($2))=$2 AND CASE WHEN SUBSTRING(invoice_number FROM CHAR_LENGTH($2)+1) ~ '^[0-9]+$' THEN SUBSTRING(invoice_number FROM CHAR_LENGTH($2)+1)::numeric END >= $3 LIMIT 1`, [businessId, prefix, start])
+                    : await pool.query(`SELECT 1 FROM orders WHERE business_id=$1 AND LEFT(order_number,CHAR_LENGTH($2))=$2 AND CASE WHEN SUBSTRING(order_number FROM CHAR_LENGTH($2)+1) ~ '^[0-9]+$' THEN SUBSTRING(order_number FROM CHAR_LENGTH($2)+1)::numeric END >= $3 LIMIT 1`, [businessId, prefix, start]);
+                if (existingIds.rows.length) return res.status(409).json({ error: "That prefix and starting number overlap existing IDs. Choose a new prefix or a higher unused starting number." });
+                if (series.key === "invoice") {
+                    await pool.query(`INSERT INTO invoice_number_counters(business_id,next_number) VALUES($1,$2) ON CONFLICT(business_id) DO UPDATE SET next_number=EXCLUDED.next_number,updated_at=CURRENT_TIMESTAMP`, [businessId, start]);
+                } else {
+                    await pool.query(`INSERT INTO business_sequence_counters(business_id,series_key,next_number) VALUES($1,$2,$3) ON CONFLICT(business_id,series_key) DO UPDATE SET next_number=EXCLUDED.next_number,updated_at=CURRENT_TIMESTAMP`, [businessId, series.key, start]);
+                }
+            }
 
             if (Object.prototype.hasOwnProperty.call(settings, "tableAreas")) {
                 if (!Array.isArray(settings.tableAreas) || settings.tableAreas.length > 50) {
@@ -10269,6 +10471,8 @@ function normalizePrinterPayload(body={}, current={}) {
 }
 
 function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
+    const fontSize=Math.min(24,Math.max(8,Math.round(Number(settings.billPrintFontSize)||10)));
+    const scale=fontSize<=12?1:fontSize<=17?2:3;
     const width=paperWidth==='58'?32:48;
     const clean=value=>String(value??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim();
     const currency=clean(settings.currency||'₹');
@@ -10318,16 +10522,18 @@ function receiptTextForPrinter(receipt={}, settings={}, paperWidth='80') {
     const roundedTotal=Number(receipt.total||0),rounding=Number(receipt.roundingAdjustment||0);
     body.push(...pair('Bill Total',moneyValue(roundedTotal-rounding)),...pair('Bill Total (rounded)',moneyValue(roundedTotal)));
     const allocations=Array.isArray(receipt.paymentAllocations)?receipt.paymentAllocations:[];
-    const collected=receipt.amountCollected===undefined?allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0):Number(receipt.amountCollected||0);
-    const due=receipt.amountDue===undefined?Math.max(0,Number(receipt.total||0)-collected):Number(receipt.amountDue||0);
+    const allocationTotal=allocations.reduce((sum,payment)=>sum+Number(payment.amount||0),0);
+    const collected=allocations.length?allocationTotal:Number(receipt.amountCollected??allocationTotal);
+    const due=/non.?chargeable/i.test(String(receipt.paymentMethod||''))?0:Math.max(0,Math.round((Number(receipt.total||0)-collected)*100)/100);
     if(!receipt.isOpenOrder){body.push('Payment Summary');if(allocations.length)allocations.forEach(payment=>body.push(...pair(clean(payment.method||'Payment'),moneyValue(payment.amount))));else body.push(...pair(clean(receipt.paymentMethod||'Payment'),moneyValue(collected)));body.push(...pair('Balance',moneyValue(due)));}
     body.push(line);
     const footer=[...String(settings.footer||'Visit Again!\nThank you.').replace('Thank You!\nVisit Again 😊','Visit Again!\nThank you.').split(/\r?\n/).map(clean).filter(Boolean)];
     const encode=rows=>Buffer.from(rows.filter(Boolean).join('\n')+'\n','utf8');
+    const fontScale=(scale-1)<<4;
     return Buffer.concat([
-        Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),encode(header),
+        Buffer.from([0x1b,0x40,0x1b,0x61,0x01,0x1d,0x21,fontScale,0x1b,0x45,0x01]),encode(header),
         Buffer.from([0x1b,0x61,0x00]),encode(body),
-        Buffer.from([0x1b,0x61,0x01]),encode(footer),
+        Buffer.from([0x1b,0x45,0x00,0x1d,0x21,0x00,0x1b,0x61,0x01]),encode(footer),
         Buffer.from([0x0a,0x0a,0x0a,0x1d,0x56,0x00])
     ]);
 }
@@ -10425,12 +10631,13 @@ app.post('/api/printers/:id/print',async(req,res)=>{
             phone:req.user.business_phone||'',
             gstin:req.user.gstin||'',
             currency:req.user.currency||'₹',
-            ...savedSettings
+            ...savedSettings,
+            ...(req.body.settings && typeof req.body.settings === 'object' && !Array.isArray(req.body.settings) ? req.body.settings : {})
         };
         const bytes=typeof req.body.receipt==='string'
-            ? Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01]),Buffer.from(req.body.receipt,'utf8'),Buffer.from([0x1b,0x64,0x04,0x1d,0x56,0x00])])
+            ? (()=>{const kot=req.query?.source==='kot',fontSize=Math.min(24,Math.max(8,Math.round(Number(savedSettings.kotPrintFontSize)||12))),scale=fontSize<=12?1:fontSize<=17?2:3,fontScale=(scale-1)<<4;return Buffer.concat([Buffer.from([0x1b,0x40,0x1b,0x61,0x01,0x1d,0x21,kot?fontScale:0x00,0x1b,0x45,kot?0x01:0x00]),Buffer.from(req.body.receipt,'utf8'),Buffer.from([0x1b,0x45,0x00,0x1d,0x21,0x00,0x1b,0x64,0x04,0x1d,0x56,0x00])])})()
             : receiptTextForPrinter(req.body.receipt,settings,printer.paper_width);
-        const copies = Math.min(20, Math.max(0, Math.floor(Number(req.body.copies) || 0)));
+        const copies = Math.min(20, Math.max(0, Math.floor(Number(req.body.copies ?? (req.query?.source === 'kot' ? 1 : 0)) || 0)));
         for (let copy = 0; copy < copies; copy++) await sendRawPrinterBytes(printer.host,printer.port,bytes);
         res.json({success:true,copies});
     }catch(e){res.status(502).json({error:e.message||'Could not print to the network printer'});}
@@ -10442,7 +10649,7 @@ app.post('/api/printers/:id/print',async(req,res)=>{
 const TENANT_TABLES_PHASE_2A = [
     'menu_categories','menu','menu_variants','restaurant_tables','orders','order_items',
     'reservations','kot_groups','kot','payments','customers','invoices','order_activity',
-    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','qr_menu_events','qr_service_requests','kot_device_print_hosts','kot_device_print_jobs'
+    'loyalty_settings','loyalty_transactions','billing_adjustments','expense_categories','expenses','printers','app_settings','public_menu_settings','public_menu_push_subscriptions','marketing_push_campaigns','invoice_number_counters','business_sequence_counters','qr_menu_events','qr_service_requests','kot_device_print_hosts','kot_device_print_jobs'
 ];
 // These tables are provisioned and secured by sql/002_counter_device_kot_printing.sql.
 // They are owned by the Supabase migration role, so the restricted runtime role
@@ -11412,7 +11619,7 @@ app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
             let permissionsOverride=null;
             if(req.body.permissionsOverride!==undefined&&req.body.permissionsOverride!==null){
                 if(typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride))throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
-                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER));
+                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER,ACCESS_FEATURE_PERMISSIONS_SERVER));
                 permissionsOverride={};
                 for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
             }
@@ -11469,7 +11676,7 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
                 else if(!req.body.permissionsOverride||typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride)){
                     throw Object.assign(new Error('Custom permissions must be an object'),{status:400});
                 }else{
-                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER));
+                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER,ACCESS_FEATURE_PERMISSIONS_SERVER));
                     permissionsOverride={};
                     for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
                 }
