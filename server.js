@@ -1834,6 +1834,7 @@ app.post("/api/auth/login", async (req,res)=>{
 });
 
 app.get("/api/auth/heartbeat", async (req, res) => {
+    res.set("Cache-Control","private, no-store");
     try {
         const session = await getSessionUser(req);
         if (!session) return res.status(401).json({ error: "Session is no longer active" });
@@ -1844,6 +1845,7 @@ app.get("/api/auth/heartbeat", async (req, res) => {
     }
 });
 app.get("/api/auth/me",async(req,res)=>{
+    res.set("Cache-Control","private, no-store");
     try{
         const session = await getSessionUser(req);
         if(!session)return res.status(401).json({error:"Not logged in"});
@@ -2812,6 +2814,37 @@ app.post("/public-menu/:token/orders", async (req, res) => {
     }
 });
 
+app.post("/public-menu/:token/orders/statuses", async (req,res)=>{
+    const token=String(req.params.token||"");
+    const submitted=req.body?.orders;
+    if(!/^[a-f0-9]{48}$/i.test(token)||!Array.isArray(submitted)||submitted.length>30)return res.status(400).json({error:"Invalid order status request"});
+    const orders=[];
+    for(const item of submitted){
+        const orderId=Number(item?.orderId),trackingToken=String(item?.trackingToken||"");
+        if(!Number.isSafeInteger(orderId)||orderId<=0||!/^[a-f0-9]{48}$/i.test(trackingToken))return res.status(400).json({error:"Invalid order status request"});
+        orders.push({orderId,trackingToken});
+    }
+    try{
+        const access=await runSystemContext(()=>pool.query("SELECT business_id FROM public_menu_settings WHERE token=$1 LIMIT 1",[token]));
+        const publication=access.rows[0];
+        if(!publication||!(await businessHasLicenseAddon(publication.business_id,"Table QR")))return res.status(404).json({error:"Menu not found"});
+        const businessId=Number(publication.business_id);
+        const result=await tenantContext.run({businessId},()=>pool.query(`
+            WITH requested AS (
+                SELECT * FROM jsonb_to_recordset($2::jsonb) AS x("orderId" bigint,"trackingToken" text)
+            )
+            SELECT o.id,o.order_number,o.order_type,o.table_number,o.status,o.total,o.created_at
+            FROM requested r
+            JOIN orders o ON o.id=r."orderId" AND o.business_id=$1 AND o.public_tracking_token=r."trackingToken"
+            ORDER BY o.created_at DESC,o.id DESC
+        `,[businessId,JSON.stringify(orders)]));
+        res.set("Cache-Control","no-store").json({orders:result.rows});
+    }catch(error){
+        console.error("Public QR order statuses error:",error);
+        res.status(500).json({error:"Could not refresh order statuses"});
+    }
+});
+
 app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
     const token = String(req.params.token || "");
     const orderId = Number(req.params.orderId);
@@ -2849,6 +2882,7 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
         res.status(500).json({ error: "Could not load this order" });
     }
 });
+app.use("/api",(req,res,next)=>{res.set("Cache-Control","private, no-store");next();});
 app.use("/api", requireAuth);
 
 // Image writes use the application's café-scoped session. The Supabase service key
@@ -5112,6 +5146,15 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
                 WHERE oa.business_id=$1 AND oa.event_type='QR items added'
                   AND $3::bigint IS NOT NULL AND oa.id>$3
                 ORDER BY o.id,oa.id DESC
+            ), status_changes AS (
+                SELECT DISTINCT ON (o.id) oa.id AS activity_id,oa.event_type,o.id,o.order_number,o.table_number,o.total,o.status,o.updated_at
+                FROM order_activity oa
+                JOIN orders o ON o.id=oa.order_id AND o.business_id=oa.business_id
+                WHERE oa.business_id=$1
+                  AND oa.event_type IN ('QR order marked ready','Payment recorded','Order completed','Order cancelled','Order updated','Item cancelled','Closed bill edited','Kitchen status changed')
+                  AND $3::bigint IS NOT NULL AND oa.id>$3
+                  AND (o.public_tracking_token IS NOT NULL OR o.order_number ILIKE 'QR-%')
+                ORDER BY o.id,oa.id DESC
             ), accepted_qr_orders AS (
                 SELECT oa.id AS activity_id,o.id,o.order_number,o.table_number,o.total,o.status,o.updated_at
                 FROM order_activity oa
@@ -5145,11 +5188,21 @@ app.get("/api/orders/qr-notifications", async (req, res) => {
                        'total',accepted_qr_orders.total,
                        'status',accepted_qr_orders.status,
                        'updated_at',accepted_qr_orders.updated_at
-                   ) ORDER BY accepted_qr_orders.activity_id) FROM accepted_qr_orders),'[]'::json) AS accepted_orders
+                   ) ORDER BY accepted_qr_orders.activity_id) FROM accepted_qr_orders),'[]'::json) AS accepted_orders,
+                   COALESCE((SELECT json_agg(json_build_object(
+                       'id',status_changes.id,
+                       'activity_id',status_changes.activity_id,
+                       'event_type',status_changes.event_type,
+                       'order_number',status_changes.order_number,
+                       'table_number',status_changes.table_number,
+                       'total',status_changes.total,
+                       'status',status_changes.status,
+                       'updated_at',status_changes.updated_at
+                   ) ORDER BY status_changes.activity_id) FROM status_changes),'[]'::json) AS status_changes
             FROM latest CROSS JOIN latest_activity
         `, [businessId, afterId, afterActivityId]);
         const row = result.rows[0] || {};
-        res.json({ latestOrderId: Number(row.latest_order_id || 0), latestActivityId: Number(row.latest_activity_id || 0), orders: row.orders || [], updates: row.updates || [], acceptedOrders: row.accepted_orders || [] });
+        res.json({ latestOrderId: Number(row.latest_order_id || 0), latestActivityId: Number(row.latest_activity_id || 0), orders: row.orders || [], updates: row.updates || [], acceptedOrders: row.accepted_orders || [], statusChanges: row.status_changes || [] });
     } catch (error) {
         console.error("QR order notification poll failed:", error);
         res.status(500).json({ error: "Failed to check for new QR orders" });
@@ -5162,21 +5215,38 @@ app.get("/api/qr-service-requests", async (req, res) => {
     const afterId = cursorProvided ? Number(req.query.afterId) : null;
     if (cursorProvided && (!Number.isSafeInteger(afterId) || afterId < 0)) return res.status(400).json({ error: "Invalid service request cursor" });
     try {
-        const publicationResult = await pool.query(
-            "SELECT outlet_open,hours_enabled,open_time,close_time FROM public_menu_settings WHERE business_id=$1 LIMIT 1", [businessId]
-        );
-        const orderingOpen = qrMenuOrderingAvailability(publicationResult.rows[0] || {}).orderingOpen;
-        const latestResult = await pool.query(
-            "SELECT COALESCE(MAX(id),0)::bigint AS latest_id FROM qr_service_requests WHERE business_id=$1", [businessId]
-        );
-        const latestId = Number(latestResult.rows[0]?.latest_id || 0);
-        if (!cursorProvided) return res.set("Cache-Control", "no-store").json({ latestId, cursorId: latestId, requests: [], orderingOpen });
-        const result = await pool.query(
-            `SELECT id,table_number,request_type,created_at FROM qr_service_requests
-             WHERE business_id=$1 AND id>$2 ORDER BY id LIMIT 100`, [businessId, afterId]
-        );
-        const cursorId = result.rows.length ? Number(result.rows[result.rows.length - 1].id) : latestId;
-        res.set("Cache-Control", "no-store").json({ latestId, cursorId, requests: result.rows, orderingOpen });
+        const result = await pool.query(`
+            WITH publication AS (
+                SELECT outlet_open,hours_enabled,open_time,close_time
+                FROM public_menu_settings WHERE business_id=$1 LIMIT 1
+            ),
+            latest AS (
+                SELECT COALESCE(MAX(id),0)::bigint AS latest_id
+                FROM qr_service_requests WHERE business_id=$1
+            ),
+            request_batch AS (
+                SELECT id,table_number,request_type,created_at
+                FROM qr_service_requests
+                WHERE business_id=$1 AND $3::boolean=TRUE AND id>$2
+                ORDER BY id LIMIT 101
+            ),
+            request_page AS (
+                SELECT id,table_number,request_type,created_at
+                FROM request_batch ORDER BY id LIMIT 100
+            )
+            SELECT latest.latest_id,
+                   CASE WHEN (SELECT COUNT(*) FROM request_batch)>100
+                        THEN COALESCE((SELECT MAX(id) FROM request_page),$2,0)
+                        ELSE latest.latest_id END AS cursor_id,
+                   (SELECT row_to_json(publication) FROM publication) AS publication,
+                   COALESCE((SELECT json_agg(row_to_json(request_page) ORDER BY request_page.id) FROM request_page),'[]'::json) AS requests
+            FROM latest
+        `,[businessId,afterId,cursorProvided]);
+        const row=result.rows[0]||{},latestId=Number(row.latest_id||0);
+        const orderingOpen=qrMenuOrderingAvailability(row.publication||{}).orderingOpen;
+        res.set("Cache-Control","private, no-store").json({
+            latestId,cursorId:Number(row.cursor_id||latestId),requests:row.requests||[],orderingOpen
+        });
     } catch (error) {
         console.error("QR service request poll failed:", error);
         res.status(500).json({ error: "Could not check table service requests" });
@@ -5237,6 +5307,18 @@ app.get(
     "/api/orders",
     async (req, res) => {
 
+        const scope=String(req.query.scope||"all");
+        if(!["all","my-orders","table"].includes(scope))return res.status(400).json({error:"Invalid order list scope"});
+        const fromDate=String(req.query.from||"").trim();
+        const toDate=String(req.query.to||"").trim();
+        const validDate=value=>{
+            if(!value)return true;
+            if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
+            const [year,month,day]=value.split("-").map(Number);
+            const date=new Date(Date.UTC(year,month-1,day));
+            return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day;
+        };
+        if(!validDate(fromDate)||!validDate(toDate)||fromDate&&toDate&&fromDate>toDate)return res.status(400).json({error:"Choose a valid order date range"});
         try {
 
             const result =
@@ -5266,10 +5348,29 @@ app.get(
                         FROM payments p
                         WHERE p.order_id=o.id AND p.business_id=o.business_id AND p.payment_status='Success'
                     ) paid ON TRUE
-                    WHERE o.business_id = $1
+                     WHERE o.business_id = $1
+                       AND (
+                            $4::text<>'my-orders'
+                            OR (
+                                o.created_at >= COALESCE(
+                                    CASE WHEN $2::date IS NOT NULL THEN ($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') END,
+                                    CASE WHEN $3::date IS NOT NULL THEN TIMESTAMP '1970-01-01' END,
+                                    ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata')
+                                )
+                                AND o.created_at < COALESCE(
+                                    CASE WHEN $3::date IS NOT NULL THEN (($3::date+1)::timestamp AT TIME ZONE 'Asia/Kolkata') END,
+                                    CASE WHEN $2::date IS NOT NULL THEN (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date+INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata') END,
+                                    (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date+INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata')
+                                )
+                            )
+                       )
+                       AND (
+                            $4::text<>'table'
+                            OR LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled')
+                       )
                     ORDER BY o.created_at DESC
                     `
-                    , [Number(req.user.business_id)]
+                    , [Number(req.user.business_id),fromDate||null,toDate||null,scope]
                 );
 
             res.json(result.rows);
@@ -7124,6 +7225,84 @@ app.post("/api/kot-print-jobs/:id/complete", async (req,res)=>{
 // KOT
 // =====================================================
 
+app.get("/api/kot/notifications", async (req,res)=>{
+    const businessId=Number(req.user.business_id);
+    const hasKotCursor=req.query.afterId!==undefined;
+    const hasActivityCursor=req.query.afterActivityId!==undefined;
+    const afterKotId=hasKotCursor?Number(req.query.afterId):null;
+    const afterActivityId=hasActivityCursor?Number(req.query.afterActivityId):null;
+    if(hasKotCursor&&(!Number.isSafeInteger(afterKotId)||afterKotId<0))return res.status(400).json({error:"Invalid KOT cursor"});
+    if(hasActivityCursor&&(!Number.isSafeInteger(afterActivityId)||afterActivityId<0))return res.status(400).json({error:"Invalid kitchen status cursor"});
+    try{
+        const result=await pool.query(`
+            WITH latest AS (
+                SELECT
+                    COALESCE((SELECT MAX(id) FROM kot WHERE business_id=$1),0)::bigint AS latest_kot_id,
+                    COALESCE((SELECT MAX(id) FROM order_activity WHERE business_id=$1),0)::bigint AS latest_activity_id
+            ),
+            kot_batch AS (
+                SELECT id FROM kot
+                WHERE business_id=$1 AND $2::bigint IS NOT NULL AND id>$2
+                ORDER BY id LIMIT 501
+            ),
+            kot_page AS (
+                SELECT id FROM kot_batch ORDER BY id LIMIT 500
+            ),
+            activity_batch AS (
+                SELECT id,order_id FROM order_activity
+                WHERE business_id=$1 AND event_type='Kitchen status changed'
+                  AND $3::bigint IS NOT NULL AND id>$3
+                ORDER BY id LIMIT 501
+            ),
+            activity_page AS (
+                SELECT id,order_id FROM activity_batch ORDER BY id LIMIT 500
+            ),
+            candidates AS (
+                SELECT id,0::bigint AS activity_id FROM kot_page
+                UNION ALL
+                SELECT k.id,MAX(a.id)::bigint AS activity_id
+                FROM activity_page a
+                JOIN kot k ON k.order_id=a.order_id AND k.business_id=$1
+                GROUP BY k.id
+            ),
+            ticket_ids AS (
+                SELECT id,MAX(activity_id)::bigint AS activity_id FROM candidates GROUP BY id
+            ),
+            tickets AS (
+                SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,kg.printer_id,
+                       p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
+                       p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
+                       p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
+                       o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,o.status AS order_status
+                FROM ticket_ids ids
+                JOIN kot k ON k.id=ids.id AND k.business_id=$1
+                JOIN orders o ON o.id=k.order_id AND o.business_id=$1
+                LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=$1
+                LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=$1
+            )
+            SELECT latest.latest_kot_id,latest.latest_activity_id,
+                   CASE WHEN (SELECT COUNT(*) FROM kot_batch)>500
+                        THEN COALESCE((SELECT MAX(id) FROM kot_page),$2,0)
+                        ELSE latest.latest_kot_id END AS cursor_kot_id,
+                   CASE WHEN (SELECT COUNT(*) FROM activity_batch)>500
+                        THEN COALESCE((SELECT MAX(id) FROM activity_page),$3,0)
+                        ELSE latest.latest_activity_id END AS cursor_activity_id,
+                   COALESCE((SELECT json_agg(row_to_json(t) ORDER BY t.created_at DESC,t.id DESC) FROM tickets t),'[]'::json) AS items,
+                   $4::boolean AS seeded
+            FROM latest
+        `,[businessId,afterKotId,afterActivityId,!hasKotCursor&&!hasActivityCursor]);
+        const row=result.rows[0]||{};
+        res.set("Cache-Control","private, no-store").json({
+            latestKotId:Number(row.latest_kot_id||0),latestActivityId:Number(row.latest_activity_id||0),
+            cursorKotId:Number(row.cursor_kot_id||0),cursorActivityId:Number(row.cursor_activity_id||0),
+            seeded:row.seeded===true,items:row.items||[]
+        });
+    }catch(error){
+        console.error("KOT notification poll failed:",error);
+        res.status(500).json({error:"Failed to check for kitchen ticket updates"});
+    }
+});
+
 app.get(
     "/api/kot",
     async (req,res)=>{
@@ -7616,95 +7795,30 @@ app.get(
 
         try {
             const businessId = Number(req.user.business_id);
-
-            const q =
-                async sql =>
-                    Number(
-                        (
-                            await pool.query(sql, [businessId])
-                        ).rows[0].value
-                    );
-
-
+            const result=await pool.query(`
+                WITH bounds AS (
+                    SELECT
+                        ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC') AS day_start,
+                        (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date+INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC') AS day_end
+                )
+                SELECT
+                    COALESCE(SUM(o.total) FILTER (WHERE o.status='Completed' AND o.created_at>=bounds.day_start AND o.created_at<bounds.day_end),0) AS "todaySales",
+                    COUNT(*) FILTER (WHERE o.created_at>=bounds.day_start AND o.created_at<bounds.day_end) AS "todayOrders",
+                    COUNT(*) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled','')) AS "pendingOrders",
+                    (SELECT COUNT(*) FROM customers WHERE business_id=$1) AS customers,
+                    COUNT(*) AS "totalOrders",
+                    COALESCE(SUM(o.total) FILTER (WHERE o.status='Completed'),0) AS "totalRevenue"
+                FROM orders o CROSS JOIN bounds
+                WHERE o.business_id=$1
+            `,[businessId]);
+            const row=result.rows[0]||{};
             res.json({
-
-                todaySales:
-                    await q(
-                        `
-                        SELECT
-                            COALESCE(
-                                SUM(total),
-                                0
-                            ) value
-                        FROM orders
-                        WHERE
-                            created_at >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
-                        AND created_at < (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
-                        AND status =
-                            'Completed'
-                        AND business_id = $1
-                        `
-                    ),
-
-                todayOrders:
-                    await q(
-                        `
-                        SELECT
-                            COUNT(*) value
-                        FROM orders
-                        WHERE
-                            created_at >= ((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
-                        AND created_at < (((CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date + INTERVAL '1 day')::timestamp AT TIME ZONE 'Asia/Kolkata' AT TIME ZONE 'UTC')
-                        AND business_id = $1
-                        `
-                    ),
-
-                pendingOrders:
-                    await q(
-                        `
-                        SELECT
-                            COUNT(*) value
-                        FROM orders
-                        WHERE LOWER(COALESCE(status, '')) NOT IN ('completed', 'cancelled', '')
-                        AND business_id = $1
-                        `
-                    ),
-
-                customers:
-                    await q(
-                        `
-                        SELECT
-                            COUNT(*) value
-                        FROM customers
-                        WHERE business_id = $1
-                        `
-                    ),
-
-                totalOrders:
-                    await q(
-                        `
-                        SELECT
-                            COUNT(*) value
-                        FROM orders
-                        WHERE business_id = $1
-                        `
-                    ),
-
-                totalRevenue:
-                    await q(
-                        `
-                        SELECT
-                            COALESCE(
-                                SUM(total),
-                                0
-                            ) value
-                        FROM orders
-                        WHERE status =
-                            'Completed'
-                        AND business_id = $1
-                        `
-                    )
-
+                todaySales:Number(row.todaySales||0),
+                todayOrders:Number(row.todayOrders||0),
+                pendingOrders:Number(row.pendingOrders||0),
+                customers:Number(row.customers||0),
+                totalOrders:Number(row.totalOrders||0),
+                totalRevenue:Number(row.totalRevenue||0)
             });
 
         } catch (e) {

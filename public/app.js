@@ -475,6 +475,13 @@ async function api(url, options = {}) {
     return data;
 }
 
+async function apiWithTimeout(url, timeoutMs = 12000, options = {}) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try { return await api(url, { ...options, signal: controller.signal }); }
+    finally { clearTimeout(timeout); }
+}
+
 function releaseImagePreviewUrl(url) { if (url && String(url).startsWith("blob:")) URL.revokeObjectURL(url); }
 function setImageUploadStatus(id, message, state = "") {
     const node = document.getElementById(id);
@@ -1178,12 +1185,12 @@ function stopSessionHeartbeat(){
 }
 function verifySessionHeartbeat(){
     if(!currentUser||document.visibilityState!=="visible")return;
-    api("/auth/heartbeat").catch(error=>{if(currentUser)console.warn("Session check failed:",error.message);});
+    apiWithTimeout("/auth/heartbeat",12000).catch(error=>{if(currentUser)console.warn("Session check failed:",error.message);});
 }
 function startSessionHeartbeat(){
     stopSessionHeartbeat();
     verifySessionHeartbeat();
-    sessionHeartbeatTimer=setInterval(verifySessionHeartbeat,20000);
+    sessionHeartbeatTimer=setInterval(verifySessionHeartbeat,60000);
     if(!sessionHeartbeatListenerAttached){
         document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")verifySessionHeartbeat();});
         sessionHeartbeatListenerAttached=true;
@@ -4312,7 +4319,35 @@ function getOrderAmountDue(order) {
 
 async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) {
     try {
-        if (refresh || !Array.isArray(currentOrders)) currentOrders = await api("/orders");
+        const ordersFrom = document.getElementById("ordersDateFrom")?.value || "";
+        const ordersTo = document.getElementById("ordersDateTo")?.value || "";
+        const ordersParams = new URLSearchParams({ scope: "my-orders" });
+        if (ordersFrom) ordersParams.set("from", ordersFrom);
+        if (ordersTo) ordersParams.set("to", ordersTo);
+        const ordersQuery = ordersParams.toString();
+        if (refresh || !Array.isArray(currentOrders) || window.__ordersQueryKey !== ordersQuery) {
+            if(window.__ordersListRequest&&window.__ordersListRequestKey===ordersQuery){
+                currentOrders=await window.__ordersListRequest;
+            }else{
+                const request=api("/orders?" + ordersQuery);
+                window.__ordersListRequest=request;
+                window.__ordersListRequestKey=ordersQuery;
+                try{
+                    const fetched=await request;
+                    if(window.__ordersListRequestKey===ordersQuery){
+                        currentOrders=fetched;
+                        window.__ordersQueryKey=ordersQuery;
+                    }
+                }finally{
+                    if(window.__ordersListRequest===request){
+                        window.__ordersListRequest=null;
+                        window.__ordersListRequestKey="";
+                    }
+                }
+            }
+            if(window.__ordersListRequestKey&&window.__ordersListRequestKey!==ordersQuery)return;
+            if(window.__ordersQueryKey!==ordersQuery)return;
+        }
         const list = document.getElementById("ordersTableBody");
         if (!list) return;
         renderOrderFilterOptions();
@@ -5330,7 +5365,7 @@ async function loadTables() {
         const tableViewActive = document.getElementById("table-view")?.classList.contains("active-page");
         if (tableViewActive) {
             if (hasPermission("orders", "view")) {
-                try { currentOrders = await api("/orders"); tableViewOrdersLoadError = false; }
+                try { currentOrders = await api("/orders?scope=table"); tableViewOrdersLoadError = false; }
                 catch (error) { tableViewOrdersLoadError = true; console.warn("Unable to refresh table orders:", error.message); }
             } else {
                 currentOrders = [];
@@ -5955,7 +5990,7 @@ function startReservationAutoRefresh(){
     if(reservationAutoRefreshTimer)clearInterval(reservationAutoRefreshTimer);
     if(!currentUser)return;
     const syncDueReservations=async()=>{
-        if(!currentUser||document.visibilityState!=="visible"||reservationAutoRefreshBusy)return;
+        if(!currentUser||document.visibilityState!=="visible"||!document.getElementById("reservations")?.classList.contains("active-page")||reservationAutoRefreshBusy)return;
         reservationAutoRefreshBusy=true;
         try{
             await loadTables();
@@ -5964,7 +5999,7 @@ function startReservationAutoRefresh(){
         finally{reservationAutoRefreshBusy=false;}
     };
     syncDueReservations();
-    reservationAutoRefreshTimer=setInterval(syncDueReservations,30000);
+    reservationAutoRefreshTimer=setInterval(syncDueReservations,60000);
     if(!window.__reservationAutoRefreshVisibilityListener){
         document.addEventListener("visibilitychange",()=>{
             if(document.visibilityState==="visible"&&currentUser)syncDueReservations();
@@ -6458,6 +6493,9 @@ let counterKOTPrintTimer=null;
 let counterKOTPrintBusy=false;
 let kotAlertInitialized=false;
 let knownPendingKOTIds=new Set();
+let kotAlertBusy=false;
+let kotNotificationCursor=null;
+let kotActivityNotificationCursor=null;
 let kotAlertAudioContext=null;
 let pendingKOTAlertSounds=0;
 let pendingQrAlertSounds=0;
@@ -6631,7 +6669,7 @@ async function autoPrintQrFollowupTicket(ticket){
     await printKOT(ticket.orderId,undefined,ticket.ticketNumber,{auto:true});
 }
 
-function inspectNewKOTAlerts(items){
+function inspectNewKOTAlerts(items,incremental=false){
     if(!canKitchenReceiveKOTAlerts()) return;
     // The QR order poll announces first orders. This poll also announces later
     // ticket batches added to an already accepted QR order.
@@ -6643,7 +6681,15 @@ function inspectNewKOTAlerts(items){
     }
     const newlyPendingIds=[...pendingIds].filter(id=>!knownPendingKOTIds.has(id));
     const newCount=newlyPendingIds.length;
-    knownPendingKOTIds=pendingIds;
+    if(incremental){
+        for(const item of items||[]){
+            const id=Number(item.id);
+            if(["Pending","Preparing"].includes(item.status))knownPendingKOTIds.add(id);
+            else knownPendingKOTIds.delete(id);
+        }
+    }else{
+        knownPendingKOTIds=pendingIds;
+    }
     if(newCount>0){
         playKOTAlertSound();
         showKOTArrivalToast(newCount);
@@ -6669,21 +6715,40 @@ function inspectNewKOTAlerts(items){
 }
 
 async function pollKOTAlerts(){
-    if(appSettings.kotEnabled === false || !currentUser || !hasPermission("kitchen","view")) return;
+    if(appSettings.kotEnabled === false || !currentUser || !hasPermission("kitchen","view") || kotAlertBusy || (document.visibilityState!=="visible"&&!window.cafePOSDesktop)) return;
+    kotAlertBusy=true;
     try{
-        const items=await api("/kot?range=today");
-        inspectNewKOTAlerts(items);
-        if(document.getElementById("kitchen")?.classList.contains("active-page") && kotState.range==="today"){kotState.items=items;renderKOT();}
+        const params=new URLSearchParams();
+        if(kotNotificationCursor!==null)params.set("afterId",String(kotNotificationCursor));
+        if(kotActivityNotificationCursor!==null)params.set("afterActivityId",String(kotActivityNotificationCursor));
+        const query=params.toString(),result=await apiWithTimeout("/kot/notifications"+(query?"?"+query:""),12000);
+        const items=Array.isArray(result.items)?result.items:[];
+        if(result.seeded){
+            kotNotificationCursor=Number(result.latestKotId||0);
+            kotActivityNotificationCursor=Number(result.latestActivityId||0);
+            kotAlertInitialized=true;
+            return;
+        }
+        kotNotificationCursor=Math.max(Number(kotNotificationCursor||0),Number(result.cursorKotId||result.latestKotId||0));
+        kotActivityNotificationCursor=Math.max(Number(kotActivityNotificationCursor||0),Number(result.cursorActivityId||result.latestActivityId||0));
+        inspectNewKOTAlerts(items,true);
+        if(document.getElementById("kitchen")?.classList.contains("active-page") && kotState.range==="today" && items.length){
+            const byId=new Map((kotState.items||[]).map(item=>[Number(item.id),item]));
+            items.forEach(item=>byId.set(Number(item.id),item));
+            kotState.items=[...byId.values()].sort((a,b)=>new Date(b.created_at||0)-new Date(a.created_at||0));
+            renderKOT();
+        }
     }catch(e){
         console.warn("KOT alert polling failed:",e.message);
-    }
+    }finally{kotAlertBusy=false;}
 }
 
 function startKOTAlertPolling(){
     stopKOTAlertPolling();
+    kotAlertBusy=false;kotNotificationCursor=null;kotActivityNotificationCursor=null;
     if(!currentUser || !hasPermission("kitchen","view")) return;
     const interval=Math.min(60000,Math.max(3000,(Number(appSettings.kotAlertInterval)||5)*1000));
-    // Seed from today's KOTs, then poll only for new arrivals so custom UI filters do not disable alerts.
+    // Seed the latest business cursors, then poll only for new arrivals so UI filters do not disable alerts.
     pollKOTAlerts();
     kotAlertTimer=setInterval(pollKOTAlerts,interval);
 }
@@ -6696,7 +6761,7 @@ async function pollCounterKOTPrintJobs(){
     if(counterKOTPrintBusy||!window.cafePOSDesktop||!currentUser||!hasPermission("kitchen","print"))return;
     counterKOTPrintBusy=true;
     try{
-        const response=await api("/kot-print-jobs/claim",{method:"POST",body:JSON.stringify({})});
+        const response=await apiWithTimeout("/kot-print-jobs/claim",10000,{method:"POST",body:JSON.stringify({})});
         const job=response?.job;
         if(!job)return;
         try{
@@ -7071,6 +7136,7 @@ function selectedMenuItemTags(existingTags=[]){
     return [...new Set([...selected,...legacy])];
 }
 
+let menuManagementCommittedSearch="";
 async function loadMenuManagement(){
     try{
         await loadMenuCategories();
@@ -7085,16 +7151,23 @@ async function loadMenuManagement(){
         const categories=[...new Set([...(menuCategories||[]).map(category=>String(category.name||'').trim()),...currentMenu.map(item=>String(item.category||'').trim())].filter(Boolean))].sort((a,b)=>a.localeCompare(b));
         list.innerHTML=`<div class="menu-modern-head"><div><strong id="menuManagementFilteredCount">${currentMenu.length}</strong><span>menu items</span></div><div class="menu-modern-actions"><input id="menuManagementSearch" type="search" placeholder="Search item, category, variant…" oninput="filterMenuManagement()"><select id="menuManagementCategory" aria-label="Filter menu items by category" onchange="filterMenuManagement()"><option value="">All categories</option>${categories.map(category=>`<option value="${esc(category)}">${esc(category)}</option>`).join('')}</select><select id="menuManagementNature" onchange="filterMenuManagement()"><option value="">All types</option><option>Goods</option><option>Service</option></select></div></div><div id="menuManagementGrid" class="menu-management-grid"></div>`;
         if(categories.includes(previousCategory))document.getElementById('menuManagementCategory').value=previousCategory;
+        const searchInput=document.getElementById("menuManagementSearch");
+        if(searchInput){
+            searchInput.value=menuManagementCommittedSearch;
+            searchInput.onkeydown=event=>{if(event.key==="Enter"){event.preventDefault();commitMenuManagementSearch();}};
+            searchInput.onsearch=()=>commitMenuManagementSearch();
+        }
         renderMenuManagementCards();
         renderMenuCategoryMaster();
     }catch(e){console.error('Menu management failed:',e);}
 }
 function filterMenuManagement(){renderMenuManagementCards();}
+function commitMenuManagementSearch(){menuManagementCommittedSearch=String(document.getElementById("menuManagementSearch")?.value||"").trim();renderMenuManagementCards();}
 
 function renderMenuManagementCards(){
     const grid=document.getElementById('menuManagementGrid');
     if(!grid)return;
-    const q=String(document.getElementById('menuManagementSearch')?.value||'').toLowerCase();
+    const q=String(menuManagementCommittedSearch||'').toLowerCase();
     const nature=String(document.getElementById('menuManagementNature')?.value||'');
     const category=String(document.getElementById('menuManagementCategory')?.value||'').trim().toLocaleLowerCase();
     const items=currentMenu.filter(item=>{
@@ -9768,8 +9841,10 @@ async function loadPayments() {
 // DASHBOARD
 // ==========================================
 
+let dashboardStatsRequestPending=false;
 async function updateDashboard() {
-
+    if(dashboardStatsRequestPending)return;
+    dashboardStatsRequestPending=true;
     try {
 
         const stats =
@@ -9858,7 +9933,7 @@ async function updateDashboard() {
             error
         );
 
-    }
+    } finally { dashboardStatsRequestPending=false; }
 
 }
 
@@ -9875,7 +9950,7 @@ function startDashboardAutoRefresh() {
         if (document.visibilityState === "visible" && currentUser && hasPermission("dashboard", "view") && document.getElementById("dashboard")?.classList.contains("active-page")) {
             updateDashboard().catch(error => console.warn("Dashboard refresh failed:", error.message));
         }
-    }, 15000);
+    }, 60000);
 }
 
 
@@ -12438,7 +12513,7 @@ async function pollQrTableServiceAlerts(){
     posQrServiceRequestBusy=true;
     try{
         const query=posQrServiceRequestCursor===null?"":"?afterId="+encodeURIComponent(String(posQrServiceRequestCursor));
-        const result=await api("/qr-service-requests"+query);
+        const result=await apiWithTimeout("/qr-service-requests"+query,12000);
         if(generation!==posQrServiceRequestGeneration||businessId!==String(currentUser?.business_id||""))return;
         setQrServiceVoiceOperational(result.orderingOpen!==false);
         const latestId=Math.max(0,Number(result.latestId)||0);
@@ -12538,10 +12613,7 @@ function showQROrderArrivalToast(arrivals,accepted=false){
 }
 async function pollPOSQrOrderAlerts(){
     if(!currentUser){stopPOSQrOrderAlerts();return;}
-    if(document.visibilityState!=="visible"&&!window.cafePOSDesktop){
-        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
-        return;
-    }
+    if(document.visibilityState!=="visible"&&!window.cafePOSDesktop)return;
     if((!hasPermission("orders","view")&&!hasPermission("kitchen","view"))||posQrOrderAlertBusy)return;
     posQrOrderAlertBusy=true;
     try{
@@ -12549,18 +12621,17 @@ async function pollPOSQrOrderAlerts(){
         if(posQrOrderAlertCursor!==null)cursors.set("afterId",String(posQrOrderAlertCursor));
         if(posQrOrderActivityCursor!==null)cursors.set("afterActivityId",String(posQrOrderActivityCursor));
         const query=cursors.toString(),url="/orders/qr-notifications"+(query?"?"+query:"");
-        const result=await api(url);
-        const previousOrderCursor=posQrOrderAlertCursor;
+        const result=await apiWithTimeout(url,12000);
         const latest=Number(result.latestOrderId||0);
         const latestActivity=Number(result.latestActivityId||0);
         const arrivals=Array.isArray(result.orders)?result.orders:[];
         const updates=Array.isArray(result.updates)?result.updates:[];
         const acceptedOrders=Array.isArray(result.acceptedOrders)?result.acceptedOrders:[];
+        const statusChanges=Array.isArray(result.statusChanges)?result.statusChanges:[];
         posQrOrderAlertCursor=Math.max(posQrOrderAlertCursor,latest);
         posQrOrderActivityCursor=Math.max(posQrOrderActivityCursor,latestActivity);
         const acceptedIds=new Set(acceptedOrders.map(order=>Number(order.id)));
         const unacceptedArrivals=arrivals.filter(order=>!acceptedIds.has(Number(order.id)));
-        const newOrdersFound=previousOrderCursor===null||latest>Number(previousOrderCursor);
         if(unacceptedArrivals.length){
             // QR orders are a separate arrival source from regular POS KOTs. Alert
             // kitchen users here instead of relying on the KOT poll's initial seed.
@@ -12575,8 +12646,8 @@ async function pollPOSQrOrderAlerts(){
             acceptedOrders.forEach(order=>notifyDesktopIncomingOrder(order,`order:${Number(order.id)}`));
             showQROrderArrivalToast(acceptedOrders,true);
         }
-        if((newOrdersFound||arrivals.length||updates.length||acceptedOrders.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
-        const changedSelectedOrder=updates.some(order=>Number(order.id)===Number(window.selectedOrderId));
+        if((arrivals.length||updates.length||acceptedOrders.length||statusChanges.length)&&hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        const changedSelectedOrder=updates.some(order=>Number(order.id)===Number(window.selectedOrderId))||acceptedOrders.some(order=>Number(order.id)===Number(window.selectedOrderId))||statusChanges.some(order=>Number(order.id)===Number(window.selectedOrderId));
         if(changedSelectedOrder)await viewOrder(Number(window.selectedOrderId));
     }catch(error){
         console.warn("QR order notification check failed:",error.message);
@@ -12609,5 +12680,5 @@ if(!window.__qrOrderRefreshTimer){
         if(document.visibilityState!=="visible"||!currentUser)return;
         if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))updateOrdersTable(true,Date.now()-lastOrderDetailsRefreshAt>=60000);
         else if(hasPermission("tables","view")&&document.getElementById("table-view")?.classList.contains("active-page"))loadTables();
-    },15000);
+    },30000);
 }

@@ -754,7 +754,8 @@
     function closeGuestServiceMenu(){const overlay=document.getElementById('qrServiceRequestOverlay');if(overlay)overlay.hidden=true;document.getElementById('guestHelpButton')?.focus();}
     function chooseTableForServiceRequest(){closeGuestServiceMenu();const picker=document.getElementById('qrTablePicker'),select=document.getElementById('qrTableSelect');if(picker)picker.hidden=false;picker?.scrollIntoView({behavior:'smooth',block:'center'});select?.focus({preventScroll:true});}
     async function sendGuestServiceRequest(requestType){const overlay=document.getElementById('qrServiceRequestOverlay'),status=document.getElementById('qrServiceRequestStatus');if(!tableLabel||qrTableLinkInvalid){if(status)status.textContent='Choose a valid table before sending a request.';return;}const buttons=[...overlay.querySelectorAll('[data-qr-service-request]')];buttons.forEach(button=>button.disabled=true);if(status)status.textContent='Sending your request to the cafe team…';try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/service-requests`,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({tableNumber:qrTableRaw,requestType})}),result=await response.json().catch(()=>({}));if(!response.ok)throw new Error(result.error||'Could not send your request.');if(status)status.textContent=requestType==='clean_table'?'The team has been asked to clean Table '+tableLabel+'.':'The team has been asked to visit Table '+tableLabel+'.';setGuestActionStatus(requestType==='clean_table'?'Table service request sent ✦':'Waiter request sent ✦');setTimeout(()=>{if(!overlay.hidden)closeGuestServiceMenu();},900);}catch(error){if(status)status.textContent=error.message||'Could not send your request.';}finally{buttons.forEach(button=>button.disabled=!tableLabel||qrTableLinkInvalid);}}
-    async function loadGuestMarketingState(){try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/push-config`,{cache:'no-store'});if(!response.ok)return;const data=await response.json();guestMarketingEnabled=data.marketingEnabled===true;const button=document.getElementById('guestOffersButton');if(button)button.hidden=!guestMarketingEnabled;}catch(_){}}
+    let guestMarketingStateLoaded=false;
+    async function loadGuestMarketingState(){if(guestMarketingStateLoaded)return;try{const response=await fetch(`/public-menu/${encodeURIComponent(menuToken())}/push-config`,{cache:'no-store'});if(!response.ok)return;const data=await response.json();guestMarketingEnabled=data.marketingEnabled===true;const button=document.getElementById('guestOffersButton');if(button)button.hidden=!guestMarketingEnabled;guestMarketingStateLoaded=true;}catch(_){}}
     function closeCurrentOrder(){const overlay=document.getElementById('qrCurrentOrderOverlay');if(overlay)overlay.hidden=true;if(currentOrderPollTimer){clearInterval(currentOrderPollTimer);currentOrderPollTimer=null;}currentOrderPreviewRecord=null;if(guestSessionExpired){if(getStoredGuestOrders().length)setGuestTab('orders');else toggleGuestDetailsGate(true);}}
     async function openCurrentOrder(orderId=''){const record=orderId?getStoredGuestOrders().find(row=>String(row.orderId)===String(orderId)):getStoredCurrentOrder();if(!record){updateCurrentOrderButton();return;}currentOrderPreviewRecord=orderId?record:null;const overlay=document.getElementById('qrCurrentOrderOverlay'),button=document.querySelector('.qr-order-refresh');if(button)button.hidden=false;overlay.hidden=false;await refreshCurrentOrder(false);if(!getStoredCurrentOrder())return;if(currentOrderPollTimer)clearInterval(currentOrderPollTimer);currentOrderPollTimer=setInterval(()=>{if(!overlay.hidden&&getStoredCurrentOrder())refreshCurrentOrder(true);},15000);}
     function guestOrderStatus(status){const key=String(status||'Pending').trim().toLowerCase(),done={label:'All wrapped up ✅',tone:'done',step:4,note:'Order complete. Hope it hit the spot!'},states={open:{label:'Still in draft',tone:'queued',step:0,note:'This order has not reached the kitchen yet.'},pending:{label:'Just landed ✨',tone:'queued',step:1,note:'Your order is in line. Payment is due at the counter.'},preparing:{label:'Getting cooked 🔥',tone:'cooking',step:2,note:'The kitchen is on it. We’ll keep this page up to date.'},ready:{label:'Ready to grab 🎉',tone:'ready',step:3,note:'Your order is ready. Swing by the counter to pick it up.'},completed:done,done,cancelled:{label:'Order canceled',tone:'cancelled',step:0,note:'This order was canceled. Check with the cafe team if you need help.'},canceled:{label:'Order canceled',tone:'cancelled',step:0,note:'This order was canceled. Check with the cafe team if you need help.'}};return states[key]||{label:'The kitchen is on it ✨',tone:'cooking',step:1,note:'The team is working on your order.'};}
@@ -838,6 +839,39 @@
     loadMenu=async function(options={}){await loadMenuBeforeDetailsGate(options);if(menuData){if(!qrAnalyticsMenuViewTracked){qrAnalyticsMenuViewTracked=true;trackQrMenuEvent('menu_view');}const intro=document.getElementById('guestDetailsIntro');if(intro)intro.textContent=menuData.orderingOpen===false?(menuData.closedMessage||'The cafe is closed rn — catch us during open hours.'):guestSessionExpired?'Your QR order is done and fully paid. Enter your details again to start a fresh session.':'You’re at '+(menuData.restaurantName||'your cafe')+(tableLabel?' · Table '+tableLabel:'')+'. Add your details so the cafe can put your name on the order.';}toggleGuestDetailsGate(!guestCustomerDetailsSaved&&menuData?.orderingOpen!==false);if(guestCustomerDetailsSaved)applyQrOrderTypePresentation();updateQrCartBar();};
     restoreGuestSession();
     ['guestCustomerName','guestCustomerPhone','guestCustomerEmail','guestCustomerBirthDate','qrOrderNote'].forEach(id=>document.getElementById(id)?.addEventListener('input',persistGuestSession));
+    refreshGuestOrderHistory=async function(showFeedback=false){
+        if(guestOrdersRefreshPending)return;
+        const records=getStoredGuestOrders(),button=document.querySelector('.qr-orders-refresh');
+        if(!records.length){renderGuestOrderHistory();return;}
+        guestOrdersRefreshPending=true;
+        if(showFeedback&&button){button.disabled=true;button.querySelector('span').textContent='Checking…';}
+        const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),12000);
+        try{
+            const response=await fetch('/public-menu/'+encodeURIComponent(menuToken())+'/orders/statuses',{
+                method:'POST',credentials:'same-origin',cache:'no-store',signal:controller.signal,
+                headers:{'Content-Type':'application/json',Accept:'application/json'},
+                body:JSON.stringify({orders:records.slice(0,30).map(record=>({orderId:record.orderId,trackingToken:record.trackingToken}))})
+            });
+            const result=await response.json().catch(()=>({}));
+            if(!response.ok)throw new Error(result.error||'Could not refresh orders');
+            const byId=new Map((Array.isArray(result.orders)?result.orders:[]).map(order=>[String(order.id),order]));
+            const updated=records.map(record=>{
+                const order=byId.get(String(record.orderId));
+                if(!order)return record;
+                const state=guestOrderStatus(order.status);
+                return {...record,orderNumber:order.order_number||record.orderNumber,orderType:order.order_type||record.orderType,
+                    sourceTableNumber:record.sourceTableNumber||order.table_number||'',createdAt:order.created_at||record.createdAt,
+                    total:order.total??record.total,status:order.status||record.status,statusLabel:state.label,statusTone:state.tone};
+            });
+            try{sessionStorage.setItem(guestOrdersStorageKey(),JSON.stringify(updated));}catch(_){}
+            if(guestActiveTab==='orders')renderGuestOrderHistory();else updateGuestOrdersBadge();
+        }catch(_){
+            // Keep the last saved order status visible during brief network interruptions.
+        }finally{
+            clearTimeout(timeout);guestOrdersRefreshPending=false;
+            if(button){button.disabled=false;button.querySelector('span').textContent='Refresh';}
+        }
+    };
     function pollStoredQrOrder(){if(document.visibilityState!=='visible')return;const overlay=document.getElementById('qrCurrentOrderOverlay');if(overlay&&!overlay.hidden)return;if(guestActiveTab==='orders'){refreshGuestOrderHistory();return;}if(getStoredCurrentOrder())refreshCurrentOrder(true);}
     document.getElementById('menuSearch').addEventListener('input',()=>{if(String(document.getElementById('menuSearch').value||'').trim()&&selectedCategory!=='All'){selectedCategory='All';updateQrCategoryPageHeading();renderCategories();}renderItems();});updateCurrentOrderButton();renderGuestOrderHistory();loadMenu();setInterval(()=>{if(document.visibilityState==='visible')loadMenu({silent:true});},60000);setInterval(pollStoredQrOrder,15000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')pollStoredQrOrder();});
   </script>
