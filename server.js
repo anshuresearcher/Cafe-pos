@@ -17,6 +17,8 @@ const QRCode = require("qrcode");
 const os = require("os");
 const path = require("path");
 const { AsyncLocalStorage } = require("async_hooks");
+const { createNetworkMonitoring } = require("./network-monitoring");
+let networkMonitoring;
 const net = require("net");
 
 const app = express();
@@ -67,6 +69,7 @@ app.use(cors({
     },
     credentials: true
 }));
+app.use((req, res, next) => networkMonitoring ? networkMonitoring.middleware(req, res, next) : next());
 const publicRateLimitBuckets = new Map();
 const loginLockoutFallback = new Map();
 let persistentPublicRateLimitAvailable = false;
@@ -239,7 +242,7 @@ const rawPoolConnect = pool.connect.bind(pool);
 const rawPoolQuery = async function (text, values) {
     const client = await rawPoolConnect();
     try {
-        return await client.query(text, values);
+        return await (networkMonitoring ? networkMonitoring.measureDatabaseQuery(text, () => client.query(text, values)) : client.query(text, values));
     } finally {
         client.release();
     }
@@ -288,13 +291,13 @@ function wrapTenantAwareClient(client, store) {
             transactionOpen = false;
             return result;
         }
-        if (transactionOpen) return rawQuery(...args);
+        if (transactionOpen) return networkMonitoring ? networkMonitoring.measureDatabaseQuery(args[0], () => rawQuery(...args)) : rawQuery(...args);
 
         await rawQuery('BEGIN');
         transactionOpen = true;
         try {
             await applyTenantDbContext({ query: (...contextArgs) => rawQuery(...contextArgs) }, store);
-            const result = await rawQuery(...args);
+            const result = await (networkMonitoring ? networkMonitoring.measureDatabaseQuery(args[0], () => rawQuery(...args)) : rawQuery(...args));
             await rawQuery('COMMIT');
             transactionOpen = false;
             return result;
@@ -317,12 +320,14 @@ function runSystemContext(fn) {
     return tenantContext.run({ systemMode: true }, fn);
 }
 
+networkMonitoring = createNetworkMonitoring({ pool, runSystemContext });
+
 pool.query = async function (text, values) {
     const client = await rawPoolConnect();
     try {
         await client.query('BEGIN');
         await applyTenantDbContext(client);
-        const result = await client.query(text, values);
+        const result = await (networkMonitoring ? networkMonitoring.measureDatabaseQuery(text, () => client.query(text, values)) : client.query(text, values));
         await client.query('COMMIT');
         return result;
     } catch (error) {
@@ -1156,6 +1161,7 @@ async function requireAuth(req, res, next) {
         req.user = user;
         req.sessionToken = row.token;
         req.device = device;
+        networkMonitoring?.attachIdentity(req, { businessId: user.business_id, userId: user.id, deviceId: row.device_id });
         req.license = license;
         const restrictedAddon = req.path.startsWith("/marketing") || req.path.startsWith("/loyalty")
             ? "Marketing"
@@ -1640,6 +1646,7 @@ app.get("/", (_, res) => res.sendFile(path.join(__dirname, "public", "index.html
 app.get("/device-registration", (_, res) => res.redirect("/"));
 app.get("/devices", (_, res) => res.sendFile(path.join(__dirname, "public", "devices.html")));
 app.get("/support", (_, res) => res.sendFile(path.join(__dirname, "public", "support.html")));
+app.get("/support/network-monitoring", (_, res) => res.sendFile(path.join(__dirname, "public", "network-monitoring.html")));
 app.get("/register-business", (_, res) => res.redirect("/?view=register-business"));
 
 
@@ -1913,6 +1920,7 @@ app.get("/public-menu/:token/push-config", async (req, res) => {
     try {
         const result = await runSystemContext(() => pool.query("SELECT business_id, enabled FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
         const publication = result.rows[0];
+        if (publication) networkMonitoring?.attachIdentity(req, { businessId: publication.business_id });
         if (!publication?.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
         const marketingEnabled = await businessHasLicenseAddon(publication.business_id, "Marketing");
         const configured = marketingEnabled && Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
@@ -1943,6 +1951,7 @@ app.post("/public-menu/:token/push-subscriptions", async (req, res) => {
         if (!publication?.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
         if (!(await businessHasLicenseAddon(publication.business_id, "Marketing"))) return res.status(403).json({ error: "Promotional messages are not enabled for this cafe" });
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         await tenantContext.run({ businessId }, () => pool.query(`
             INSERT INTO public_menu_push_subscriptions(business_id, endpoint, subscription)
             VALUES($1,$2,$3::jsonb)
@@ -2196,6 +2205,7 @@ app.get("/public-menu/:token", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Menu not found" });
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const data = await tenantContext.run({ businessId }, async () => {
             const [businessResult, settingsResult, categoryResult, menuResult, variantResult, tableResult] = await Promise.all([
                 pool.query("SELECT business_name, logo_url, currency FROM businesses WHERE id=$1 LIMIT 1", [businessId]),
@@ -2340,6 +2350,7 @@ app.post("/public-menu/:token/analytics", async (req, res) => {
             return res.status(404).json({ error: "This QR menu is not currently available" });
         }
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const sessionKey = qrAnalyticsSessionKey(businessId, token, sessionId);
         await tenantContext.run({ businessId }, () => pool.query(
             `INSERT INTO qr_menu_events(business_id,session_key,event_type,item_count)
@@ -2369,6 +2380,7 @@ app.post("/public-menu/:token/service-requests", async (req, res) => {
             return res.status(404).json({ error: "This QR menu is not currently available" });
         }
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const request = await tenantContext.run({ businessId }, async () => {
             const table = await pool.query(
                 "SELECT table_number FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1",
@@ -2455,6 +2467,7 @@ app.post("/public-menu/:token/otp/send", async (req, res) => {
         const tableNumber = String(req.body?.tableNumber || "").trim();
         if (!tableNumber || tableNumber.length > 60) return res.status(400).json({ error: "Choose a valid table before verifying your number." });
         const publication = await qrGuestPublication(token);
+        networkMonitoring?.attachIdentity(req, { businessId: publication.business_id });
         const table = await runSystemContext(() => pool.query("SELECT 1 FROM restaurant_tables WHERE business_id=$1 AND table_number::text=$2 LIMIT 1", [publication.business_id, tableNumber]));
         if (!table.rows.length) return res.status(400).json({ error: "This QR link does not match an active table." });
         const menuHash = crypto.createHash("sha256").update(token).digest("hex");
@@ -2495,6 +2508,7 @@ app.post("/public-menu/:token/otp/verify", async (req, res) => {
         const details = normalizeQrGuestCustomer({ ...req.body?.customer, phone });
         if (!/^[0-9]{4,8}$/.test(otp)) return res.status(400).json({ error: "Enter the OTP sent to your WhatsApp." });
         const publication = await qrGuestPublication(token);
+        networkMonitoring?.attachIdentity(req, { businessId: publication.business_id });
         const challengeResult = await runSystemContext(() => pool.query(
             `SELECT id,attempts FROM qr_guest_otp_challenges WHERE id=$1 AND business_id=$2 AND menu_token_hash=$3 AND table_number=$4 AND phone=$5 AND verified_at IS NULL AND expires_at>CURRENT_TIMESTAMP LIMIT 1`,
             [challengeId, publication.business_id, crypto.createHash("sha256").update(token).digest("hex"), tableNumber, phone]
@@ -2533,6 +2547,7 @@ app.get("/public-menu/:token/session", async (req, res) => {
         const phone = qrGuestPhone(req.query?.phone);
         const tableNumber = String(req.query?.tableNumber || "").trim();
         const publication = await qrGuestPublication(token);
+        networkMonitoring?.attachIdentity(req, { businessId: publication.business_id });
         const session = await getQrGuestSession(req, res, token, Number(publication.business_id), tableNumber, phone);
         res.set("Cache-Control", "no-store");
         if (!session) return res.status(401).json({ verified: false });
@@ -2581,6 +2596,7 @@ app.post("/public-menu/:token/orders", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !publication.enabled || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "This QR menu is not currently accepting orders" });
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const availability = qrMenuOrderingAvailability(publication, publication.business_name);
         if (!availability.orderingOpen) return res.status(403).json({ error: availability.closedMessage });
         const sessionKey = analyticsSessionIdIsValid ? qrAnalyticsSessionKey(businessId, token, analyticsSessionId) : null;
@@ -2829,6 +2845,7 @@ app.post("/public-menu/:token/orders/statuses", async (req,res)=>{
         const publication=access.rows[0];
         if(!publication||!(await businessHasLicenseAddon(publication.business_id,"Table QR")))return res.status(404).json({error:"Menu not found"});
         const businessId=Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const result=await tenantContext.run({businessId},()=>pool.query(`
             WITH requested AS (
                 SELECT * FROM jsonb_to_recordset($2::jsonb) AS x("orderId" bigint,"trackingToken" text)
@@ -2857,6 +2874,7 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
         const publication = access.rows[0];
         if (!publication || !(await businessHasLicenseAddon(publication.business_id, "Table QR"))) return res.status(404).json({ error: "Order not found" });
         const businessId = Number(publication.business_id);
+        networkMonitoring?.attachIdentity(req, { businessId });
         const data = await tenantContext.run({ businessId }, async () => {
             const orderResult = await pool.query(`SELECT o.id, o.order_number, o.order_type, o.table_number, o.status, o.subtotal, o.gst, o.total, o.created_at,
                     COALESCE(paid.amount_collected,0) AS amount_collected,
@@ -11596,11 +11614,16 @@ async function supportAuth(req, res, next) {
         const session = await getSupportSession(req);
         if (!session) return res.status(401).json({ error: 'Support authentication required' });
         req.supportUser = session;
+        if (/^\/api\/support\/network-monitoring(?:\/|$)/i.test(String(req.originalUrl || ""))) networkMonitoring?.noteAuthRead();
         next();
     } catch (e) {
         res.status(500).json({ error: 'Support authentication error' });
     }
 }
+
+const networkMonitoringSupportOwners = new Set(String(process.env.NETWORK_MONITORING_SUPPORT_USERNAMES || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean));
+function isNetworkMonitoringOwner(user) { return networkMonitoringSupportOwners.has(String(user?.username || '').trim().toLowerCase()); }
+networkMonitoring.registerRoutes(app, supportAuth, isNetworkMonitoringOwner);
 
 app.post('/api/support/login', async (req,res)=>{
     try {
@@ -11627,7 +11650,7 @@ app.post('/api/support/logout', supportAuth, async(req,res)=>{
     catch(e){res.status(500).json({error:'Support logout failed'});}
 });
 
-app.get('/api/support/me', supportAuth, async(req,res)=>res.json({user:{id:req.supportUser.support_user_id,username:req.supportUser.username,displayName:req.supportUser.display_name},expiresAt:new Date(req.supportUser.expires_at).getTime()}));
+app.get('/api/support/me', supportAuth, async(req,res)=>res.json({user:{id:req.supportUser.support_user_id,username:req.supportUser.username,displayName:req.supportUser.display_name,canViewNetworkMonitoring:isNetworkMonitoringOwner(req.supportUser)},expiresAt:new Date(req.supportUser.expires_at).getTime()}));
 
 app.get('/api/support/businesses', supportAuth, async(req,res)=>{
     try {
@@ -12143,13 +12166,16 @@ async function startServer() {
         tenantSystemMode = false;
 
        if (!process.env.VERCEL && process.env.MIGRATE_ONLY !== 'true') {
-        app.listen(
+        const localHttpServer = app.listen(
             PORT,
             () =>
                 console.log(
                     `🚀 Slash POS server running on http://localhost:${PORT}`
                 )
         );
+        const stopLocalServer = () => localHttpServer.close(() => { networkMonitoring?.flush().catch(() => {}); });
+        process.once('SIGTERM', stopLocalServer);
+        process.once('SIGINT', stopLocalServer);
        } else if (process.env.MIGRATE_ONLY === 'true') {
         console.log('✅ Database migration-only run complete');
        }
