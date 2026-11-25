@@ -67,7 +67,8 @@ app.use(cors({
         if (!origin) return callback(null, false);
         return callback(null, corsAllowedOrigins.has(origin) ? origin : false);
     },
-    credentials: true
+    credentials: true,
+    exposedHeaders: ["X-Orders-Server-Time"]
 }));
 app.use((req, res, next) => networkMonitoring ? networkMonitoring.middleware(req, res, next) : next());
 const publicRateLimitBuckets = new Map();
@@ -369,6 +370,26 @@ pool.on(
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 function hashSessionToken(token) {
     return crypto.createHash("sha256").update(String(token || "")).digest("hex");
+}
+
+function createD1StagingBridgeToken(userId, businessId, scope) {
+    const secret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    if (secret.length < 32) throw new Error("D1 staging bridge is not configured");
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const header = encode({ alg: "HS256", typ: "JWT" });
+    const payload = encode({
+        iss: "slash-pos-api",
+        aud: "slash-pos-d1-staging",
+        sub: Number(userId),
+        business_id: Number(businessId),
+        scope: String(scope),
+        iat: issuedAt,
+        exp: issuedAt + 90
+    });
+    const content = `${header}.${payload}`;
+    const signature = crypto.createHmac("sha256", secret).update(content).digest("base64url");
+    return `${content}.${signature}`;
 }
 
 async function ensureSessionTable() {
@@ -924,6 +945,8 @@ function permissionForRequest(req) {
     const path = req.path;
     const method = req.method.toUpperCase();
     if (path.startsWith('/auth/')) return null;
+    if (path === '/d1-staging/menu' || path === '/d1-staging/menu/categories') return 'menu.view';
+    if (path === '/d1-staging/business') return 'settings.view';
     if (path === '/dashboard/stats') return 'dashboard.view';
     if (path === '/reports/advanced') return req.query?.export === '1' ? 'advanced_reports.export' : 'advanced_reports.view';
     if (path === '/reports/order-categories') return req.query?.export === '1' ? 'reports.export' : 'reports.view';
@@ -2903,6 +2926,80 @@ app.get("/public-menu/:token/orders/:orderId", async (req, res) => {
 app.use("/api",(req,res,next)=>{res.set("Cache-Control","private, no-store");next();});
 app.use("/api", requireAuth);
 
+const D1_STAGING_MAX_PAGE_SIZE = 99;
+function getD1StagingWorkerBaseUrl() {
+    try {
+        const workerUrl = new URL(String(process.env.D1_STAGING_WORKER_URL || "").trim());
+        if (workerUrl.protocol !== "https:" || !workerUrl.hostname.endsWith(".workers.dev") || workerUrl.pathname !== "/" || workerUrl.search || workerUrl.hash) return null;
+        return workerUrl.origin;
+    } catch (_) {
+        return null;
+    }
+}
+
+function parseD1StagingPage(req, res) {
+    const rawLimit = req.query?.limit ?? D1_STAGING_MAX_PAGE_SIZE;
+    const rawOffset = req.query?.offset ?? 0;
+    const requestedLimit = Number(rawLimit);
+    const offset = Number(rawOffset);
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1) {
+        res.status(400).json({ error: "limit must be a positive integer" });
+        return null;
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset > 1000000) {
+        res.status(400).json({ error: "offset must be a non-negative integer no greater than 1000000" });
+        return null;
+    }
+    return { limit: Math.min(requestedLimit, D1_STAGING_MAX_PAGE_SIZE), offset };
+}
+
+async function proxyD1StagingRead(req, res, endpoint, scope, includePage = false) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    const bridgeSecret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    if (!workerBaseUrl || bridgeSecret.length < 32) {
+        return res.status(503).json({ error: "D1 staging bridge is not configured on this server" });
+    }
+
+    const businessId = Number(req.user?.business_id);
+    const userId = Number(req.user?.id);
+    if (!Number.isSafeInteger(businessId) || businessId <= 0 || !Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(403).json({ error: "A valid signed-in business user is required" });
+    }
+
+    const query = new URLSearchParams({ business_id: String(businessId) });
+    if (includePage) {
+        const page = parseD1StagingPage(req, res);
+        if (!page) return;
+        query.set("limit", String(page.limit));
+        query.set("offset", String(page.offset));
+    }
+
+    try {
+        const bridgeToken = createD1StagingBridgeToken(userId, businessId, scope);
+        const workerResponse = await fetch(`${workerBaseUrl}/v1/${endpoint}?${query.toString()}`, {
+            method: "GET",
+            headers: { "X-D1-Bridge-Token": bridgeToken, Accept: "application/json" },
+            signal: AbortSignal.timeout(10000)
+        });
+        const responseText = await workerResponse.text();
+        let responseBody;
+        try { responseBody = JSON.parse(responseText); }
+        catch (_) { return res.status(502).json({ error: "D1 staging service returned an invalid response" }); }
+        if (!workerResponse.ok) {
+            const status = [400, 401, 403, 404, 405, 503].includes(workerResponse.status) ? workerResponse.status : 502;
+            return res.status(status).json({ error: String(responseBody?.error || "D1 staging request failed") });
+        }
+        return res.status(200).json(responseBody);
+    } catch (error) {
+        console.warn("D1 staging proxy unavailable:", error?.name || "Error");
+        return res.status(502).json({ error: "D1 staging service is unavailable" });
+    }
+}
+
+app.get("/api/d1-staging/business", (req, res) => proxyD1StagingRead(req, res, "business", "settings.view"));
+app.get("/api/d1-staging/menu/categories", (req, res) => proxyD1StagingRead(req, res, "menu/categories", "menu.view", true));
+app.get("/api/d1-staging/menu", (req, res) => proxyD1StagingRead(req, res, "menu", "menu.view", true));
+
 // Image writes use the application's café-scoped session. The Supabase service key
 // stays on this server; callers cannot choose a business id, bucket, or object path.
 app.post("/api/image-storage/:entity/:id", parseImageStorageBody, uploadTenantImage);
@@ -4189,40 +4286,81 @@ app.get(
     async (req, res) => {
         try {
             const businessId = Number(req.user.business_id);
-            await syncDueReservationsForBusiness(pool, businessId);
-            await pool.query(`
-                UPDATE restaurant_tables t
-                SET status='Available'
-                WHERE t.business_id=$1 AND LOWER(COALESCE(t.status,''))='occupied'
-                  AND NOT EXISTS (
-                      SELECT 1 FROM orders o
-                      WHERE o.business_id=t.business_id
-                        AND (o.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND o.table_number::text=t.id::text))
-                        AND LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled')
-                  )
-                  AND (
-                      SELECT LOWER(COALESCE(latest.status,''))
-                      FROM orders latest
-                      WHERE latest.business_id=t.business_id
-                        AND (latest.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND latest.table_number::text=t.id::text))
-                      ORDER BY latest.updated_at DESC NULLS LAST, latest.id DESC
-                      LIMIT 1
-                  ) IN ('completed','cancelled')
-            `, [businessId]);
             const result = await pool.query(`
-                SELECT *
-                FROM restaurant_tables
-                WHERE business_id = $1
-                ORDER BY id
+                WITH due_reservations AS (
+                    UPDATE reservations
+                    SET status='Arrived'
+                    WHERE business_id=$1
+                      AND status='Confirmed'
+                      AND table_number IS NOT NULL
+                      AND (reservation_date + reservation_time) <= (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+                    RETURNING business_id,table_number
+                ), due_tables AS (
+                    SELECT DISTINCT t.id,t.business_id,t.table_number
+                    FROM restaurant_tables t
+                    JOIN due_reservations due
+                      ON due.business_id=t.business_id AND due.table_number=t.table_number
+                    WHERE t.business_id=$1
+                ), marked_occupied AS (
+                    UPDATE restaurant_tables t
+                    SET status='Occupied'
+                    FROM due_tables due
+                    WHERE t.id=due.id AND t.business_id=$1 AND t.status<>'Occupied'
+                    RETURNING t.id
+                ), availability_repair AS (
+                    UPDATE restaurant_tables t
+                    SET status='Available'
+                    WHERE t.business_id=$1 AND LOWER(COALESCE(t.status,''))='occupied'
+                      AND NOT EXISTS (SELECT 1 FROM due_tables due WHERE due.id=t.id)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM orders o
+                          WHERE o.business_id=t.business_id
+                            AND (o.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND o.table_number::text=t.id::text))
+                            AND LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled')
+                      )
+                      AND (
+                          SELECT LOWER(COALESCE(latest.status,''))
+                          FROM orders latest
+                          WHERE latest.business_id=t.business_id
+                            AND (latest.table_number::text=t.table_number::text OR (t.table_number::text !~ '^[0-9]+$' AND latest.table_number::text=t.id::text))
+                          ORDER BY latest.updated_at DESC NULLS LAST, latest.id DESC
+                          LIMIT 1
+                      ) IN ('completed','cancelled')
+                    RETURNING t.id
+                ), table_settings AS (
+                    SELECT settings->'restaurantTableMetadata' AS metadata,
+                           settings->'tableAreas' AS areas
+                    FROM app_settings
+                    WHERE business_id=$1
+                    LIMIT 1
+                )
+                SELECT COALESCE(json_agg(json_build_object(
+                           'id',t.id,
+                           'table_number',t.table_number,
+                           'capacity',t.capacity,
+                           'status',CASE
+                               WHEN due.id IS NOT NULL THEN 'Occupied'
+                               WHEN repaired.id IS NOT NULL THEN 'Available'
+                               ELSE t.status
+                           END
+                       ) ORDER BY t.id),'[]'::json) AS tables,
+                       COALESCE((SELECT metadata FROM table_settings),'{}'::jsonb) AS table_metadata,
+                       COALESCE((SELECT areas FROM table_settings),'[]'::jsonb) AS table_areas
+                FROM restaurant_tables t
+                LEFT JOIN due_tables due ON due.id=t.id
+                LEFT JOIN availability_repair repaired ON repaired.id=t.id
+                WHERE t.business_id=$1
             `, [businessId]);
-            const settings = await readRestaurantTableSettings(pool, businessId);
-            const metadata = settings.restaurantTableMetadata && typeof settings.restaurantTableMetadata === "object"
-                ? settings.restaurantTableMetadata
+            const row = result.rows[0] || {};
+            const tables = Array.isArray(row.tables) ? row.tables : [];
+            const metadata = row.table_metadata && typeof row.table_metadata === "object" && !Array.isArray(row.table_metadata)
+                ? row.table_metadata
                 : {};
-            res.json(result.rows.map(table => {
+            const areas = Array.isArray(row.table_areas) ? row.table_areas : [];
+            res.json(tables.map(table => {
                 const saved = metadata[String(table.table_number)] || {};
                 const areaId = String(saved.areaId || "");
-                const area = (Array.isArray(settings.tableAreas) ? settings.tableAreas : []).find(entry => String(entry?.id || "") === areaId);
+                const area = areas.find(entry => String(entry?.id || "") === areaId);
                 return {
                     ...table,
                     area_id: areaId,
@@ -5329,6 +5467,8 @@ app.get(
         if(!["all","my-orders","table"].includes(scope))return res.status(400).json({error:"Invalid order list scope"});
         const fromDate=String(req.query.from||"").trim();
         const toDate=String(req.query.to||"").trim();
+        const updatedAfterRaw=String(req.query.updatedAfter||"").trim();
+        const updatedAfter=updatedAfterRaw?new Date(updatedAfterRaw):null;
         const validDate=value=>{
             if(!value)return true;
             if(!/^\d{4}-\d{2}-\d{2}$/.test(value))return false;
@@ -5337,23 +5477,33 @@ app.get(
             return date.getUTCFullYear()===year&&date.getUTCMonth()===month-1&&date.getUTCDate()===day;
         };
         if(!validDate(fromDate)||!validDate(toDate)||fromDate&&toDate&&fromDate>toDate)return res.status(400).json({error:"Choose a valid order date range"});
+        if(updatedAfterRaw&&(!updatedAfter||!Number.isFinite(updatedAfter.getTime())))return res.status(400).json({error:"Choose a valid order update cursor"});
+        res.set("X-Orders-Server-Time",new Date().toISOString());
         try {
+
+            if(scope==="table"){
+                const result=await pool.query(`
+                    SELECT id,order_number,order_type,table_number,pax,status,total,created_at,updated_at,
+                           payment_method,public_tracking_token
+                    FROM orders
+                    WHERE business_id=$1
+                      AND LOWER(COALESCE(status,'')) NOT IN ('completed','cancelled')
+                    ORDER BY created_at DESC
+                `,[Number(req.user.business_id)]);
+                return res.json(result.rows);
+            }
 
             const result =
                 await pool.query(
                     `
-                    SELECT o.*,COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,
-                           c.name AS customer_name,c.phone AS customer_phone,c.email AS customer_email,
-                           c.gstin AS customer_gstin,c.birth_date AS customer_birth_date,
-                           c.address AS customer_address,c.city AS customer_city,c.state AS customer_state,
+                    SELECT o.id,o.order_number,o.created_at,o.updated_at,o.status,o.order_type,o.table_number,o.pax,
+                           o.total,o.subtotal,o.discount,o.service_charge,o.gst,o.payment_method,o.customer_id,
+                           o.sales_channel_key,o.public_tracking_token,o.bill_printed_at,
+                           COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS sale_channel,
+                           c.name AS customer_name,c.phone AS customer_phone,
                            COALESCE(paid.amount_collected,0) AS amount_collected,
                            CASE WHEN COALESCE(o.payment_method,'') ~* 'non.?chargeable' THEN 0
                                 ELSE GREATEST(ROUND(o.total-COALESCE(paid.amount_collected,0),2),0) END AS amount_due,
-                           COALESCE((
-                               SELECT json_agg(json_build_object('item_name',oi.item_name,'quantity',oi.quantity) ORDER BY oi.id)
-                               FROM order_items oi
-                               WHERE oi.order_id=o.id AND oi.business_id=o.business_id
-                           ),'[]'::json) AS item_preview,
                            COALESCE((
                                SELECT json_agg(DISTINCT p.payment_method)
                                FROM payments p
@@ -5386,9 +5536,10 @@ app.get(
                             $4::text<>'table'
                             OR LOWER(COALESCE(o.status,'')) NOT IN ('completed','cancelled')
                        )
+                       AND ($5::timestamptz IS NULL OR COALESCE(o.updated_at,o.created_at)>=$5::timestamptz)
                     ORDER BY o.created_at DESC
                     `
-                    , [Number(req.user.business_id),fromDate||null,toDate||null,scope]
+                    , [Number(req.user.business_id),fromDate||null,toDate||null,scope,updatedAfter?updatedAfter.toISOString():null]
                 );
 
             res.json(result.rows);
@@ -5897,7 +6048,8 @@ app.put(
                     charge_adjustment_name = $16,
                     pax = $17,
                     sales_channel_key = $18,
-                    sales_channel_name = $19
+                    sales_channel_name = $19,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = $20 AND business_id = $21
                 RETURNING *
                 `,
@@ -6170,7 +6322,7 @@ app.put(
                 const paidResult = await pool.query("SELECT COALESCE(SUM(amount),0) AS paid FROM payments WHERE order_id=$1 AND business_id=$2 AND payment_status='Success'", [Number(req.params.id), Number(req.user.business_id)]);
                 if (Number(paidResult.rows[0]?.paid || 0) + 0.01 < Number(order.total || 0)) return res.status(409).json({ error: "Record the full payment in Orders before closing this order." });
             }
-            const result = await pool.query(`UPDATE orders SET status='Completed' WHERE id=$1 AND business_id=$2 RETURNING *`, [req.params.id, Number(req.user.business_id)]);
+            const result = await pool.query(`UPDATE orders SET status='Completed',updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND business_id=$2 RETURNING *`, [req.params.id, Number(req.user.business_id)]);
 
             await recordOrderActivity(pool, result.rows[0].id, "Order completed", "Order marked completed.", req);
 
@@ -7191,29 +7343,37 @@ app.post("/api/kot-print-jobs/claim", async (req,res)=>{
         const businessId=Number(req.user.business_id);
         const deviceId=String(req.device?.device_id||"").trim();
         if(!deviceId)return res.status(403).json({error:"This POS device is not registered for ticket printing."});
-        const host=await pool.query(`
-            UPDATE kot_device_print_hosts
-            SET host_device_id=$2,last_heartbeat=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-            WHERE business_id=$1 AND enabled=TRUE
-              AND (host_device_id IS NULL OR host_device_id=$2 OR last_heartbeat IS NULL OR last_heartbeat<CURRENT_TIMESTAMP-INTERVAL '30 seconds')
-            RETURNING business_id
-        `,[businessId,deviceId]);
-        if(!host.rows.length)return res.json({success:true,job:null});
         const claimed=await pool.query(`
-            WITH next_job AS (
-                SELECT id FROM kot_device_print_jobs
-                WHERE business_id=$1 AND attempts<3 AND next_attempt_at<=CURRENT_TIMESTAMP
-                  AND (status='pending' OR (status='claimed' AND lease_until<CURRENT_TIMESTAMP))
-                ORDER BY id
-                FOR UPDATE SKIP LOCKED
+            WITH renewed_host AS (
+                UPDATE kot_device_print_hosts
+                SET host_device_id=$2,last_heartbeat=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+                WHERE business_id=$1 AND enabled=TRUE
+                  AND (host_device_id IS NULL OR host_device_id=$2 OR last_heartbeat IS NULL OR last_heartbeat<CURRENT_TIMESTAMP-INTERVAL '30 seconds')
+                  AND (host_device_id IS DISTINCT FROM $2 OR last_heartbeat IS NULL OR last_heartbeat<CURRENT_TIMESTAMP-INTERVAL '15 seconds')
+                RETURNING business_id
+            ), active_host AS (
+                SELECT business_id FROM renewed_host
+                UNION
+                SELECT business_id FROM kot_device_print_hosts
+                WHERE business_id=$1 AND enabled=TRUE AND host_device_id=$2
+                  AND last_heartbeat>=CURRENT_TIMESTAMP-INTERVAL '30 seconds'
+            ), next_job AS (
+                SELECT j.id FROM kot_device_print_jobs j
+                JOIN active_host h ON h.business_id=j.business_id
+                WHERE j.business_id=$1 AND j.attempts<3 AND j.next_attempt_at<=CURRENT_TIMESTAMP
+                  AND (j.status='pending' OR (j.status='claimed' AND j.lease_until<CURRENT_TIMESTAMP))
+                ORDER BY j.id
+                FOR UPDATE OF j SKIP LOCKED
                 LIMIT 1
+            ), claimed_job AS (
+                UPDATE kot_device_print_jobs j
+                SET status='claimed',attempts=j.attempts+1,claimed_by_device_id=$2,
+                    lease_until=CURRENT_TIMESTAMP+INTERVAL '2 minutes',last_error=NULL
+                FROM next_job
+                WHERE j.id=next_job.id AND j.business_id=$1
+                RETURNING j.id,j.order_id,j.ticket_number,j.attempts
             )
-            UPDATE kot_device_print_jobs j
-            SET status='claimed',attempts=j.attempts+1,claimed_by_device_id=$2,
-                lease_until=CURRENT_TIMESTAMP+INTERVAL '2 minutes',last_error=NULL
-            FROM next_job
-            WHERE j.id=next_job.id AND j.business_id=$1
-            RETURNING j.id,j.order_id,j.ticket_number,j.attempts
+            SELECT * FROM claimed_job
         `,[businessId,deviceId]);
         res.json({success:true,job:claimed.rows[0]||null});
     }catch(e){console.error("Counter KOT print job claim failed:",e);res.status(500).json({error:"Could not check for kitchen tickets to print."});}
@@ -7287,16 +7447,15 @@ app.get("/api/kot/notifications", async (req,res)=>{
                 SELECT id,MAX(activity_id)::bigint AS activity_id FROM candidates GROUP BY id
             ),
             tickets AS (
-                SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,kg.printer_id,
-                       p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
-                       p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
-                       p.characteristic_uuid AS printer_characteristic_uuid,p.paper_width AS printer_paper_width,
-                       o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,o.status AS order_status
+                SELECT k.id,k.business_id,k.order_id,k.item_name,k.quantity,k.status,k.created_at,k.kot_group_id,
+                       k.options,k.cancelled_quantity,k.ticket_number,
+                       kg.name AS kot_group_name,kg.station AS kot_group_station,
+                       o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,
+                       o.status AS order_status,o.public_tracking_token
                 FROM ticket_ids ids
                 JOIN kot k ON k.id=ids.id AND k.business_id=$1
                 JOIN orders o ON o.id=k.order_id AND o.business_id=$1
                 LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=$1
-                LEFT JOIN printers p ON p.id=kg.printer_id AND p.business_id=$1
             )
             SELECT latest.latest_kot_id,latest.latest_activity_id,
                    CASE WHEN (SELECT COUNT(*) FROM kot_batch)>500
@@ -7329,7 +7488,8 @@ app.get(
             if(orderId!==null&&(!Number.isInteger(orderId)||orderId<=0))return res.status(400).json({error:"Invalid order ID"});
             const range=orderId!==null?"all":(req.query.range||"today");
             const dateRange=range==="all"?{start:"TIMESTAMP '1970-01-01'",end:"CURRENT_TIMESTAMP + INTERVAL '1 day'"}:getReportDateRange(range,req.query.from,req.query.to);
-            const result=await pool.query(`
+            if(orderId!==null){
+                const result=await pool.query(`
                 SELECT k.*,kg.name AS kot_group_name,kg.station AS kot_group_station,kg.printer_id,
                        p.name AS printer_name,p.connection_type AS printer_connection_type,p.host AS printer_host,p.port AS printer_port,
                        p.bluetooth_name AS printer_bluetooth_name,p.service_uuid AS printer_service_uuid,
@@ -7342,8 +7502,89 @@ app.get(
                   AND k.created_at >= ${dateRange.start}
                   AND k.created_at < ${dateRange.end}
                 ORDER BY k.created_at DESC
-            `,[Number(req.user.business_id),orderId]);
-            res.json(result.rows);
+                `,[Number(req.user.business_id),orderId]);
+                return res.json(result.rows);
+            }
+
+            // Keep the original array response for older desktop clients. The
+            // current POS requests a bounded page by sending `limit`.
+            const pagingRequested=req.query.limit!==undefined||req.query.beforeCreatedAt!==undefined||req.query.beforeId!==undefined;
+            if(!pagingRequested){
+                const result=await pool.query(`
+                    SELECT k.id,k.business_id,k.order_id,k.item_name,k.quantity,k.status,k.created_at,k.kot_group_id,
+                           k.options,k.cancelled_quantity,k.ticket_number,
+                           kg.name AS kot_group_name,kg.station AS kot_group_station,
+                           o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,o.status AS order_status
+                    FROM kot k JOIN orders o ON k.order_id=o.id
+                    LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=o.business_id
+                    WHERE o.business_id=$1
+                      AND k.created_at >= ${dateRange.start}
+                      AND k.created_at < ${dateRange.end}
+                    ORDER BY k.created_at DESC
+                `,[Number(req.user.business_id)]);
+                return res.json(result.rows);
+            }
+
+            const limit=req.query.limit===undefined?50:Number(req.query.limit);
+            if(!Number.isSafeInteger(limit)||limit<1||limit>100)return res.status(400).json({error:"KOT page size must be between 1 and 100."});
+            const hasCursor=req.query.beforeCreatedAt!==undefined||req.query.beforeId!==undefined;
+            const beforeCreatedAt=hasCursor?String(req.query.beforeCreatedAt||""):null;
+            const beforeCreatedAtMs=hasCursor?Date.parse(beforeCreatedAt):NaN;
+            const beforeId=hasCursor?Number(req.query.beforeId):null;
+            if(hasCursor&&(!Number.isFinite(beforeCreatedAtMs)||!Number.isSafeInteger(beforeId)||beforeId<=0)){
+                return res.status(400).json({error:"Invalid KOT history cursor."});
+            }
+            const cursorDate=hasCursor?new Date(beforeCreatedAtMs).toISOString():null;
+            const result=await pool.query(`
+                WITH ticket_keys AS (
+                    SELECT k.order_id,k.ticket_number,
+                           MAX(k.created_at) AS page_created_at,
+                           MAX(k.id) AS page_id
+                    FROM kot k
+                    WHERE k.business_id=$1
+                      AND k.created_at >= ${dateRange.start}
+                      AND k.created_at < ${dateRange.end}
+                    GROUP BY k.order_id,k.ticket_number
+                ), ticket_batch AS (
+                    SELECT order_id,ticket_number,page_created_at,page_id
+                    FROM ticket_keys
+                    WHERE $2::timestamptz IS NULL
+                       OR (page_created_at,page_id)<($2::timestamptz,$3::bigint)
+                    ORDER BY page_created_at DESC,page_id DESC
+                    LIMIT $4::int
+                ), ticket_page AS (
+                    SELECT order_id,ticket_number,page_created_at,page_id
+                    FROM ticket_batch
+                    ORDER BY page_created_at DESC,page_id DESC
+                    LIMIT $5::int
+                ), page_items AS (
+                    SELECT k.id,k.business_id,k.order_id,k.item_name,k.quantity,k.status,k.created_at,k.kot_group_id,
+                           k.options,k.cancelled_quantity,k.ticket_number,
+                           kg.name AS kot_group_name,kg.station AS kot_group_station,
+                           o.order_number,o.order_type,o.table_number,o.pax,o.notes AS order_notes,o.status AS order_status
+                    FROM ticket_page page
+                    JOIN kot k ON k.business_id=$1 AND k.order_id=page.order_id AND k.ticket_number=page.ticket_number
+                       AND k.created_at >= ${dateRange.start} AND k.created_at < ${dateRange.end}
+                    JOIN orders o ON o.id=k.order_id AND o.business_id=$1
+                    LEFT JOIN kot_groups kg ON kg.id=k.kot_group_id AND kg.business_id=$1
+                )
+                SELECT COALESCE((
+                           SELECT json_agg(row_to_json(item) ORDER BY item.created_at DESC,item.id DESC)
+                           FROM page_items item
+                       ),'[]'::json) AS items,
+                       (SELECT COUNT(*)>$5::int FROM ticket_batch) AS has_more,
+                       (SELECT json_build_object('createdAt',page_created_at,'id',page_id)
+                        FROM ticket_page
+                        ORDER BY page_created_at ASC,page_id ASC
+                        LIMIT 1) AS next_cursor
+            `,[Number(req.user.business_id),cursorDate,beforeId,limit+1,limit]);
+            const row=result.rows[0]||{};
+            res.set("Cache-Control","private, no-store").json({
+                items:Array.isArray(row.items)?row.items:[],
+                hasMore:row.has_more===true,
+                nextCursor:row.next_cursor&&typeof row.next_cursor==="object"?row.next_cursor:null,
+                limit
+            });
         } catch(e){console.error("KOT load error:",e);res.status(500).json({error:"Failed to load KOT"});}
     }
 );

@@ -130,6 +130,7 @@ let selectedPOSChannelKey = "";
 
 let restaurantTables = [];
 let currentOrders = [];
+let tableViewOrders = [];
 let selectedTableViewNumber = "";
 let tableViewStatusFilter = "all";
 let tableViewOrderRequestToken = 0;
@@ -138,6 +139,8 @@ let tableViewOrdersLoadError = false;
 let tableViewAreaFilter = "all";
 let dashboardAutoRefreshTimer = null;
 let currentMenu = [];
+let menuCatalogCacheState = null;
+let menuCatalogCacheRevision = 0;
 let currentCustomers = [];
 let currentReservations = [];
 let reservationAutoRefreshTimer = null;
@@ -455,6 +458,9 @@ async function api(url, options = {}) {
 
     });
 
+    const ordersServerTime = response.headers.get("X-Orders-Server-Time");
+    if (ordersServerTime) window.__ordersServerTime = ordersServerTime;
+
     let data = {};
 
     try {
@@ -472,7 +478,107 @@ async function api(url, options = {}) {
         throw new Error(data.error || "Request failed");
     }
 
+    const method = String(options.method || "GET").toUpperCase();
+    const path = String(url || "").split("?")[0];
+    const updatesMenuCatalog = method !== "GET" && (
+        path === "/menu" || path === "/menu/categories" || path.startsWith("/menu/categories/") ||
+        /^\/menu\/\d+(?:\/|$)/.test(path) || path === "/menu/import" || path === "/menu-option-sets" ||
+        path.startsWith("/image-storage/menu/") || path.startsWith("/image-storage/category/")
+    );
+    if (updatesMenuCatalog) invalidateMenuCatalogCache();
+
     return data;
+}
+
+function menuCatalogStorageKey(businessId) {
+    return `slashMenuCatalog:v1:${Number(businessId)}`;
+}
+
+function getMenuCatalogCacheState() {
+    const businessId = Number(currentUser?.business_id || 0);
+    if (!Number.isSafeInteger(businessId) || businessId <= 0) return null;
+    if (menuCatalogCacheState?.businessId === businessId) return menuCatalogCacheState;
+
+    const state = { businessId, items: null, categories: null, itemsPromise: null, categoriesPromise: null };
+    try {
+        const saved = JSON.parse(localStorage.getItem(menuCatalogStorageKey(businessId)) || "null");
+        if (saved?.version === 1 && Number(saved.businessId) === businessId) {
+            if (Array.isArray(saved.items)) state.items = saved.items;
+            if (Array.isArray(saved.categories)) state.categories = saved.categories;
+        }
+    } catch (_) {}
+    menuCatalogCacheState = state;
+    return state;
+}
+
+function persistMenuCatalogCache(state) {
+    if (!state || state !== menuCatalogCacheState) return;
+    try {
+        localStorage.setItem(menuCatalogStorageKey(state.businessId), JSON.stringify({
+            version: 1,
+            businessId: state.businessId,
+            items: Array.isArray(state.items) ? state.items : null,
+            categories: Array.isArray(state.categories) ? state.categories : null
+        }));
+    } catch (_) {}
+}
+
+function invalidateMenuCatalogCache() {
+    menuCatalogCacheRevision += 1;
+    const businessId = Number(currentUser?.business_id || 0);
+    menuCatalogCacheState = Number.isSafeInteger(businessId) && businessId > 0
+        ? { businessId, items: null, categories: null, itemsPromise: null, categoriesPromise: null }
+        : null;
+    if (Number.isSafeInteger(businessId) && businessId > 0) {
+        try { localStorage.removeItem(menuCatalogStorageKey(businessId)); } catch (_) {}
+    }
+}
+
+async function loadMenuItems() {
+    const state = getMenuCatalogCacheState();
+    if (!state) {
+        const items = await api("/menu");
+        currentMenu = Array.isArray(items) ? items : [];
+        return currentMenu;
+    }
+    if (Array.isArray(state.items)) {
+        currentMenu = state.items;
+        return currentMenu;
+    }
+    if (state.itemsPromise) return state.itemsPromise;
+
+    const revision = menuCatalogCacheRevision;
+    state.itemsPromise = api("/menu").then(items => {
+        const normalized = Array.isArray(items) ? items : [];
+        if (state === menuCatalogCacheState && revision === menuCatalogCacheRevision) {
+            state.items = normalized;
+            persistMenuCatalogCache(state);
+        }
+        currentMenu = normalized;
+        return normalized;
+    }).finally(() => { state.itemsPromise = null; });
+    return state.itemsPromise;
+}
+
+async function loadMenuCategoryData() {
+    const state = getMenuCatalogCacheState();
+    if (!state) {
+        const categories = await api("/menu/categories");
+        return Array.isArray(categories) ? categories : [];
+    }
+    if (Array.isArray(state.categories)) return state.categories;
+    if (state.categoriesPromise) return state.categoriesPromise;
+
+    const revision = menuCatalogCacheRevision;
+    state.categoriesPromise = api("/menu/categories").then(categories => {
+        const normalized = Array.isArray(categories) ? categories : [];
+        if (state === menuCatalogCacheState && revision === menuCatalogCacheRevision) {
+            state.categories = normalized;
+            persistMenuCatalogCache(state);
+        }
+        return normalized;
+    }).finally(() => { state.categoriesPromise = null; });
+    return state.categoriesPromise;
 }
 
 async function apiWithTimeout(url, timeoutMs = 12000, options = {}) {
@@ -1058,6 +1164,8 @@ let posSyncInProgress=false;
 async function syncPOSData(){
     if(posSyncInProgress)return;
     posSyncInProgress=true;
+    invalidateMenuCatalogCache();
+    window.__ordersForceFullRefresh=true;
     const startedAt=Date.now();
     const activePage=document.querySelector(".page.active-page");
     const scrollPosition={x:window.scrollX,y:window.scrollY,pageTop:activePage?.scrollTop||0};
@@ -3023,7 +3131,7 @@ async function deleteMenuAccount(id){
 }
 async function loadMenuCategories(){
     try{
-        menuCategories=await api('/menu/categories');
+        menuCategories=await loadMenuCategoryData();
         renderMenuCategoryMaster();
         populateMenuCategorySelect();
         setText('menuCategoryCount',menuCategories.length);
@@ -3125,7 +3233,7 @@ function selectBillingMenuAccount(accountId){
 async function loadMenu() {
     try {
         await loadMenuCategories();
-        currentMenu = await api("/menu");
+        currentMenu = await loadMenuItems();
         appSettings.menuAccounts=normalizeMenuAccounts(appSettings.menuAccounts);
         renderBillingMenuAccountSelect();
         const sidebar = document.getElementById("billingCategorySidebar");
@@ -4325,28 +4433,57 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
         if (ordersFrom) ordersParams.set("from", ordersFrom);
         if (ordersTo) ordersParams.set("to", ordersTo);
         const ordersQuery = ordersParams.toString();
-        if (refresh || !Array.isArray(currentOrders) || window.__ordersQueryKey !== ordersQuery) {
-            if(window.__ordersListRequest&&window.__ordersListRequestKey===ordersQuery){
-                currentOrders=await window.__ordersListRequest;
-            }else{
-                const request=api("/orders?" + ordersQuery);
-                window.__ordersListRequest=request;
-                window.__ordersListRequestKey=ordersQuery;
-                try{
-                    const fetched=await request;
-                    if(window.__ordersListRequestKey===ordersQuery){
-                        currentOrders=fetched;
-                        window.__ordersQueryKey=ordersQuery;
-                    }
-                }finally{
-                    if(window.__ordersListRequest===request){
-                        window.__ordersListRequest=null;
-                        window.__ordersListRequestKey="";
-                    }
+        const businessId = Number(currentUser?.business_id || 0);
+        const todayKey = !ordersFrom && !ordersTo ? getPOSDateKey() : "";
+        const queryKey = `${businessId}|${todayKey}|${ordersQuery}`;
+        const cacheMatchesQuery = Array.isArray(currentOrders) && window.__ordersQueryKey === queryKey;
+        const fullRefreshDue = !cacheMatchesQuery || window.__ordersForceFullRefresh === true ||
+            !Number(window.__ordersLastFullRefreshAt || 0) || Date.now() - Number(window.__ordersLastFullRefreshAt || 0) >= 10 * 60 * 1000;
+        const shouldFetch = refresh || !cacheMatchesQuery;
+        let orderListChanged = false;
+
+        if (shouldFetch) {
+            const full = fullRefreshDue;
+            const cursor = full ? "" : String(window.__ordersUpdatedAfter || "");
+            const requestParams = new URLSearchParams(ordersQuery);
+            if (cursor) requestParams.set("updatedAfter", cursor);
+            const requestKey = `${queryKey}|${full ? "full" : cursor}`;
+            let request = window.__ordersListRequestKey === requestKey ? window.__ordersListRequest : null;
+
+            if (!request) {
+                window.__ordersPendingQueryKey = queryKey;
+                request = api("/orders?" + requestParams.toString()).then(rows => ({
+                    rows: Array.isArray(rows) ? rows : [],
+                    full,
+                    queryKey
+                }));
+                window.__ordersListRequest = request;
+                window.__ordersListRequestKey = requestKey;
+            }
+
+            try {
+                const result = await request;
+                if (window.__ordersPendingQueryKey !== queryKey) return;
+                if (result.full) {
+                    currentOrders = result.rows;
+                    window.__ordersLastFullRefreshAt = Date.now();
+                    window.__ordersForceFullRefresh = false;
+                } else {
+                    const byId = new Map((Array.isArray(currentOrders) ? currentOrders : []).map(order => [Number(order.id), order]));
+                    result.rows.forEach(order => byId.set(Number(order.id), { ...byId.get(Number(order.id)), ...order }));
+                    currentOrders = [...byId.values()].sort((left, right) => (Date.parse(right.created_at || "") || 0) - (Date.parse(left.created_at || "") || 0));
+                }
+                window.__ordersQueryKey = queryKey;
+                // A short overlap protects against clock skew and updates committed while the request was in flight.
+                const serverTime = Date.parse(window.__ordersServerTime || "") || Date.now();
+                window.__ordersUpdatedAfter = new Date(serverTime - 5000).toISOString();
+                orderListChanged = result.full || result.rows.some(order => Number(order.id) === Number(window.selectedOrderId));
+            } finally {
+                if (window.__ordersListRequest === request) {
+                    window.__ordersListRequest = null;
+                    window.__ordersListRequestKey = "";
                 }
             }
-            if(window.__ordersListRequestKey&&window.__ordersListRequestKey!==ordersQuery)return;
-            if(window.__ordersQueryKey!==ordersQuery)return;
         }
         const list = document.getElementById("ordersTableBody");
         if (!list) return;
@@ -4420,7 +4557,7 @@ async function updateOrdersTable(refresh = true, refreshSelectedDetails = true) 
         if (amountDueCount) amountDueCount.textContent = amountDueOrders.length;
 
         const selectedVisible = visibleOrders.find(order => Number(order.id) === Number(window.selectedOrderId));
-        if (visibleOrders.length && (!selectedVisible || (refresh && refreshSelectedDetails))) {
+        if (visibleOrders.length && (!selectedVisible || (refresh && refreshSelectedDetails && orderListChanged))) {
             await viewOrder(selectedVisible?.id || visibleOrders[0].id);
             lastOrderDetailsRefreshAt = Date.now();
         }
@@ -5084,7 +5221,8 @@ function getActiveOrderForTable(tableNumber) {
     const normalize = value => String(value ?? "").normalize("NFKC").trim().toLocaleLowerCase().replace(/\s*-\s*/g, "-").replace(/\s+/g, " ");
     const target = normalize(tableNumber);
     if (!target) return null;
-    const orders = (Array.isArray(currentOrders) ? currentOrders : [])
+    const sourceOrders = document.getElementById("table-view")?.classList.contains("active-page") ? tableViewOrders : currentOrders;
+    const orders = (Array.isArray(sourceOrders) ? sourceOrders : [])
         .filter(order => !["completed", "cancelled"].includes(String(order.status || "").trim().toLowerCase()));
     const byCreatedAt = (a, b) => (Date.parse(b.created_at || "") || 0) - (Date.parse(a.created_at || "") || 0);
     const directMatch = orders
@@ -5365,10 +5503,10 @@ async function loadTables() {
         const tableViewActive = document.getElementById("table-view")?.classList.contains("active-page");
         if (tableViewActive) {
             if (hasPermission("orders", "view")) {
-                try { currentOrders = await api("/orders?scope=table"); tableViewOrdersLoadError = false; }
+                try { tableViewOrders = await api("/orders?scope=table"); tableViewOrdersLoadError = false; }
                 catch (error) { tableViewOrdersLoadError = true; console.warn("Unable to refresh table orders:", error.message); }
             } else {
-                currentOrders = [];
+                tableViewOrders = [];
                 tableViewOrdersLoadError = false;
             }
             if (!restaurantTables.some(table => String(table.table_number) === selectedTableViewNumber)) {
@@ -6404,7 +6542,7 @@ async function populateKOTGroupTargets(group={}){
     const printerSelect=document.getElementById("kotGroupPrinter");
     const [printers,menu]=await Promise.all([
         api("/kot-groups/printers").catch(()=>[]),
-        currentMenu?.length?Promise.resolve(currentMenu):api("/menu").catch(()=>[])
+        loadMenuItems().catch(()=>[])
     ]);
     currentMenu=menu||[];
     if(printerSelect)printerSelect.innerHTML='<option value="">Use the regular print dialog</option>'+(printers||[]).map(p=>`<option value="${Number(p.id)}">${esc(p.name)} · ${esc(p.connection_type||"local")}</option>`).join("");
@@ -6487,7 +6625,8 @@ function confirmKOTGroupTargetPicker(){
 // KITCHEN / KOT
 // ==========================================
 
-let kotState={tab:"pending",range:"today",from:"",to:"",items:[]};
+let kotState={tab:"pending",range:"today",from:"",to:"",items:[],nextCursor:null,hasMore:false,loadingMore:false};
+const KOT_HISTORY_PAGE_SIZE=50;
 let kotAlertTimer=null;
 let counterKOTPrintTimer=null;
 let counterKOTPrintBusy=false;
@@ -6496,6 +6635,7 @@ let knownPendingKOTIds=new Set();
 let kotAlertBusy=false;
 let kotNotificationCursor=null;
 let kotActivityNotificationCursor=null;
+let kotHistoryRequestGeneration=0;
 let kotAlertAudioContext=null;
 let pendingKOTAlertSounds=0;
 let pendingQrAlertSounds=0;
@@ -6816,7 +6956,7 @@ function renderKOT(){
     const selected=kotState.tab==="pending"?pending:kotState.tab==="ready"?ready:kotState.tab==="cancelled"?cancelled:completed,container=document.getElementById("kotContainer");
     if(!container)return;
     container.innerHTML="";
-    if(!selected.length){container.innerHTML=`<div class="dashboard-box"><p>No KOTs for this tab/date range.</p></div>`;return;}
+    if(!selected.length){container.innerHTML=`<div class="dashboard-box"><p>No KOTs in this tab among the tickets loaded so far.</p></div>`;}
     selected.forEach(order=>{
         let next=order.status==="Pending"?"Preparing":order.status==="Preparing"?"Ready":order.status==="Ready"?"Completed":null;
         const card=document.createElement("div");
@@ -6831,23 +6971,61 @@ function renderKOT(){
         if(orderNote){const note=document.createElement("div");note.className="kot-order-note";note.innerHTML="<strong>Order note:</strong> "+esc(orderNote);card.insertBefore(note,card.querySelector(".kot-items"));}
         container.appendChild(card);
     });
+    const paging=document.createElement("div");
+    paging.className="kot-pagination";
+    const hint=document.createElement("p");
+    hint.className="access-muted kot-pagination-hint";
+    hint.textContent=`Showing ${all.length} loaded tickets. Counts above include loaded tickets only.`;
+    paging.appendChild(hint);
+    if(kotState.hasMore){
+        const button=document.createElement("button");
+        button.type="button";button.className="big-btn";button.disabled=kotState.loadingMore;
+        button.textContent=kotState.loadingMore?"Loading older tickets…":"Load older tickets";
+        button.addEventListener("click",loadOlderKOT);
+        paging.appendChild(button);
+    }
+    container.appendChild(paging);
 }
 
-async function loadKOT(isPoll=false){
+async function loadKOT(isPoll=false,{append=false}={}){
     if(appSettings.kotEnabled === false) return;
+    if(append&&(!kotState.hasMore||kotState.loadingMore))return;
+    const requestGeneration=append?kotHistoryRequestGeneration:++kotHistoryRequestGeneration;
+    if(append){kotState.loadingMore=true;renderKOT();}
+    else{kotState.loadingMore=false;kotState.nextCursor=null;kotState.hasMore=false;}
     try{
         const p=new URLSearchParams();
         p.set("range",kotState.range||"today");
         if(kotState.range==="custom"){p.set("from",kotState.from);p.set("to",kotState.to);}
-        const items=await api("/kot?"+p.toString());
+        p.set("limit",String(KOT_HISTORY_PAGE_SIZE));
+        if(append&&kotState.nextCursor){
+            p.set("beforeCreatedAt",String(kotState.nextCursor.createdAt||""));
+            p.set("beforeId",String(kotState.nextCursor.id||""));
+        }
+        const result=await api("/kot?"+p.toString());
+        if(requestGeneration!==kotHistoryRequestGeneration)return;
+        const legacyArrayResponse=Array.isArray(result);
+        const items=legacyArrayResponse?result:(Array.isArray(result?.items)?result.items:[]);
         if(isPoll) inspectNewKOTAlerts(items);
-        kotState.items=items;
+        if(append){
+            const byId=new Map((kotState.items||[]).map(item=>[Number(item.id),item]));
+            items.forEach(item=>byId.set(Number(item.id),item));
+            kotState.items=[...byId.values()];
+        }else kotState.items=items;
+        kotState.hasMore=!legacyArrayResponse&&result?.hasMore===true;
+        kotState.nextCursor=legacyArrayResponse?null:(result?.nextCursor||null);
         renderKOT();
     }catch(e){
         console.error("Load KOT failed:",e);
-        const c=document.getElementById("kotContainer");
-        if(c)c.innerHTML=`<p>Failed to load KOT: ${esc(e.message)}</p>`;
-    }
+        if(requestGeneration===kotHistoryRequestGeneration&&!append){
+            const c=document.getElementById("kotContainer");
+            if(c)c.innerHTML=`<p>Failed to load KOT: ${esc(e.message)}</p>`;
+        }
+    }finally{if(append&&requestGeneration===kotHistoryRequestGeneration){kotState.loadingMore=false;renderKOT();}}
+}
+
+async function loadOlderKOT(){
+    await loadKOT(false,{append:true});
 }
 
 async function updateKOTOrder(orderId,status,ticketNumber){
@@ -6858,7 +7036,8 @@ async function updateKOTOrder(orderId,status,ticketNumber){
         for(const item of orderItems){
             await api(`/kot/${item.id}`,{method:"PUT",body:JSON.stringify({status})});
         }
-        await loadKOT(false);
+        orderItems.forEach(item=>{item.status=status;});
+        renderKOT();
         await updateOrdersTable();
         await loadTables();
         await updateDashboard();
@@ -7140,7 +7319,7 @@ let menuManagementCommittedSearch="";
 async function loadMenuManagement(){
     try{
         await loadMenuCategories();
-        currentMenu=await api('/menu');
+        currentMenu=await loadMenuItems();
         setText('menuItemCount',currentMenu.length);
         try{kotGroups=await api('/kot-groups');}catch(_){kotGroups=kotGroups||[];}
         try{await loadMenuOptionSets();}catch(_){menuOptionSets=[];}
@@ -7364,7 +7543,7 @@ function renderMenuOptionSetsOverview(){
 }
 async function openOptionSetsModal(){
     try{await loadMenuOptionSets();}catch(error){alert('Could not load option sets: '+error.message);return;}
-    if(!currentMenu.length){try{currentMenu=await api('/menu');}catch(error){alert('Could not load menu items: '+error.message);return;}}
+    if(!currentMenu.length){try{currentMenu=await loadMenuItems();}catch(error){alert('Could not load menu items: '+error.message);return;}}
     renderMenuOptionSetsOverview();renderOptionSetList();newOptionSet();document.getElementById('menuOptionSetsModal').style.display='flex';
 }
 function closeOptionSetsModal(){document.getElementById('menuOptionSetsModal').style.display='none';renderMenuOptionSetPicker([...document.querySelectorAll('#menuOptionSetPicker input:checked')].map(input=>input.value));}
@@ -7442,7 +7621,7 @@ function downloadMenuImportTemplate() {
 
 async function downloadExistingMenuSpreadsheet() {
     try {
-        const [items] = await Promise.all([api("/menu"), loadMenuOptionSets()]);
+        const [items] = await Promise.all([loadMenuItems(), loadMenuOptionSets()]);
         if (!Array.isArray(items) || !items.length) {
             alert("No existing menu items were found to export.");
             return;
@@ -8710,7 +8889,7 @@ function marketingDealOfferLabel(deal) {
 }
 async function openMarketingDealForm(id = null) {
     if (!currentMenu.length) {
-        try { currentMenu = await api("/menu"); }
+        try { currentMenu = await loadMenuItems(); }
         catch (error) { alert("Could not load menu items for this deal: " + error.message); return; }
     }
     editingMarketingDealId = id;
@@ -8846,7 +9025,7 @@ async function selectBillingTable(tableNumber, status) {
 
     if (normalized === "occupied") {
         try {
-            const orders = await api("/orders");
+            const orders = await api("/orders?scope=table");
             const active = orders
                 .filter(order => String(order.table_number) === String(tableNumber))
                 .filter(order => !["completed", "cancelled"].includes(String(order.status || "").toLowerCase()))
@@ -12127,7 +12306,7 @@ async function loadTableQrMenuModule(){
     if(grid)grid.innerHTML='<div class="table-qr-empty">Loading your POS tables…</div>';
     if(stock)stock.innerHTML='<div class="qr-stock-empty">Loading menu items…</div>';
     try{
-        const [tables,items,publication,categories]=await Promise.all([api("/tables"),api("/menu"),api("/menu/public-settings"),api("/menu/categories")]);
+        const [tables,items,publication,categories]=await Promise.all([api("/tables"),loadMenuItems(),api("/menu/public-settings"),loadMenuCategoryData()]);
         tableQrMenuTables=Array.isArray(tables)?tables:[];
         tableQrMenuItems=Array.isArray(items)?items:[];
         restaurantMenuPublication=publication;
@@ -12277,12 +12456,12 @@ async function saveRestaurantMenuSettings(section="all"){
 async function setQrMenuStock(id,inStock){
     try{
         await api("/menu/"+Number(id)+"/qr-stock",{method:"PATCH",body:JSON.stringify({inStock})});
-        tableQrMenuItems=await api("/menu");
+        tableQrMenuItems=await loadMenuItems();
         renderQrStockItems();
         showProfileToast(inStock?"Item marked in stock on the QR menu.":"Item marked sold out on the QR menu.");
     }catch(error){
         alert(error.message||"Could not update the QR menu stock status.");
-        try{tableQrMenuItems=await api("/menu");renderQrStockItems();}catch(_){}
+        try{tableQrMenuItems=await loadMenuItems();renderQrStockItems();}catch(_){}
     }
 }
 
@@ -12577,6 +12756,7 @@ let posQrOrderAlertCursor=null;
 let posQrOrderActivityCursor=null;
 let posQrOrderAlertTimer=null;
 let posQrOrderAlertBusy=false;
+let lastQrOrderFallbackRefreshAt=0;
 function playPOSQrOrderAlertSound(){
     const context=ensureKOTAlertAudio();
     if(!context||context.state!=="running"){
@@ -12651,7 +12831,10 @@ async function pollPOSQrOrderAlerts(){
         if(changedSelectedOrder)await viewOrder(Number(window.selectedOrderId));
     }catch(error){
         console.warn("QR order notification check failed:",error.message);
-        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page"))await updateOrdersTable(true,false);
+        if(hasPermission("orders","view")&&document.getElementById("orders")?.classList.contains("active-page")&&Date.now()-lastQrOrderFallbackRefreshAt>=30000){
+            lastQrOrderFallbackRefreshAt=Date.now();
+            await updateOrdersTable(true,false);
+        }
     }
     finally{posQrOrderAlertBusy=false;}
 }
