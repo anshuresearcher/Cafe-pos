@@ -8,7 +8,10 @@ const nextConfig: NextConfig = {
     useTypeScriptCli: false,
   },
   async rewrites() {
-    return [{ source: "/public-menu/:path*", destination: "/api/public-menu/:path*" }];
+    return [
+      { source: "/public-menu/:token/push-config", destination: "/api/public-menu/:token/push-config" },
+      { source: "/public-menu/:path*", destination: "/api/public-menu/:path*" },
+    ];
   },
 };
 
