@@ -13,6 +13,7 @@ const nextConfig: NextConfig = {
       { source: "/public-menu/:token/analytics", destination: "/api/public-menu/:token/analytics" },
       { source: "/public-menu/:token/session", destination: "/api/public-menu/:token/session" },
       { source: "/public-menu/:token/service-requests", destination: "/api/public-menu/:token/service-requests" },
+      { source: "/public-menu/:token/push-subscriptions", destination: "/api/public-menu/:token/push-subscriptions" },
       { source: "/public-menu/:path*", destination: "/api/public-menu/:path*" },
     ];
   },
