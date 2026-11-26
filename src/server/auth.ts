@@ -143,6 +143,14 @@ export async function sessionResponse(request: NextRequest) {
   return { session, user, access };
 }
 
+export async function authorizedSession(request: NextRequest, permission: string) {
+  const result = await sessionResponse(request);
+  if (!result.user || !result.session) return { response: result.response };
+  const permissions = result.user.permissions && typeof result.user.permissions === "object" ? result.user.permissions : {};
+  if (result.user.is_owner !== true && permissions[permission] !== true) return { response: Response.json({ error: "You do not have permission to perform this action" }, { status: 403 }) };
+  return { session: result.session, user: result.user, access: result.access };
+}
+
 export async function logout(request: NextRequest, response: Response) {
   const session = await readSession(request);
   if (session) await db.query("DELETE FROM app_sessions WHERE token_hash=$1", [hashToken(session.token)]);
