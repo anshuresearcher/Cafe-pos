@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { withSystem, withTenant } from "@/src/server/db";
 
 const defaultChannels = [
@@ -123,4 +124,80 @@ export async function publicMenu(token: string) {
     const restaurantName = String(settings.restaurantName || business.business_name || "Cafe & Restaurant");
     return { restaurantName, logoUrl: String(business.logo_url || settings.logoUrl || ""), heroImages: Array.isArray(settings.publicMenuHeroImages) ? settings.publicMenuHeroImages.slice(0, 6) : [], currency: String(settings.currency || business.currency || "₹"), priceChannel, priceChannelLabel: allChannels.find((channel) => channel.key === priceChannel)?.label || "Slash", gstCalculationEnabled: settings.gstCalculationEnabled !== false, onlinePromotions: promotions(settings, priceChannel), categories: orderedCategories.map((name) => ({ name, imageUrl: String(categoryMap.get(name.toLowerCase())?.image_url || "") })), items, ...availability(publication, restaurantName), tables: tableResult.rows.map((row) => String(row.table_number)) };
   });
+}
+
+export function guestPhone(value: unknown) {
+  const digits = String(value || "").replace(/\D/g, "");
+  if (!/^\d{10}$/.test(digits)) throw Object.assign(new Error("Enter a valid 10-digit Indian mobile number."), { status: 400 });
+  return digits;
+}
+
+export function normalizeGuestCustomer(value: unknown) {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const name = String(source.name || "").trim();
+  const rawPhone = String(source.phone || "").trim();
+  const digits = rawPhone.replace(/\D/g, "");
+  const phone = `${rawPhone.startsWith("+") ? "+" : ""}${digits}`;
+  const email = String(source.email || "").trim();
+  const birthDate = String(source.birthDate || source.birth_date || "").trim();
+  if (!name || name.length > 100) throw Object.assign(new Error("Enter your name (up to 100 characters)."), { status: 400 });
+  if (!/^\+?[\d\s().-]+$/.test(rawPhone) || digits.length < 6 || digits.length > 15) throw Object.assign(new Error("Enter a valid phone or WhatsApp number."), { status: 400 });
+  if (email && (email.length > 254 || !/^\S+@\S+\.\S+$/.test(email))) throw Object.assign(new Error("Enter a valid email address or leave it blank."), { status: 400 });
+  if (birthDate) {
+    const parsed = new Date(`${birthDate}T00:00:00.000Z`);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(birthDate) || Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== birthDate || parsed.getTime() > Date.now()) throw Object.assign(new Error("Enter a valid birthday or leave it blank."), { status: 400 });
+  }
+  return { name, phone, email: email || null, birthDate: birthDate || null };
+}
+
+export async function upsertGuestCustomer(businessId: number, customer: ReturnType<typeof normalizeGuestCustomer>) {
+  return withTenant(businessId, async (client) => {
+    const digits = customer.phone.replace(/\D/g, "");
+    const existing = await client.query("SELECT id FROM customers WHERE business_id=$1 AND regexp_replace(phone,'[^0-9]','','g')=$2 ORDER BY id LIMIT 1", [businessId, digits]);
+    if (existing.rows.length) {
+      const updated = await client.query("UPDATE customers SET name=COALESCE(NULLIF(BTRIM(name),''),$1),email=COALESCE(NULLIF(BTRIM(email),''),$2),birth_date=COALESCE(birth_date,$3) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date", [customer.name, customer.email, customer.birthDate, existing.rows[0].id, businessId]);
+      return updated.rows[0];
+    }
+    const created = await client.query("INSERT INTO customers(name,phone,email,birth_date,business_id) VALUES($1,$2,$3,$4,$5) RETURNING id,name,phone,email,birth_date", [customer.name, customer.phone, customer.email, customer.birthDate, businessId]);
+    return created.rows[0];
+  });
+}
+
+export function guestCookieName(token: string) {
+  return `slash_qr_${crypto.createHash("sha256").update(token).digest("hex").slice(0, 16)}`;
+}
+
+export function guestCookie(token: string, value: string, maxAge = 7200) {
+  const secure = process.env.NODE_ENV === "production" || Boolean(process.env.VERCEL);
+  return `${guestCookieName(token)}=${encodeURIComponent(value)}; Max-Age=${maxAge}; Path=/public-menu/${token}; HttpOnly; SameSite=Lax${secure ? "; Secure" : ""}`;
+}
+
+export function guestCookieValue(request: Request, token: string) {
+  const header = request.headers.get("cookie") || "";
+  const name = `${guestCookieName(token)}=`;
+  return header.split(";").map((part) => part.trim()).find((part) => part.startsWith(name))?.slice(name.length) || "";
+}
+
+export async function qrPublication(token: string) {
+  const result = await withSystem((client) => client.query("SELECT business_id,enabled,EXISTS (SELECT 1 FROM business_licenses l WHERE l.business_id=public_menu_settings.business_id AND l.status='active' AND l.starts_at<=CURRENT_TIMESTAMP AND l.expires_at>=CURRENT_TIMESTAMP AND LOWER(COALESCE(l.add_on,'')) LIKE '%table qr%') AS has_qr_addon FROM public_menu_settings WHERE token=$1 LIMIT 1", [token]));
+  const publication = result.rows[0];
+  if (!publication?.enabled || !publication.has_qr_addon) throw Object.assign(new Error("This QR menu is not currently accepting orders"), { status: 404 });
+  return publication;
+}
+
+export async function fast2Sms(endpoint: "send" | "verify", payload: Record<string, unknown>) {
+  const apiKey = String(process.env.FAST2SMS_API_KEY || "").trim();
+  const otpId = String(process.env.FAST2SMS_OTP_ID || "").trim();
+  if (!apiKey || !otpId) throw Object.assign(new Error("WhatsApp OTP is not configured. Please ask the cafe team for help."), { status: 503 });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(`https://www.fast2sms.com/dev/otp/${endpoint}`, { method: "POST", headers: { authorization: apiKey, "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(payload), signal: controller.signal });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.return !== true) throw Object.assign(new Error(endpoint === "send" ? "Could not send the OTP. Check your number and try again." : "OTP incorrect or expired. Check the code and try again."), { status: 502 });
+    return data;
+  } catch (error: any) {
+    if (error?.status) throw error;
+    throw Object.assign(new Error("OTP service is temporarily unavailable. Please try again."), { status: 502 });
+  } finally { clearTimeout(timeout); }
 }
