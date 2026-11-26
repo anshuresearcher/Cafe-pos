@@ -12442,15 +12442,21 @@ const shouldRunStartupMigrations =
     !process.env.VERCEL || String(process.env.RUN_DB_MIGRATIONS || '').toLowerCase() === 'true';
 
 const startupPromise = shouldRunStartupMigrations ? startServer() : Promise.resolve();
-const runtimeRlsVerification = process.env.VERCEL && !shouldRunStartupMigrations
-    ? assertSafeRlsDatabaseRole()
-        .then(() => verifyTenantRlsPolicies())
-        .then(async () => {
-            try { await ensureLoginAttemptTable(); }
-            catch (error) { persistentPublicRateLimitAvailable = false; persistentLoginLockoutAvailable = false; console.warn('Persistent rate limits or login lockout table unavailable; using process-local fallbacks:', error.message); }
-            tenantSystemMode = false;
-        })
-    : Promise.resolve();
+let runtimeRlsVerification;
+function getRuntimeRlsVerification() {
+    if (!runtimeRlsVerification) {
+        runtimeRlsVerification = process.env.VERCEL && !shouldRunStartupMigrations
+            ? assertSafeRlsDatabaseRole()
+                .then(() => verifyTenantRlsPolicies())
+                .then(async () => {
+                    try { await ensureLoginAttemptTable(); }
+                    catch (error) { persistentPublicRateLimitAvailable = false; persistentLoginLockoutAvailable = false; console.warn('Persistent rate limits or login lockout table unavailable; using process-local fallbacks:', error.message); }
+                    tenantSystemMode = false;
+                })
+            : Promise.resolve();
+    }
+    return runtimeRlsVerification;
+}
 
 if (process.env.VERCEL) {
     if (shouldRunStartupMigrations) {
@@ -12462,7 +12468,7 @@ if (process.env.VERCEL) {
     module.exports = async function handler(req, res) {
         try {
             await startupPromise;
-            await runtimeRlsVerification;
+            await getRuntimeRlsVerification();
         } catch (error) {
             console.error('Runtime tenant security verification failed:', error.message);
             return res.status(503).json({ error: 'Database security configuration is incomplete. Apply the tenant migrations and use a role without BYPASSRLS.' });

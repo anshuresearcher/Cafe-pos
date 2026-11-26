@@ -30,6 +30,7 @@
   },
   "devDependencies": {
     "@types/node": "^20",
+    "@types/pg": "^8",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "electron": "44.7.0",
