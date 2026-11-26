@@ -8,7 +8,7 @@ const defaultChannels = [
   { key: "online", label: "Slash", orderType: "Takeaway", qrMenu: true },
 ];
 
-function channels(settings: any) {
+export function salesChannels(settings: any) {
   const custom = Array.isArray(settings?.posSalesChannels) ? settings.posSalesChannels : [];
   const byKey = new Map(custom.map((entry: any) => [String(entry?.key || "").trim().toLowerCase(), entry]));
   return [...defaultChannels.map((entry) => ({ ...entry, ...(byKey.get(entry.key) || {}) })), ...custom.filter((entry: any) => !defaultChannels.some((item) => item.key === String(entry?.key || "").trim().toLowerCase()))]
@@ -24,7 +24,7 @@ function channels(settings: any) {
 }
 
 function selectedChannels(value: any, settings: any) {
-  const fallback = channels(settings).map((entry) => entry.key);
+  const fallback = salesChannels(settings).map((entry) => entry.key);
   if (value === undefined || value === null) return fallback;
   const source = Array.isArray(value) ? value : typeof value === "string" ? (() => { try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : [parsed]; } catch { return [value]; } })() : [];
   return [...new Set(source.map((item) => String(item || "").trim().toLowerCase().replace(/[\s-]+/g, "_")).filter(Boolean))];
@@ -100,7 +100,7 @@ export async function publicMenu(token: string) {
     ]);
     const business = businessResult.rows[0] || {};
     const settings = settingsResult.rows[0]?.settings || {};
-    const allChannels = channels(settings);
+    const allChannels = salesChannels(settings);
     const priceChannel = allChannels.find((channel) => channel.key === publication.price_channel && channel.qrMenu)?.key || allChannels.find((channel) => channel.key === "online")?.key || allChannels.find((channel) => channel.qrMenu)?.key || "online";
     const categoryMap = new Map(categoryResult.rows.map((row) => [String(row.name || "").toLowerCase(), row]));
     const orderedCategories = (Array.isArray(publication.category_order) ? publication.category_order : []).map((name: any) => categoryMap.get(String(name || "").trim().toLowerCase())?.name).filter(Boolean) as string[];
@@ -152,15 +152,71 @@ export function normalizeGuestCustomer(value: unknown) {
 
 export async function upsertGuestCustomer(businessId: number, customer: ReturnType<typeof normalizeGuestCustomer>) {
   return withTenant(businessId, async (client) => {
-    const digits = customer.phone.replace(/\D/g, "");
-    const existing = await client.query("SELECT id FROM customers WHERE business_id=$1 AND regexp_replace(phone,'[^0-9]','','g')=$2 ORDER BY id LIMIT 1", [businessId, digits]);
-    if (existing.rows.length) {
-      const updated = await client.query("UPDATE customers SET name=COALESCE(NULLIF(BTRIM(name),''),$1),email=COALESCE(NULLIF(BTRIM(email),''),$2),birth_date=COALESCE(birth_date,$3) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date", [customer.name, customer.email, customer.birthDate, existing.rows[0].id, businessId]);
-      return updated.rows[0];
-    }
-    const created = await client.query("INSERT INTO customers(name,phone,email,birth_date,business_id) VALUES($1,$2,$3,$4,$5) RETURNING id,name,phone,email,birth_date", [customer.name, customer.phone, customer.email, customer.birthDate, businessId]);
-    return created.rows[0];
+    return upsertGuestCustomerWithClient(client, businessId, customer);
   });
+}
+
+export async function upsertGuestCustomerWithClient(client: { query: (sql: string, values?: unknown[]) => Promise<any> }, businessId: number, customer: ReturnType<typeof normalizeGuestCustomer>) {
+  const digits = customer.phone.replace(/\D/g, "");
+  const existing = await client.query("SELECT id FROM customers WHERE business_id=$1 AND regexp_replace(phone,'[^0-9]','','g')=$2 ORDER BY id LIMIT 1", [businessId, digits]);
+  if (existing.rows.length) {
+    const updated = await client.query("UPDATE customers SET name=COALESCE(NULLIF(BTRIM(name),''),$1),email=COALESCE(NULLIF(BTRIM(email),''),$2),birth_date=COALESCE(birth_date,$3) WHERE id=$4 AND business_id=$5 RETURNING id,name,phone,email,birth_date", [customer.name, customer.email, customer.birthDate, existing.rows[0].id, businessId]);
+    return updated.rows[0];
+  }
+  const created = await client.query("INSERT INTO customers(name,phone,email,birth_date,business_id) VALUES($1,$2,$3,$4,$5) RETURNING id,name,phone,email,birth_date", [customer.name, customer.phone, customer.email, customer.birthDate, businessId]);
+  return created.rows[0];
+}
+
+export function cleanOrderOptions(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 30).map((set: any) => ({
+    setId: String(set?.setId || "").slice(0, 80), setName: String(set?.setName || "").trim().slice(0, 100),
+    options: (Array.isArray(set?.options) ? set.options : []).slice(0, 50).map((option: any) => ({ id: String(option?.id || "").slice(0, 80), name: String(option?.name || "").trim().slice(0, String(set?.setId || "") === "__slash_custom_instruction__" ? 250 : 100), price: Math.max(0, Number(option?.price || 0)) })).filter((option: any) => option.name && Number.isFinite(option.price)),
+  })).filter((set: any) => set.setName && set.options.length);
+}
+
+export async function normalizeOrderItemOptions(client: { query: (sql: string, values?: unknown[]) => Promise<any> }, businessId: number, menuItem: any, value: unknown) {
+  const submitted = cleanOrderOptions(value);
+  const menuSubmitted: any[] = [];
+  const metadata: any[] = [];
+  const seen = new Set<string>();
+  for (const set of submitted) {
+    if (set.setId === "__slash_custom_instruction__") {
+      if (seen.has(set.setId) || set.options.length !== 1) throw new Error("Add one valid cooking instruction or remove it.");
+      seen.add(set.setId);
+      const instruction = String(set.options[0].name || "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 250);
+      if (!instruction || !/^instruction_[a-z0-9_]{1,70}$/i.test(set.options[0].id)) throw new Error("Add one valid cooking instruction or remove it.");
+      metadata.push({ setId: set.setId, setName: "Cooking Instruction", options: [{ id: set.options[0].id, name: instruction, price: 0 }] });
+    } else {
+      if (set.setId.startsWith("__slash_")) throw new Error("One of the selected options is not available for this item.");
+      menuSubmitted.push(set);
+    }
+  }
+  const ids = [...new Set([...(Array.isArray(menuItem?.option_set_ids) ? menuItem.option_set_ids : [])].map(String))];
+  if (!ids.length) {
+    if (menuSubmitted.length) throw new Error("This item does not have those options available.");
+    return { options: metadata, addOnPrice: 0 };
+  }
+  const settings = await client.query("SELECT settings->'menuOptionSets' AS sets FROM app_settings WHERE business_id=$1", [businessId]);
+  const configured = (Array.isArray(settings.rows[0]?.sets) ? settings.rows[0].sets : []).filter((set: any) => ids.includes(String(set.id)));
+  const selectedBySet = new Map(menuSubmitted.map((set) => [String(set.setId), set]));
+  const options: any[] = [...metadata]; let addOnPrice = 0;
+  for (const set of configured) {
+    const selected = selectedBySet.get(String(set.id));
+    const choices = Array.isArray(selected?.options) ? selected.options : [];
+    const min = Math.max(0, Number(set.minSelections) || 0), max = Math.max(1, Number(set.maxSelections) || 1);
+    if (choices.length < min || choices.length > max) throw new Error(`Choose ${min === max ? min : `${min} to ${max}`} option${max === 1 ? "" : "s"} for ${set.name}.`);
+    const authoritative: any[] = [];
+    for (const choice of choices) {
+      const saved = (Array.isArray(set.options) ? set.options : []).find((option: any) => String(option.id) === String(choice.id));
+      if (!saved) throw new Error(`An option for ${set.name} is no longer available.`);
+      const price = Math.max(0, Number(saved.price) || 0); addOnPrice += price;
+      authoritative.push({ id: String(saved.id), name: String(saved.name), price });
+    }
+    options.push({ setId: String(set.id), setName: String(set.name), options: authoritative });
+  }
+  if (menuSubmitted.some((set) => !configured.some((entry: any) => String(entry.id) === String(set.setId)))) throw new Error("This item does not have those options available.");
+  return { options, addOnPrice };
 }
 
 export function guestCookieName(token: string) {
