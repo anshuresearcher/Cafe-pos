@@ -1,36 +1,27 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Cafe POS – Profile + Billing Interaction Fix
 
-## Getting Started
+This update keeps the existing Step 1–19 Cafe POS modules and focuses on the latest UI issues:
 
-First, run the development server:
+- Added Cafe Pilot-style staff profile button and slide-out profile panel.
+- Removed decorative circular/bullet markers from billing category buttons.
+- Fixed billing category sidebar so categories are real clickable controls backed by database menu categories.
+- Removed the visible table dropdown from billing and replaced it with clickable database-driven table cards.
+- Table cards show Available (green), Occupied (yellow), Reserved (red) and selected state.
+- Kept the hidden `tableNumber` field for backward compatibility with existing order/payment code.
+- Billing menu and categories are rendered from `/api/menu`; hard-coded billing items/categories are no longer used by the active UI.
+- Added keyboard activation for menu cards.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+Run with the existing project setup:
+1. `npm install`
+2. `node server.js`
+3. Open the Cafe POS and hard refresh with `Ctrl + Shift + R`.
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## QR menu app installs and customer notifications
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Serve the POS and guest QR menu over HTTPS in production. Browser app installation and Web Push require a secure origin; localhost is allowed for local development.
+- Install server dependencies with `npm install`.
+- Generate a VAPID key pair with `npx web-push generate-vapid-keys --json`, then set `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and `VAPID_SUBJECT` in the server environment. Keep the private key server-side and reuse the same pair after deployment.
+- Guests can install the cafe menu app or opt in to Get offers from the QR menu. POS users can compose and send messages from Marketing > Customer notifications.
+- The existing startup migration creates tenant-scoped subscription and campaign tables.
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

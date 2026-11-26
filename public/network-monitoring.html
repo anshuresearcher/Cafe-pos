@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slash POS - Network Monitoring</title>
+<style>
+:root{font-family:Inter,system-ui,Arial,sans-serif;color:#182235;background:#f2f5f9;font-synthesis:none}*{box-sizing:border-box}body{margin:0}.shell{max-width:1440px;margin:24px auto;padding:0 20px 36px}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;background:#101827;color:#fff;border-radius:16px;padding:22px 26px;margin-bottom:18px}.top h1{font-size:25px;margin:7px 0}.top p{margin:0;color:#c3ccda}.top a{color:#c4f26b;text-decoration:none;font-weight:700}.topActions{display:flex;gap:8px;align-items:center;flex-wrap:wrap}button,select,input{font:inherit;border:1px solid #d6deea;border-radius:9px;padding:10px 12px;background:#fff;color:#182235}button{cursor:pointer;font-weight:700}button.primary{background:#101827;color:#fff;border-color:#101827}button:disabled{opacity:.45;cursor:not-allowed}.panel{background:#fff;border:1px solid #dfe5ed;border-radius:14px;padding:18px;margin-bottom:16px;box-shadow:0 4px 18px rgba(22,34,53,.04)}.filters{display:flex;gap:10px;align-items:end;flex-wrap:wrap}.filters label{display:grid;gap:6px;color:#617087;font-size:12px;font-weight:700}.filters .dates{display:flex;gap:8px}.filters .dates[hidden]{display:none}.muted{color:#69778c;font-size:13px}.notice{padding:10px 12px;border-radius:8px;background:#eef4ff;color:#234b84;margin-bottom:14px}.notice.error{background:#fff0f0;color:#a52929}.notice[hidden]{display:none}.cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.card{border:1px solid #e2e7ef;border-radius:12px;padding:15px;min-height:100px}.card span{display:block;color:#65738a;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}.card strong{display:block;font-size:23px;margin-top:10px;color:#101827}.cols{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel h2{margin:0 0 12px;font-size:17px}.bars{display:grid;gap:9px}.barrow{display:grid;grid-template-columns:minmax(110px,1.1fr) 3fr auto;gap:10px;align-items:center;font-size:12px}.barlabel{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.track{height:11px;background:#edf1f6;border-radius:8px;overflow:hidden}.fill{height:100%;background:#4079e8;border-radius:8px}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:640px}th,td{padding:10px 8px;border-bottom:1px solid #e8edf3;text-align:left;font-size:12px}th{color:#637187;background:#f7f9fc;text-transform:uppercase;letter-spacing:.04em}td{color:#273449}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}.tabs button.active{background:#101827;color:white;border-color:#101827}.pagination{display:flex;justify-content:space-between;align-items:center;margin-top:12px}.disclaimer{line-height:1.55}.disclaimer strong{color:#22324b}.small{font-size:12px}.hidden{display:none!important}.empty{padding:20px;text-align:center;color:#6b778b}@media(max-width:850px){.cards{grid-template-columns:repeat(2,minmax(0,1fr))}.cols{grid-template-columns:1fr}.shell{padding:0 12px}.top{align-items:flex-start;flex-direction:column}}@media(max-width:460px){.cards{grid-template-columns:1fr 1fr}.card{padding:12px}.card strong{font-size:19px}.filters .dates{width:100%}.filters .dates input{min-width:0;width:50%}}
+</style>
+</head>
+<body>
+<main class="shell">
+<header class="top">
+<div><a href="/support">Slash POS Support</a><h1>Network &amp; Data Usage</h1><p>Traffic trends and approximate data sizes from the POS server.</p></div>
+<div class="topActions"><a href="/support" style="color:#fff">Back to Support</a><button class="primary" id="refreshButton" type="button">Refresh</button></div>
+</header>
+<div id="notice" class="notice" role="status">Loading monitoring summary...</div>
+<section class="panel">
+<div class="filters">
+<label>Date range<select id="rangeSelect"><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option><option value="custom">Custom range</option></select></label>
+<div id="customDates" class="dates" hidden><label>From<input id="fromDate" type="date"></label><label>To<input id="toDate" type="date"></label></div>
+<button id="applyButton" type="button">Apply range</button><span class="muted" id="updatedAt"></span>
+</div>
+</section>
+<section class="cards" aria-label="Usage overview">
+<div class="card"><span>API requests</span><strong id="apiRequests">0</strong></div>
+<div class="card"><span>API response data</span><strong id="responseData">0 B</strong></div>
+<div class="card"><span>Average response size</span><strong id="averageSize">0 B</strong></div>
+<div class="card"><span>Average response time</span><strong id="averageTime">0 ms</strong></div>
+<div class="card"><span>Failed API requests</span><strong id="failedRequests">0</strong></div>
+<div class="card"><span>Database result estimate</span><strong id="databaseData">0 B</strong></div>
+<div class="card"><span>Database queries counted</span><strong id="dbQueries">0</strong></div>
+<div class="card"><span>Database errors</span><strong id="dbErrors">0</strong></div>
+</section>
+<section class="cols" style="margin-top:16px">
+<div class="panel"><h2>Daily response data</h2><div class="bars" id="dailyChart"><div class="empty">No saved usage data for this range yet.</div></div></div>
+<div class="panel"><h2>Largest endpoints by response data</h2><div class="tablewrap"><table><thead><tr><th>Endpoint</th><th>Feature</th><th>Requests</th><th>Response data</th></tr></thead><tbody id="topEndpointRows"><tr><td colspan="4" class="empty">No saved usage data for this range yet.</td></tr></tbody></table></div></div>
+</section>
+<section class="panel">
+<h2>Usage by endpoint, business, device, or feature</h2>
+<p class="muted">Choose a section to load its paginated details. Details are not fetched until you select a section.</p>
+<div class="tabs" role="tablist">
+<button type="button" data-dimension="endpoints">Endpoints</button>
+<button type="button" data-dimension="businesses">Businesses</button>
+<button type="button" data-dimension="devices">Devices</button>
+<button type="button" data-dimension="features">Features</button>
+</div>
+<div id="detailState" class="muted">Select a section to load details.</div>
+<div id="detailArea" class="hidden">
+<div class="tablewrap"><table><thead id="detailHead"></thead><tbody id="detailRows"></tbody></table></div>
+<div class="pagination"><button id="previousPage" type="button">Previous</button><span id="pageLabel" class="muted"></span><button id="nextPage" type="button">Next</button></div>
+</div>
+</section>
+<section class="panel">
+<h2>Monitoring overhead</h2>
+<p class="muted">Counters below are estimates for the current server process or Vercel function instance. They may reset when Vercel replaces an instance.</p>
+<div class="cards">
+<div class="card"><span>Monitoring batch writes</span><strong id="monitorWrites">0</strong></div>
+<div class="card"><span>Monitoring database reads</span><strong id="monitorReads">0</strong></div>
+<div class="card"><span>Monitoring API requests</span><strong id="monitorRequests">0</strong></div>
+<div class="card"><span>Monitoring table size</span><strong id="monitorStorage">0 B</strong></div>
+<div class="card"><span>Estimated monitoring transfer</span><strong id="monitorTransfer">0 B</strong></div>
+<div class="card"><span>Buffered / dropped requests</span><strong id="monitorBuffer">0 / 0</strong></div>
+<div class="card"><span>Batch write failures</span><strong id="monitorFailures">0</strong></div>
+<div class="card"><span>Summary cache reuse</span><strong id="monitorCache">0 hits / 0 misses</strong></div>
+</div>
+<p class="muted small" id="runtimeNote"></p>
+</section>
+<section class="panel disclaimer">
+<h2>How to read these numbers</h2>
+<p><strong>API response data</strong> counts response body bytes measured by the POS server. It excludes TLS, network framing, and browser-to-Supabase Storage image downloads.</p>
+<p><strong>Database result estimate</strong> is based on sampled PostgreSQL rows serialized as JSON. It is an estimate, not database wire bytes and not exact Supabase Shared Pooler Egress.</p>
+<p><strong>Supabase billed egress</strong> remains the authoritative total in your Supabase dashboard. Monitoring batches are best-effort on Vercel and can be lost if a function instance ends before flushing.</p>
+</section>
+</main>
+<script src="/network-monitoring.js" defer></script>
+</body>
+</html>
