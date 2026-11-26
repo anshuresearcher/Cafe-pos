@@ -11,6 +11,7 @@ const nextConfig: NextConfig = {
     return [
       { source: "/public-menu/:token/push-config", destination: "/api/public-menu/:token/push-config" },
       { source: "/public-menu/:token/analytics", destination: "/api/public-menu/:token/analytics" },
+      { source: "/public-menu/:token/session", destination: "/api/public-menu/:token/session" },
       { source: "/public-menu/:path*", destination: "/api/public-menu/:path*" },
     ];
   },
