@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { Pool } from "pg";
+import { Pool, type PoolClient } from "pg";
 
 const globalForDb = globalThis as typeof globalThis & { cafePosPool?: Pool };
 
@@ -40,4 +40,36 @@ export const db = globalForDb.cafePosPool ?? createPool();
 
 if (process.env.NODE_ENV !== "production") {
   globalForDb.cafePosPool = db;
+}
+
+export async function withTenant<T>(businessId: number, work: (client: PoolClient) => Promise<T>) {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.business_id', $1, true), set_config('app.system_mode', 'off', true)", [String(businessId)]);
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function withSystem<T>(work: (client: PoolClient) => Promise<T>) {
+  const client = await db.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('app.business_id', '', true), set_config('app.system_mode', 'on', true)");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
 }
