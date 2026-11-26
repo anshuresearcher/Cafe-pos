@@ -1,0 +1,10 @@
+import crypto from "node:crypto";
+import type { NextRequest } from "next/server";
+import { withTenant } from "@/src/server/db";
+import { authorizedSession } from "@/src/server/auth";
+
+export const runtime = "nodejs";
+
+export async function PUT(request: NextRequest) {
+  try { const auth = await authorizedSession(request, "settings.edit"); if (auth.response) return auth.response; const body = await request.json(); if (!Array.isArray(body?.categoryOrder) || body.categoryOrder.length > 300) return Response.json({ error: "Choose a valid QR menu category order." }, { status: 400 }); const result = await withTenant(auth.session!.businessId, async (client) => { const categories = await client.query("SELECT name FROM menu_categories WHERE business_id=$1 AND active=TRUE ORDER BY sort_order,name,id", [auth.session!.businessId]); const available = new Map(categories.rows.map((row) => [String(row.name || "").trim().toLocaleLowerCase(), String(row.name || "").trim()])); const seen = new Set<string>(), order: string[] = []; for (const value of body.categoryOrder) { const key = String(value || "").trim().toLocaleLowerCase(), canonical = available.get(key); if (!canonical) throw Object.assign(new Error(`“${String(value || "").slice(0, 100)}” is not an active menu category.`), { status: 400 }); if (seen.has(key)) throw Object.assign(new Error(`“${canonical}” appears more than once in the category order.`), { status: 400 }); seen.add(key); order.push(canonical); } for (const [key, name] of available) if (!seen.has(key)) order.push(name); await client.query("INSERT INTO public_menu_settings(business_id,token,category_order) VALUES($1,$2,$3::jsonb) ON CONFLICT (business_id) DO UPDATE SET category_order=EXCLUDED.category_order,updated_at=CURRENT_TIMESTAMP", [auth.session!.businessId, crypto.randomBytes(24).toString("hex"), JSON.stringify(order)]); return order; }); return Response.json({ success: true, categoryOrder: result }); } catch (error: any) { return Response.json({ error: error?.status ? error.message : "Could not save the QR menu category order." }, { status: error?.status || 500 }); }
+}
