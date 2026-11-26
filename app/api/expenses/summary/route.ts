@@ -1,0 +1,7 @@
+import type { NextRequest } from "next/server";
+import { withTenant } from "@/src/server/db";
+import { authorizedSession } from "@/src/server/auth";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export async function GET(request: NextRequest) { try { const auth = await authorizedSession(request, "expenses.view"); if (auth.response) return auth.response; const from = request.nextUrl.searchParams.get("from"), to = request.nextUrl.searchParams.get("to"); const data = await withTenant(auth.session!.businessId, async (client) => { const total = (await client.query("SELECT COALESCE(SUM(amount),0) AS total,COUNT(*) AS count FROM expenses WHERE business_id=$3 AND ($1::date IS NULL OR expense_date >= $1::date) AND ($2::date IS NULL OR expense_date <= $2::date)", [from, to, auth.session!.businessId])).rows[0]; const categories = (await client.query("SELECT COALESCE(c.name,'Uncategorised') category,COALESCE(SUM(e.amount),0) amount FROM expenses e LEFT JOIN expense_categories c ON c.id=e.category_id WHERE e.business_id=$3 AND ($1::date IS NULL OR expense_date >= $1::date) AND ($2::date IS NULL OR expense_date <= $2::date) GROUP BY c.name ORDER BY amount DESC", [from, to, auth.session!.businessId])).rows; return { total, categories }; }); return Response.json({ total: data.total.total, count: Number(data.total.count || 0), categories: data.categories }); } catch { return Response.json({ error: "Failed to load expense summary" }, { status: 500 }); } }

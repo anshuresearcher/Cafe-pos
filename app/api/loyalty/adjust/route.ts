@@ -1,0 +1,6 @@
+import type { NextRequest } from "next/server";
+import { withTenant } from "@/src/server/db";
+import { authorizedSession } from "@/src/server/auth";
+
+export const runtime = "nodejs";
+export async function POST(request: NextRequest) { try { const auth = await authorizedSession(request, "loyalty.edit"); if (auth.response) return auth.response; const body = await request.json(), customerId = Number(body?.customerId), points = Math.trunc(Number(body?.points || 0)); if (!customerId || !points) return Response.json({ error: "Customer and non-zero points required" }, { status: 400 }); const result = await withTenant(auth.session!.businessId, (client) => client.query("INSERT INTO loyalty_transactions(customer_id,points,transaction_type,reference_type,note) SELECT $1,$2,'Adjustment','Manual',$3 WHERE EXISTS (SELECT 1 FROM customers WHERE id=$1 AND business_id=$4) RETURNING *", [customerId, points, String(body?.note || "Manual adjustment"), auth.session!.businessId])); if (!result.rows.length) return Response.json({ error: "Customer not found" }, { status: 404 }); return Response.json(result.rows[0], { status: 201 }); } catch { return Response.json({ error: "Failed to adjust loyalty points" }, { status: 500 }); } }
