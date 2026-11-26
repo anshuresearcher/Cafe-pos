@@ -10,6 +10,7 @@ const nextConfig: NextConfig = {
   async rewrites() {
     return [
       { source: "/public-menu/:token/push-config", destination: "/api/public-menu/:token/push-config" },
+      { source: "/public-menu/:token", destination: "/api/public-menu/:token" },
       { source: "/public-menu/:token/analytics", destination: "/api/public-menu/:token/analytics" },
       { source: "/public-menu/:token/session", destination: "/api/public-menu/:token/session" },
       { source: "/public-menu/:token/service-requests", destination: "/api/public-menu/:token/service-requests" },
