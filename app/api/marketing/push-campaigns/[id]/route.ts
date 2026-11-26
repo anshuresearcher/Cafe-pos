@@ -1,0 +1,5 @@
+import type { NextRequest } from "next/server";
+import { withTenant } from "@/src/server/db";
+import { authorizedSession } from "@/src/server/auth";
+export const runtime = "nodejs";
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ id: string }> }) { try { const auth = await authorizedSession(request, "marketing.delete"); if (auth.response) return auth.response; const id = Number((await params).id); if (!Number.isInteger(id) || id <= 0) return Response.json({ error: "Invalid message ID" }, { status: 400 }); const result = await withTenant(auth.session!.businessId, (client) => client.query("DELETE FROM marketing_push_campaigns WHERE id=$1 AND business_id=$2 RETURNING id", [id, auth.session!.businessId])); if (!result.rows.length) return Response.json({ error: "Notification message not found" }, { status: 404 }); return Response.json({ success: true }); } catch { return Response.json({ error: "Could not delete notification message" }, { status: 500 }); } }

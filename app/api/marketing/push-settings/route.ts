@@ -1,0 +1,6 @@
+import type { NextRequest } from "next/server";
+import { withTenant } from "@/src/server/db";
+import { authorizedSession } from "@/src/server/auth";
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export async function GET(request: NextRequest) { try { const auth = await authorizedSession(request, "marketing.view"); if (auth.response) return auth.response; const data = await withTenant(auth.session!.businessId, async (client) => { const subscriptions = (await client.query("SELECT COUNT(*)::integer AS count FROM public_menu_push_subscriptions WHERE business_id=$1", [auth.session!.businessId])).rows[0]; const menu = (await client.query("SELECT token,enabled FROM public_menu_settings WHERE business_id=$1 LIMIT 1", [auth.session!.businessId])).rows[0] || {}; return { subscriberCount: Number(subscriptions?.count || 0), configured: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT), menuEnabled: Boolean(menu.enabled), menuUrl: menu.token ? `/restaurant/${menu.token}` : null }; }); return Response.json(data); } catch { return Response.json({ error: "Could not load push notification settings" }, { status: 500 }); } }
