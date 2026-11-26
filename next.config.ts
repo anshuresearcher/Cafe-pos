@@ -14,6 +14,8 @@ const nextConfig: NextConfig = {
       { source: "/public-menu/:token/customers", destination: "/api/public-menu/:token/customers" },
       { source: "/public-menu/:token/otp/send", destination: "/api/public-menu/:token/otp/send" },
       { source: "/public-menu/:token/otp/verify", destination: "/api/public-menu/:token/otp/verify" },
+      { source: "/public-menu/:token/orders/statuses", destination: "/api/public-menu/:token/orders/statuses" },
+      { source: "/public-menu/:token/orders/:orderId", destination: "/api/public-menu/:token/orders/:orderId" },
       { source: "/public-menu/:token/analytics", destination: "/api/public-menu/:token/analytics" },
       { source: "/public-menu/:token/session", destination: "/api/public-menu/:token/session" },
       { source: "/public-menu/:token/service-requests", destination: "/api/public-menu/:token/service-requests" },
