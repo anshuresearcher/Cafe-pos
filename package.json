@@ -9,7 +9,10 @@
     "node": ">=22.12.0"
   },
   "scripts": {
-    "start": "node server.js",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
     "desktop:dev": "electron .",
     "desktop:build:win": "electron-builder --win nsis --x64 --publish never",
     "android:build": "powershell -NoProfile -File android/build.ps1"
@@ -18,13 +21,22 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "next": "16.4.0",
     "pg": "^8.23.0",
     "qrcode": "^1.5.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
     "electron": "44.7.0",
-    "electron-builder": "26.15.3"
+    "electron-builder": "26.15.3",
+    "eslint": "^9",
+    "eslint-config-next": "16.4.0",
+    "typescript": "^5"
   },
   "build": {
     "appId": "com.cafepilot.pos",
