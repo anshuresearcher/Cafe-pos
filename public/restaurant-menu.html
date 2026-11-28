@@ -217,8 +217,6 @@
     .guest-details-submit:disabled{opacity:.68;cursor:wait;transform:none}
     .guest-details-note{margin:0!important;color:#858090!important;font-size:10px!important;text-align:center}
     .guest-details-status{min-height:18px;margin:0;color:#b72d4a;font-size:11px;text-align:center}
-    .guest-otp-status{min-height:0;padding:0 2px;text-align:left;font-weight:750;line-height:1.45}
-    .guest-otp-status:empty{display:none}.guest-otp-status.is-success{color:#23835f}.guest-otp-status.is-error{color:#b72d4a}
     @media(max-width:480px){.guest-details-gate{padding:12px}.guest-details-card{padding:24px 19px;border-radius:25px}.guest-details-fields{grid-template-columns:1fr}}
 </style>
 <style>
@@ -533,16 +531,16 @@
     <section class="guest-details-card" role="dialog" aria-modal="true" aria-labelledby="guestDetailsHeading">
       <span class="guest-details-kicker">QUICK INTRO ✦ ORDER DETAILS</span>
       <h1 id="guestDetailsHeading">Who’s ordering?</h1>
-      <p id="guestDetailsIntro">Drop your details so the cafe can put your name on the order. Then the menu’s all yours.</p>
+        <p id="guestDetailsIntro">Add your name and contact details to start your table session. Then the menu’s all yours.</p>
       <form class="guest-details-form" onsubmit="confirmGuestDetails(event)">
         <label>Your name<input id="guestCustomerName" name="name" type="text" maxlength="100" autocomplete="name" placeholder="What should we call you?" required></label>
-        <label>Phone / WhatsApp number<input id="guestCustomerPhone" name="phone" type="tel" inputmode="tel" maxlength="24" autocomplete="tel" placeholder="10-digit WhatsApp number" required></label>
+        <label>Phone number<input id="guestCustomerPhone" name="phone" type="tel" inputmode="tel" maxlength="24" autocomplete="tel" placeholder="10-digit phone number" required></label>
         <div class="guest-details-fields">
           <label>Email <span>(optional)</span><input id="guestCustomerEmail" name="email" type="email" maxlength="254" autocomplete="email" placeholder="you@example.com"></label>
           <label>Birthday <span>(optional)</span><input id="guestCustomerBirthDate" name="birthDate" type="date" autocomplete="bday"></label>
         </div>
         <button id="guestDetailsSubmit" class="guest-details-submit" type="submit">Continue to the menu ✦</button>
-        <p class="guest-details-note">Your name and phone help the cafe match your order. No verification code needed.</p>
+        <p class="guest-details-note">Your name and phone help the cafe match your order. No OTP or verification code is needed.</p>
         <div id="guestDetailsStatus" class="guest-details-status" role="status" aria-live="polite"></div>
       </form>
       <button id="guestViewOrdersButton" class="guest-view-orders" type="button" onclick="viewGuestOrders()" hidden>Already ordered? Check My orders ✦</button>

@@ -24,7 +24,8 @@
   },
   "devDependencies": {
     "electron": "44.7.0",
-    "electron-builder": "26.15.3"
+    "electron-builder": "26.15.3",
+    "pngjs": "^7.0.0"
   },
   "build": {
     "appId": "com.cafepilot.pos",

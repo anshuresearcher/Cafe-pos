@@ -2189,7 +2189,7 @@ body:has(#table-view.active-page) .billing-table-view-page .billing-table-card.r
 .table-view-start-btn{min-height:40px;margin-top:8px;padding:8px 14px;border:0;border-radius:9px;background:#111827;color:#fff;font-size:11px;font-weight:750;cursor:pointer}
 .table-view-order-loading{display:flex;flex:1;align-items:center;justify-content:center;gap:10px;color:#74818a;font-size:12px}
 @media(max-width:760px){.billing-table-view-page .billing-tables-area.table-view-workspace{grid-template-columns:1fr;height:auto;min-height:0;overflow:visible}.table-view-list-panel{min-height:300px}.billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(auto-fill,minmax(115px,1fr));max-height:42vh}.table-view-order-panel{min-height:430px}.table-view-order-actions{position:sticky;bottom:0}}
-@media(max-width:420px){.billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table-view-order-heading{padding:13px}.table-view-order-items{padding:10px}.table-view-order-totals{margin:0 10px 10px}.table-view-order-actions{padding:10px}.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{min-height:42px;padding:8px;font-size:11px}}
+@media(max-width:420px){.billing-table-view-page .table-view-list-panel .billing-tables-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table-view-order-heading{padding:13px}.table-view-order-items{padding:10px}.table-view-order-totals{margin:0 10px 10px}.table-view-order-actions{gap:6px;padding:10px}.table-view-order-actions .order-detail-preview-btn,.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{min-height:42px;padding:7px 4px;font-size:10px}}
 /* POS checkout, business info, channel preferences and Marketing */
 .login-business-welcome{display:flex;align-items:center;gap:7px;margin:14px 0 2px;padding:11px 14px;border:1px solid #dedede;border-radius:12px;background:#f6f6f6;color:#555;font-size:13px}.login-business-welcome[hidden]{display:none}.login-business-welcome strong{color:#111;font-weight:700}
 .pos-sale-channel{display:flex;flex-direction:column;gap:3px;min-width:142px;color:#666;font-size:11px;font-weight:700;text-align:left}.pos-sale-channel select{min-height:42px;padding:8px 30px 8px 11px;border:1px solid #d8d8d8;border-radius:10px;background:#fff;color:#171717;font:inherit;font-size:13px}
@@ -2854,13 +2854,14 @@ body:has(#new-order.active-page) #paymentModal .pos-payment-footer button{min-he
 /* Keep order actions anchored at the bottom of the order details pane. */
 .orders-detail-panel>#orderDetailsContent{flex:1 1 auto;min-height:0;overflow:auto}
 .orders-detail-panel>.orders-detail-actions{flex:0 0 auto;margin-top:auto;padding:12px 18px max(12px,env(safe-area-inset-bottom));background:rgba(250,252,252,.98);box-shadow:0 -6px 16px rgba(30,48,56,.045)}
-.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-checkout-btn,.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{display:inline-flex;flex:1;align-items:center;justify-content:center;gap:9px;min-height:46px;padding:10px 15px;border:1px solid #d7dfe5;border-radius:10px;background:#fff;color:#26343d;font-size:12px;font-weight:750;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
+.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-preview-btn,.orders-detail-actions .order-detail-checkout-btn,.table-view-order-actions .order-detail-preview-btn,.table-view-order-actions .order-detail-print-btn,.table-view-order-actions .order-detail-checkout-btn{display:inline-flex;flex:1;align-items:center;justify-content:center;gap:9px;min-height:46px;padding:10px 15px;border:1px solid #d7dfe5;border-radius:10px;background:#fff;color:#26343d;font-size:12px;font-weight:750;cursor:pointer;transition:transform .15s ease,box-shadow .15s ease,background .15s ease}
 .orders-detail-actions .order-detail-print-btn:hover,.table-view-order-actions .order-detail-print-btn:hover{background:#f6f9fa;box-shadow:0 4px 12px rgba(25,45,55,.08);transform:translateY(-1px)}
+.orders-detail-actions .order-detail-preview-btn:hover,.table-view-order-actions .order-detail-preview-btn:hover{background:#f6f9fa;box-shadow:0 4px 12px rgba(25,45,55,.08);transform:translateY(-1px)}
 .order-detail-print-btn svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .orders-detail-actions .order-detail-checkout-btn,.table-view-order-actions .order-detail-checkout-btn{border-color:#111827;background:#111827;color:#fff}
 .orders-detail-actions .order-detail-checkout-btn:hover:not(:disabled),.table-view-order-actions .order-detail-checkout-btn:hover:not(:disabled){background:#263448;box-shadow:0 5px 14px rgba(17,24,39,.18);transform:translateY(-1px)}
 .orders-detail-actions button:disabled,.table-view-order-actions button:disabled{cursor:not-allowed;opacity:.46}
-@media(max-width:480px){.orders-detail-panel>.orders-detail-actions{padding-right:12px;padding-left:12px}.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-checkout-btn{min-height:42px;padding:8px;font-size:11px}}
+@media(max-width:480px){.orders-detail-panel>.orders-detail-actions{padding-right:12px;padding-left:12px}.orders-detail-actions .order-detail-print-btn,.orders-detail-actions .order-detail-preview-btn,.orders-detail-actions .order-detail-checkout-btn{min-height:42px;padding:8px;font-size:11px}}
 
 /* Keep the order filters grouped behind a visible control beside search. */
 .orders-search-tools{display:flex;align-items:center;gap:8px;min-width:0}
@@ -3440,6 +3441,11 @@ body:has(#orders.active-page) .orders-page{width:min(1900px,100%);margin:0 auto;
 #billModal.bill-preview-sidecar .bill-preview-toolbar h2{margin:0;color:#24332c;font-size:16px;font-weight:800}
 .bill-status-badge{display:inline-flex;align-items:center;min-height:23px;padding:3px 8px;border-radius:999px;background:#fff3d7;color:#98610b;font-size:9px;font-weight:900;letter-spacing:.06em;white-space:nowrap}
 .bill-status-badge[data-state="paid"]{background:#e9f7ef;color:#25724a}.bill-status-badge[data-state="partial"]{background:#fff3d7;color:#98610b}.bill-status-badge[data-state="cancelled"]{background:#fff0f0;color:#a43232}
+.bill-cancellation-watermark{position:absolute;top:50%;left:50%;z-index:3;display:flex;flex-direction:column;align-items:center;gap:8px;width:max-content;max-width:90%;transform:translate(-50%,-50%) rotate(-31deg);color:rgba(112,118,124,.4);text-align:center;pointer-events:none;user-select:none}
+.bill-cancellation-watermark[hidden],.bill-cancellation-watermark [hidden]{display:none!important}
+.bill-cancellation-watermark strong{font-size:clamp(38px,8vw,78px);font-weight:500;letter-spacing:.05em;line-height:1;white-space:nowrap;text-transform:capitalize}
+.bill-cancellation-watermark span{max-width:100%;font-size:clamp(18px,4vw,34px);font-weight:400;line-height:1.2;overflow-wrap:anywhere}
+#billModal.bill-preview-receipt .bill-modal{position:relative}
 #billModal.bill-preview-sidecar .bill-header{padding:22px 22px 16px;text-align:left}
 #billModal.bill-preview-sidecar .bill-header h2{color:#1f2c26;font-size:21px;font-weight:800}
 #billModal.bill-preview-sidecar .bill-info{margin:0 22px;padding:13px;border:1px solid #e7ece9;border-radius:11px;background:#f8faf9}
@@ -3462,7 +3468,7 @@ body:has(#orders.active-page) .orders-page{width:min(1900px,100%);margin:0 auto;
 #billModal.bill-preview-receipt .bill-preview-toolbar{position:sticky;top:0;z-index:4;display:flex;align-items:center;justify-content:space-between;min-height:58px;margin:0 -28px 16px;padding:9px 18px;border-bottom:1px solid #e7e9ec;background:rgba(255,255,255,.97)}
 #billModal.bill-preview-receipt .bill-header{padding:0 0 6px;text-align:center;border:0}
 #billModal.bill-preview-receipt .bill-header p{display:block!important}
-#billModal.bill-preview-receipt .bill-restaurant-logo{display:none!important}
+#billModal.bill-preview-receipt .bill-restaurant-logo{display:block!important;max-width:min(150px,60%);max-height:70px;margin:0 auto 9px;object-fit:contain}
 #billModal.bill-preview-receipt .bill-header h2{margin:0;color:#25272a;font-size:18px;font-weight:500;line-height:1.35}
 #billModal.bill-preview-receipt .bill-header p{margin:3px 0;color:#36393d;font-size:14px;line-height:1.42}
 #billModal.bill-preview-receipt .bill-header [hidden]{display:none!important}
@@ -3593,8 +3599,10 @@ body:has(#new-order.active-page) .billing-workspace{height:calc(100% - 60px)}
 /* Order detail toolbar, action menu, and group-aware KOT view. */
 .orders-detail-toolbar{display:flex;align-items:stretch;min-height:67px;border-bottom:1px solid #e8edf1;background:#fff}
 .orders-detail-toolbar[hidden]{display:none}
+.orders-detail-toolbar .orders-detail-tool[hidden]{display:none}
 .orders-detail-tool{position:relative;display:flex;flex:1;flex-direction:column;align-items:center;justify-content:center;gap:4px;min-width:0;border:0;border-right:1px solid #e8edf1;background:#fff;color:#52606a;cursor:pointer}
 .orders-detail-tool:hover,.orders-detail-tool.active{background:#f4f8ff;color:#2563c8}
+.orders-detail-tool:disabled{cursor:not-allowed;opacity:.48}
 .orders-detail-tool-icon{display:grid;place-items:center;min-height:26px;color:#18212a;font-size:24px;line-height:1}
 .orders-detail-tool small{color:#687580;font-size:9px;line-height:1.1}
 .orders-kot-grid-icon{display:grid;grid-template-columns:repeat(2,10px);grid-template-rows:repeat(2,10px);gap:3px}

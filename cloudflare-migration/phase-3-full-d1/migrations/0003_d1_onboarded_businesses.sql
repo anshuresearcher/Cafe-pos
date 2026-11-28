@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS d1_onboarded_businesses (
+  business_id INTEGER PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+);

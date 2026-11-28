@@ -1,5 +1,6 @@
-const { app, BrowserWindow, Menu, net, protocol, shell, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, net, Notification, protocol, shell, ipcMain } = require("electron");
 const fs = require("node:fs/promises");
+const { execFile } = require("node:child_process");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const printerBridge = require("./printer-bridge");
@@ -15,6 +16,13 @@ let apiServerUrl = DEFAULT_API_SERVER;
 let mainWindow = null;
 let settingsWindow = null;
 let activeBluetoothSelection = null;
+let activeHindiSpeechProcess = null;
+let receiptPrintWindow = null;
+let receiptPrintWindowReady = null;
+let receiptPrintQueue = Promise.resolve();
+let receiptPrinterCache = { expiresAt: 0, printers: [], pending: null };
+const recentOrderNotificationKeys = new Map();
+const activeOrderNotifications = new Set();
 
 function normalizeApiServer(value) {
     const raw = String(value || "").trim().replace(/\/+$/, "");
@@ -154,9 +162,12 @@ function createMainWindow() {
             nodeIntegration: false,
             contextIsolation: true,
             sandbox: true,
-            webSecurity: true
+            webSecurity: true,
+            // Keep the existing POS polling and WebAudio buzzer active while minimized.
+            backgroundThrottling: false
         }
     });
+    mainWindow.webContents.setAudioMuted(false);
     secureWindow(mainWindow);
     mainWindow.webContents.on("select-bluetooth-device", (event, devices, callback) => {
         handleBluetoothDeviceSelection(mainWindow, event, devices, callback);
@@ -169,17 +180,94 @@ function createMainWindow() {
     });
     mainWindow.on("maximize", sendMainWindowState);
     mainWindow.on("unmaximize", sendMainWindowState);
+    mainWindow.on("close", () => {
+        const closingWindow = mainWindow;
+        if (closingWindow && !closingWindow.isDestroyed()) {
+            finishBluetoothSelection(closingWindow.webContents, "");
+        }
+    });
     mainWindow.on("closed", () => {
-        if (mainWindow) finishBluetoothSelection(mainWindow.webContents, "");
         mainWindow = null;
     });
     mainWindow.loadURL("cafe-pos://app/index.html");
+    // Warm the silent print surface in the background so the first bill does
+    // not pay the cost of starting a renderer or loading the receipt page.
+    setImmediate(() => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        createReceiptPrintWindow(mainWindow).catch(error => console.warn("Could not warm the bill printer:", error.message));
+        mainWindow.webContents.getPrintersAsync().then(printers => {
+            receiptPrinterCache = { expiresAt: Date.now() + 300000, printers, pending: null };
+        }).catch(error => console.warn("Could not warm the Windows printer list:", error.message));
+    });
     return mainWindow;
 }
 
 function sendMainWindowState() {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send("desktop:window-state", { maximized: mainWindow.isMaximized() });
+}
+
+function focusMainWindowForOrder(order) {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    const deliver = () => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send("desktop:order-notification-clicked", order);
+    };
+    if (mainWindow.webContents.isLoading()) mainWindow.webContents.once("did-finish-load", deliver);
+    else deliver();
+}
+
+function notifyIncomingOrder(event, payload = {}) {
+    const window = requireMainWindow(event);
+    if (process.platform !== "win32" || !window.isMinimized()) return { success: true, shown: false };
+    if (!Notification.isSupported()) return { success: false, shown: false, error: "Windows notifications are unavailable." };
+
+    const orderId = Number(payload.orderId || payload.id);
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new Error("A valid order is required for this notification.");
+    const businessId = String(payload.businessId || "").replace(/[^0-9]/g, "").slice(0, 24);
+    const eventKey = String(payload.eventKey || `order:${orderId}`).replace(/[^A-Za-z0-9:_-]/g, "").slice(0, 100);
+    const dedupeKey = `${businessId}:${eventKey}`;
+    const now = Date.now();
+    for (const [key, expiresAt] of recentOrderNotificationKeys) {
+        if (expiresAt <= now) recentOrderNotificationKeys.delete(key);
+    }
+    if (recentOrderNotificationKeys.has(dedupeKey)) return { success: true, shown: false, duplicate: true };
+    const order = {
+        orderId,
+        businessId,
+        orderNumber: String(payload.orderNumber || "New order").slice(0, 100),
+        tableNumber: String(payload.tableNumber || "").slice(0, 60),
+        ticketNumber: Number(payload.ticketNumber) || null
+    };
+    const details = [order.orderNumber, order.tableNumber ? `Table ${order.tableNumber}` : "", String(payload.amount || "").slice(0, 40)].filter(Boolean);
+    const notification = new Notification({
+        title: payload.eventType === "qr-items-added" ? "New items added · Slash POS" : "New order · Slash POS",
+        body: details.join("  ·  ").slice(0, 240),
+        icon: path.join(__dirname, "assets", "cafe-pilot-icon.png"),
+        silent: true
+    });
+    let cleanupTimer = null;
+    const releaseNotification = () => {
+        activeOrderNotifications.delete(notification);
+        if (cleanupTimer) clearTimeout(cleanupTimer);
+    };
+    notification.once("click", () => {
+        releaseNotification();
+        focusMainWindowForOrder(order);
+    });
+    notification.once("close", releaseNotification);
+    notification.show();
+    activeOrderNotifications.add(notification);
+    cleanupTimer = setTimeout(releaseNotification, 10 * 60 * 1000);
+    cleanupTimer.unref?.();
+    recentOrderNotificationKeys.set(dedupeKey, now + 10 * 60 * 1000);
+    while (recentOrderNotificationKeys.size > 500) {
+        recentOrderNotificationKeys.delete(recentOrderNotificationKeys.keys().next().value);
+    }
+    return { success: true, shown: true };
 }
 
 function requireMainWindow(event) {
@@ -199,6 +287,49 @@ function finishBluetoothSelection(webContents, deviceId = "") {
     catch (error) { console.warn("Could not complete Bluetooth device selection:", error.message); }
     if (!webContents.isDestroyed()) webContents.send("desktop:bluetooth-selection-finished");
     return true;
+}
+
+function speakWindowsHindiAlert(event, text) {
+    requireMainWindow(event);
+    if (process.platform !== "win32") throw new Error("Windows Hindi voice is available only in the Windows app.");
+    const message = String(text || "").trim().slice(0, 280);
+    if (!message) throw new Error("The voice alert has no message.");
+    const messageBase64 = Buffer.from(message, "utf8").toString("base64");
+    const script = `
+$message = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${messageBase64}'))
+Add-Type -AssemblyName System.Speech
+$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+    $hindiVoices = @($synth.GetInstalledVoices() | Where-Object { $_.Enabled -and $_.VoiceInfo.Culture.Name -match '^hi(?:-|$)' })
+    if ($hindiVoices.Count -eq 0) { throw 'No Hindi speech voice is installed in Windows.' }
+    $voice = $hindiVoices | Where-Object { $_.VoiceInfo.Gender -eq [System.Speech.Synthesis.VoiceGender]::Male } | Select-Object -First 1
+    if (-not $voice) { $voice = $hindiVoices | Select-Object -First 1 }
+    $synth.SelectVoice($voice.VoiceInfo.Name)
+    $synth.Rate = -1
+    $synth.Volume = 100
+    $synth.Speak($message)
+} finally { $synth.Dispose() }
+`;
+    const encodedScript = Buffer.from(script, "utf16le").toString("base64");
+    return new Promise((resolve, reject) => {
+        const child = execFile("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encodedScript], {
+            windowsHide: true,
+            timeout: 45000,
+            maxBuffer: 1024 * 1024
+        }, error => {
+            if (activeHindiSpeechProcess === child) activeHindiSpeechProcess = null;
+            if (error) {
+                const details = `${error.stderr || ""} ${error.message || ""}`;
+                const message = /No Hindi speech voice is installed/i.test(details)
+                    ? "Install a Hindi speech voice in Windows Settings, then restart Slash POS."
+                    : "Windows could not play the Hindi voice alert.";
+                reject(new Error(message));
+                return;
+            }
+            resolve({ success: true });
+        });
+        activeHindiSpeechProcess = child;
+    });
 }
 
 function handleBluetoothDeviceSelection(window, event, deviceList, callback) {
@@ -234,6 +365,8 @@ function escapeHtml(value) {
 
 function makeInvoicePdfHtml(bill = {}, settings = {}, pageHeightMm = 220) {
     const currency = String(settings.currency || "₹").slice(0, 8);
+    const fontSize = Math.min(24, Math.max(8, Math.round(Number(settings.billPrintFontSize) || 10)));
+    const verticalScale = fontSize / 10;
     const amount = value => {
         const number = Number(value || 0);
         return escapeHtml(currency) + (Number.isFinite(number) ? number : 0).toFixed(2);
@@ -247,11 +380,14 @@ function makeInvoicePdfHtml(bill = {}, settings = {}, pageHeightMm = 220) {
         });
     }).filter(Boolean).join(", ") : "";
     const itemRows = items.map((item, index) => {
+        const itemName = settings.uppercaseItems ? String(item?.name || "-").toUpperCase() : (item?.name || "-");
         const quantity = Math.max(0, Number(item?.quantity || 0));
         const price = Number(item?.price || 0);
         const lineTotal = Number(item?.lineTotal) > 0 || price === 0 ? Number(item?.lineTotal || 0) : quantity * price;
         const options = optionText(item?.options);
-        return `<article class="item"><strong>${index + 1}. ${escapeHtml(item?.name || "-")}</strong><div class="item-sub"><span>${quantity} @ ${amount(price)}/${escapeHtml(item?.unit || "ea")}</span><b>${amount(lineTotal)}</b></div>${options ? `<small>${escapeHtml(options)}</small>` : ""}</article>`;
+        const itemDiscount = Number(item?.itemDiscountAmount ?? item?.item_discount_amount ?? 0);
+        const itemDiscountName = item?.itemDiscountName || item?.item_discount_name || "Item discount";
+        return `<article class="item"><strong>${index + 1}. ${escapeHtml(itemName)}</strong><div class="item-sub"><span>${quantity} @ ${amount(price)}/${escapeHtml(item?.unit || "ea")}</span><b>${amount(lineTotal)}</b></div>${itemDiscount > 0 ? `<small>${escapeHtml(itemDiscountName)} -${amount(itemDiscount)}</small>` : ""}${options ? `<small>${escapeHtml(options)}</small>` : ""}</article>`;
     }).join("");
     const taxBreakdown = Array.isArray(bill.taxBreakdown) ? bill.taxBreakdown : [];
     const rows = [
@@ -263,21 +399,37 @@ function makeInvoicePdfHtml(bill = {}, settings = {}, pageHeightMm = 220) {
         `<div class="rounded-total"><span>Bill Total (rounded)</span><b>${amount(bill.total)}</b></div>`
     ].filter(Boolean).join("");
     const allocations = Array.isArray(bill.paymentAllocations) ? bill.paymentAllocations : [];
-    const collected = bill.amountCollected === undefined ? allocations.reduce((sum, entry) => sum + Number(entry.amount || 0), 0) : Number(bill.amountCollected || 0);
-    const due = bill.amountDue === undefined ? Math.max(0, Number(bill.total || 0) - collected) : Number(bill.amountDue || 0);
+    const allocationTotal = allocations.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+    const collected = allocations.length ? allocationTotal : Number(bill.amountCollected ?? allocationTotal);
+    const due = /non.?chargeable/i.test(String(bill.paymentMethod || "")) ? 0 : Math.max(0, Math.round((Number(bill.total || 0) - collected) * 100) / 100);
     const payments = bill.isOpenOrder ? "" : `<section class="payments"><h2>Payment Summary</h2>${allocations.length ? allocations.map(entry => `<div><span>${escapeHtml(entry?.method || "Payment")}</span><b>${amount(entry?.amount)}</b></div>`).join("") : `<div><span>${escapeHtml(bill.paymentMethod || "Payment")}</span><b>${amount(collected)}</b></div>`}<div><span>Balance</span><b>${amount(due)}</b></div></section>`;
     const totalQty = items.reduce((sum, item) => sum + Math.max(0, Number(item?.quantity || 0)), 0);
     const invoiceLabel = bill.isOpenOrder ? bill.orderNumber : (bill.invoiceNumber || bill.orderNumber);
     const customerCode = bill.customerCode || (bill.customerId ? `#${bill.customerId}` : "");
+    const customerDetails = [];
+    if (settings.showCustomer !== false) {
+        if (bill.customerName && bill.customerName !== "Guest") customerDetails.push(bill.customerName);
+        if (bill.customerPhone && settings.showCustomerPhone !== false) customerDetails.push(bill.customerPhone);
+        if (bill.customerEmail) customerDetails.push(bill.customerEmail);
+        if (bill.customerGstin) customerDetails.push(`GSTIN: ${bill.customerGstin}`);
+        if (bill.customerBirthDate) customerDetails.push(`DOB: ${bill.customerBirthDate}`);
+        if (bill.customerAddress) customerDetails.push(bill.customerAddress);
+        if (bill.customerCity) customerDetails.push(bill.customerCity);
+        if (bill.customerState) customerDetails.push(bill.customerState);
+    }
+    const customerDetailsHtml = customerDetails.length ? `<div class="customer-details">${customerDetails.map(value => `<div>${escapeHtml(value)}</div>`).join("")}</div>` : "";
     const context = [bill.orderType, bill.tableNumber ? `Table ${bill.tableNumber}` : "", Number(bill.pax) > 0 ? `${Number(bill.pax)} PAX` : ""].filter(Boolean).join(" · ");
     const customHeader = String(settings.header || "").trim();
     const footerText = String(settings.footer || settings.customerMessage || "Visit Again!\nThank you.").replace("Thank You!\nVisit Again 😊", "Visit Again!\nThank you.").trim();
-    const details = [settings.address, settings.gstin ? `GST#: ${settings.gstin}` : "", settings.fssai ? `FSSAI#: ${settings.fssai}` : ""].filter(Boolean).map(value => `<div>${escapeHtml(value)}</div>`).join("");
+    const logoUrl = String(settings.businessLogoUrl || settings.logoUrl || "").trim();
+    const businessLogo = /^(https:\/\/|data:image\/(?:png|jpe?g|webp|gif);base64,)/i.test(logoUrl) ? `<img class="business-logo" style="display:block;max-width:40mm;max-height:24mm;object-fit:contain;margin:0 auto 4px" src="${escapeHtml(logoUrl)}" alt="">` : "";
+    const businessLines = [settings.address, settings.phone ? `Phone: ${settings.phone}` : "", customHeader && customHeader !== "Cafe Management System" ? customHeader : "", settings.gstin ? `GST#: ${settings.gstin}` : "", settings.fssai ? `FSSAI#: ${settings.fssai}` : ""].filter(Boolean);
+    const details = businessLines.map(value => `<div class="business-detail">${escapeHtml(value).replace(/\r?\n/g, "<br>")}</div>`).join("");
     const printDate = bill.date || new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
 
     return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(invoiceLabel || "Slash POS Invoice")}</title><style>
-@page{size:80mm ${Math.max(150, Number(pageHeightMm) || 220)}mm;margin:4mm}*{box-sizing:border-box}html,body{width:72mm;margin:0;background:#fff;color:#202124;font:10px/1.42 Arial,Helvetica,sans-serif}.receipt{width:72mm;margin:0 auto;padding:0}.business{text-align:center;padding:0 0 8px;border-bottom:1px solid #d8dadd}.business h1{margin:0;font-size:15px;font-weight:500}.legal{margin-top:1px;font-size:12px}.business div{margin-top:2px}.title{margin:7px 0;text-align:center;font-size:16px;font-weight:500}.token{text-align:left;margin:6px 0 14px}.guest{margin:8px 0}.guest strong,.guest small{display:block}.guest strong{font-size:12px;font-weight:400}.guest small{margin-top:2px;color:#666}.meta{display:flex;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #d8dadd;border-bottom:1px solid #d8dadd}.meta strong{font-weight:400}.meta span:last-child{text-align:right}.context{margin:4px 0;color:#50545a}.items{padding:3px 0 0}.item{padding:5px 0 6px;border-bottom:1px solid #dedfe1;break-inside:avoid}.item>strong{display:block;font-size:11px;font-weight:400}.item-sub{display:flex;justify-content:space-between;gap:8px;padding:3px 0 0;color:#777}.item-sub b{color:#202124;font-weight:400;white-space:nowrap}.item small{display:block;color:#666}.summary{padding:6px 0 0}.summary>div,.payments>div{display:flex;justify-content:space-between;gap:8px;padding:2px 0}.summary b,.payments b{font-weight:400;text-align:right;white-space:nowrap}.summary .bill-total{margin-top:3px}.summary .rounded-total{padding:5px 0;font-size:16px}.summary .rounded-total b{font-size:16px}.payments{margin-top:7px}.payments h2{margin:7px 0 2px;font-size:12px;font-weight:400}.payments>div{padding:1px 0}.footer{margin-top:13px;padding-top:2px;color:#82858a;text-align:center;white-space:pre-line}.rcm{text-align:center;color:#82858a;margin-top:13px}
-</style></head><body><main class="receipt"><header class="business"><h1>${escapeHtml(settings.restaurantName || "SLASH POS")}</h1>${settings.businessLegalName ? `<div class="legal">${escapeHtml(settings.businessLegalName)}</div>` : ""}${details}</header>${customHeader && customHeader !== "Cafe Management System" ? `<div class="footer">${escapeHtml(customHeader)}</div>` : ""}<div class="title">${bill.isOpenOrder ? "Order" : "Invoice"}</div>${bill.tokenNumber ? `<div class="token">Token No: ${escapeHtml(bill.tokenNumber)}</div>` : ""}<div class="guest"><strong>${escapeHtml(bill.customerName || "Guest")}</strong>${customerCode ? `<small>${escapeHtml(customerCode)}</small>` : ""}</div><div class="meta"><strong>${escapeHtml(`${bill.isOpenOrder ? "Order" : "Invoice"} ${invoiceLabel || "-"}`)}</strong><span>${items.length} ${items.length === 1 ? "item" : "items"} (${totalQty} Qty)</span></div><div class="meta"><span>${escapeHtml(printDate)}</span><span>${escapeHtml(bill.cashierName || "")}</span></div>${context ? `<div class="context">${escapeHtml(context)}</div>` : ""}<section class="items">${itemRows}</section><section class="summary">${rows}</section>${payments}<div class="rcm">RCM applicable: NO</div><footer class="footer">${escapeHtml(footerText)}</footer></main></body></html>`;
+@page{size:80mm ${Math.max(150, Number(pageHeightMm) || 220) * verticalScale}mm;margin:4mm}*{box-sizing:border-box}html,body{width:72mm;margin:0;background:#fff;color:#202124;font:10px/1.42 Arial,Helvetica,sans-serif;font-weight:700}.receipt{width:72mm;margin:0 auto;padding:0;transform:scaleY(${verticalScale});transform-origin:top center}.business{text-align:center;padding:0 0 8px;border-bottom:1px solid #d8dadd}.business h1{margin:0;font-size:15px;font-weight:700}.legal{margin-top:1px;font-size:12px}.business div{margin-top:2px}.title{margin:7px 0;text-align:center;font-size:16px;font-weight:700}.token{text-align:left;margin:6px 0 14px}.guest{margin:8px 0}.guest strong,.guest small{display:block}.guest strong{font-size:12px;font-weight:700}.guest small{margin-top:2px;color:#666}.meta{display:flex;justify-content:space-between;gap:6px;padding:6px 0;border-top:1px solid #d8dadd;border-bottom:1px solid #d8dadd}.meta strong{font-weight:700}.meta span:last-child{text-align:right}.context{margin:4px 0;color:#50545a}.items{padding:3px 0 0}.item{padding:5px 0 6px;border-bottom:1px solid #dedfe1;break-inside:avoid}.item>strong{display:block;font-size:11px;font-weight:700}.item-sub{display:flex;justify-content:space-between;gap:8px;padding:3px 0 0;color:#777;font-weight:700}.item-sub b{color:#202124;font-weight:700;white-space:nowrap}.item small{display:block;color:#666;font-weight:700}.summary{padding:6px 0 0}.summary>div,.payments>div{display:flex;justify-content:space-between;gap:8px;padding:2px 0}.summary b,.payments b{font-weight:700;text-align:right;white-space:nowrap}.summary .bill-total{margin-top:3px}.summary .rounded-total{padding:5px 0;font-size:16px}.summary .rounded-total b{font-size:16px}.payments{margin-top:7px}.payments h2{margin:7px 0 2px;font-size:12px;font-weight:700}.payments>div{padding:1px 0}.footer{margin-top:13px;padding-top:2px;color:#82858a;text-align:center;white-space:pre-line;font-weight:700}
+</style></head><body><main class="receipt"><header class="business">${businessLogo}<h1>${escapeHtml(settings.restaurantName || "SLASH POS")}</h1>${settings.businessLegalName ? `<div class="legal">${escapeHtml(settings.businessLegalName)}</div>` : ""}${details}</header><div class="title">${bill.isOpenOrder ? "Order" : "Invoice"}</div>${bill.tokenNumber ? `<div class="token">Token No: ${escapeHtml(bill.tokenNumber)}</div>` : ""}<div class="guest"><strong>${escapeHtml(bill.customerName || "Guest")}</strong>${customerCode ? `<small>${escapeHtml(customerCode)}</small>` : ""}${customerDetailsHtml}</div><div class="meta"><strong>${escapeHtml(`${bill.isOpenOrder ? "Order" : "Invoice"} ${invoiceLabel || "-"}`)}</strong><span>${items.length} ${items.length === 1 ? "item" : "items"} (${totalQty} Qty)</span></div><div class="meta"><span>${escapeHtml(printDate)}</span><span>${escapeHtml(bill.cashierName || "")}</span></div>${context ? `<div class="context">${escapeHtml(context)}</div>` : ""}<section class="items">${itemRows}</section><section class="summary">${rows}</section>${payments}<footer class="footer">${escapeHtml(footerText)}</footer></main></body></html>`;
 }
 
 async function saveReceiptPdf(event, payload = {}) {
@@ -310,7 +462,8 @@ async function saveReceiptPdf(event, payload = {}) {
     pdfWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
     try {
         const items = Array.isArray(bill.items) ? bill.items : [];
-        const approximateHeight = Math.min(1000, Math.max(170, 132 + items.reduce((sum, item) => sum + 15 + Math.ceil(String(item?.name || "").length / 34) * 4, 0) + (Array.isArray(bill.taxBreakdown) ? bill.taxBreakdown.length * 5 : 0)));
+        const printScale = Math.min(2.4, Math.max(0.8, Number(payload.settings?.billPrintFontSize || 10) / 10));
+        const approximateHeight = Math.min(1000, Math.max(170, (132 + items.reduce((sum, item) => sum + 15 + Math.ceil(String(item?.name || "").length / 34) * 4, 0) + (Array.isArray(bill.taxBreakdown) ? bill.taxBreakdown.length * 5 : 0)) * printScale));
         const html = kind === "test"
             ? `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(fileName)}</title><style>@page{size:A4;margin:14mm}body{font:13px Arial,Helvetica,sans-serif;color:#222}main{max-width:548px;margin:0 auto;border:1px solid #e5e7eb;padding:24px}h1{font-size:20px;font-weight:400}pre{font:13px/1.5 Consolas,"Courier New",monospace;white-space:pre-wrap}</style></head><body><main><h1>Slash POS Printer Test</h1><pre>${escapeHtml(receipt)}</pre></main></body></html>`
             : makeInvoicePdfHtml(bill, payload.settings || {}, approximateHeight);
@@ -328,6 +481,155 @@ async function saveReceiptPdf(event, payload = {}) {
     } finally {
         if (!pdfWindow.isDestroyed()) pdfWindow.close();
     }
+}
+
+function createReceiptPrintWindow(ownerWindow) {
+    if (receiptPrintWindow && !receiptPrintWindow.isDestroyed()) {
+        return receiptPrintWindowReady || Promise.resolve(receiptPrintWindow);
+    }
+
+    const printWindow = new BrowserWindow({
+        width: 480,
+        height: 800,
+        show: false,
+        skipTaskbar: true,
+        parent: ownerWindow,
+        backgroundColor: "#ffffff",
+        autoHideMenuBar: true,
+        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true }
+    });
+    receiptPrintWindow = printWindow;
+    printWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    printWindow.on("closed", () => {
+        if (receiptPrintWindow === printWindow) {
+            receiptPrintWindow = null;
+            receiptPrintWindowReady = null;
+        }
+    });
+
+    const shellHtml = `<!doctype html><html><head><meta charset="utf-8"><title>Slash POS receipt</title><style>
+@page{margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;background:#fff;color:#000}body{width:var(--paper-width,76mm);max-width:100%;margin:0 auto;padding:2mm 1mm;font:10px/1.35 Consolas,"Nirmala UI","Courier New",monospace;font-weight:var(--receipt-font-weight,400)}pre{margin:0;white-space:normal;overflow-wrap:anywhere;font:inherit;font-weight:inherit}.receipt-line{display:block;position:relative;overflow:visible;white-space:pre}.receipt-line-text{position:absolute;left:0;top:0;display:block;white-space:pre;line-height:13.5px;transform-origin:left top}
+</style></head><body><pre id="receipt"></pre></body></html>`;
+    receiptPrintWindowReady = printWindow.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(shellHtml))
+        .then(() => printWindow)
+        .catch(error => {
+            if (receiptPrintWindow === printWindow) {
+                receiptPrintWindow = null;
+                receiptPrintWindowReady = null;
+            }
+            if (!printWindow.isDestroyed()) printWindow.close();
+            throw error;
+        });
+    return receiptPrintWindowReady;
+}
+
+async function getReceiptPrinter(ownerWindow, printerName) {
+    const now = Date.now();
+    let printers = receiptPrinterCache.printers;
+    if (!printers.length || now >= receiptPrinterCache.expiresAt) {
+        if (!receiptPrinterCache.pending) {
+            receiptPrinterCache.pending = ownerWindow.webContents.getPrintersAsync()
+                .then(result => {
+                    receiptPrinterCache = { expiresAt: Date.now() + 300000, printers: result, pending: null };
+                    return result;
+                })
+                .catch(error => {
+                    receiptPrinterCache.pending = null;
+                    throw error;
+                });
+        }
+        printers = await receiptPrinterCache.pending;
+    }
+
+    const normalizedName = printerName.toLocaleLowerCase();
+    let printer = printers.find(item => String(item.name || "").trim().toLocaleLowerCase() === normalizedName)
+        || printers.find(item => String(item.displayName || "").trim().toLocaleLowerCase() === normalizedName);
+    if (!printer) {
+        // Refresh immediately if a printer was renamed, removed, or installed recently.
+        receiptPrinterCache.expiresAt = 0;
+        const refreshed = await ownerWindow.webContents.getPrintersAsync();
+        receiptPrinterCache = { expiresAt: Date.now() + 300000, printers: refreshed, pending: null };
+        printer = refreshed.find(item => String(item.name || "").trim().toLocaleLowerCase() === normalizedName)
+            || refreshed.find(item => String(item.displayName || "").trim().toLocaleLowerCase() === normalizedName);
+    }
+    return printer || null;
+}
+
+async function performReceiptPrint(ownerWindow, payload = {}) {
+    if (process.platform !== "win32") throw new Error("Direct printer output is available in the Windows app only.");
+
+    const printerName = String(payload.printerName || "").trim();
+    const receipt = String(payload.receipt || "");
+    if (!printerName) throw new Error("Choose an installed Windows printer first.");
+    if (!receipt.trim()) throw new Error("There is no receipt content to print.");
+    if (receipt.length > 100000) throw new Error("The print job is too large.");
+
+    const printer = await getReceiptPrinter(ownerWindow, printerName);
+    if (!printer) {
+        throw new Error(`Windows does not currently expose “${printerName}” to Slash POS. Refresh the printer list and select the installed printer again.`);
+    }
+
+    const paperWidth = String(payload.paperWidth || "80") === "58" ? "54mm" : "76mm";
+    const printWindow = await createReceiptPrintWindow(ownerWindow);
+    if (printWindow.isDestroyed()) throw new Error("The bill print window closed before the job could start.");
+    await printWindow.webContents.executeJavaScript(`(() => {
+        const receiptText = ${JSON.stringify(receipt)};
+        const verticalScale = ${JSON.stringify(Math.min(2.4, Math.max(0.8, Number(payload.fontSize || 10) / 10)))};
+        document.documentElement.style.setProperty("--paper-width", ${JSON.stringify(paperWidth)});
+        document.documentElement.style.setProperty("--receipt-font-weight", ${JSON.stringify(payload.bold === false ? "400" : "700")});
+        const pre = document.getElementById("receipt");
+        pre.replaceChildren();
+        for (const line of receiptText.split("\\n")) {
+            const row = document.createElement("span");
+            row.className = "receipt-line";
+            row.style.height = (13.5 * verticalScale) + "px";
+            const text = document.createElement("span");
+            text.className = "receipt-line-text";
+            text.style.transform = "scaleY(" + verticalScale + ")";
+            text.textContent = line;
+            row.appendChild(text);
+            pre.appendChild(row);
+        }
+        return true;
+    })()`);
+
+    const copies = Math.min(20, Math.max(1, Math.floor(Number(payload.copies) || 1)));
+    const result = await new Promise(resolve => {
+        let finished = false;
+        const finish = value => {
+            if (finished) return;
+            finished = true;
+            clearTimeout(timeout);
+            resolve(value);
+        };
+        const timeout = setTimeout(() => finish({ success: false, failureReason: "The printer did not respond within 60 seconds." }), 60000);
+        try {
+            printWindow.webContents.print({
+                silent: true,
+                printBackground: false,
+                deviceName: printer.name,
+                usePrinterDefaultPageSize: true,
+                margins: { marginType: "none" },
+                copies
+            }, (success, failureReason) => finish({ success, failureReason }));
+        } catch (error) {
+            finish({ success: false, failureReason: error.message || "Electron could not start the print job." });
+        }
+    });
+    if (!result.success) {
+        const reason = String(result.failureReason || "Print job failed");
+        if (/invalid printer settings/i.test(reason)) throw new Error(`Windows rejected the settings for “${printer.name}”. Confirm the printer is online and its paper size is configured.`);
+        if (/cancel/i.test(reason)) throw new Error("The print job was cancelled by Windows.");
+        throw new Error(`Windows could not send the print job to “${printer.name}”: ${reason}`);
+    }
+    return { success: true, printerName: printer.name, copies };
+}
+
+function printReceiptSilently(event, payload = {}) {
+    const ownerWindow = requireMainWindow(event);
+    const job = receiptPrintQueue.then(() => performReceiptPrint(ownerWindow, payload));
+    receiptPrintQueue = job.catch(() => {});
+    return job;
 }
 
 function openServerSettings() {
@@ -395,6 +697,13 @@ ipcMain.handle("desktop:window-toggle-maximize", event => {
     else window.maximize();
 });
 ipcMain.handle("desktop:window-close", event => requireMainWindow(event).close());
+ipcMain.handle("desktop:notify-incoming-order", (event, payload) => {
+    try { return notifyIncomingOrder(event, payload); }
+    catch (error) {
+        console.warn("Could not show Windows order notification:", error.message);
+        return { success: false, shown: false, error: error.message || "Could not show the Windows notification." };
+    }
+});
 ipcMain.handle("desktop:open-server-settings", event => {
     requireMainWindow(event);
     openServerSettings();
@@ -404,6 +713,27 @@ ipcMain.handle("desktop:save-receipt-pdf", async (event, payload) => {
     catch (error) {
         console.error("Could not save Slash POS invoice PDF:", error.message);
         return { success: false, error: error.message || "Could not save the invoice PDF." };
+    }
+});
+ipcMain.handle("desktop:print-receipt", async (event, payload) => {
+    try { return await printReceiptSilently(event, payload); }
+    catch (error) {
+        console.warn("Windows printer job failed:", error.message);
+        return { success: false, error: error.message || "Windows could not send the print job." };
+    }
+});
+ipcMain.handle("desktop:speak-hindi-alert", async (event, text) => {
+    try { return await speakWindowsHindiAlert(event, text); }
+    catch (error) {
+        console.warn("Windows Hindi table-service voice failed:", error.message);
+        return { success: false, error: error.message || "Could not play the Hindi voice alert." };
+    }
+});
+ipcMain.on("desktop:cancel-hindi-alert", event => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return;
+    if (activeHindiSpeechProcess) {
+        activeHindiSpeechProcess.kill();
+        activeHindiSpeechProcess = null;
     }
 });
 ipcMain.on("desktop:bluetooth-select-device", (event, deviceId) => {
@@ -416,7 +746,10 @@ ipcMain.on("desktop:bluetooth-cancel-selection", event => {
 });
 
 app.whenReady().then(async () => {
-    if (process.platform === "win32") app.setAppUserModelId("com.cafepilot.pos");
+    if (process.platform === "win32") {
+        app.setAppUserModelId("com.cafepilot.pos");
+        app.setToastActivatorCLSID("{86A39E7B-E08A-4C7A-87FA-762CBF1C1C01}");
+    }
     await readUserSettings();
     await registerAppProtocol();
     installMenu();
@@ -429,7 +762,14 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", () => {
-    if (mainWindow) finishBluetoothSelection(mainWindow.webContents, "");
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        finishBluetoothSelection(mainWindow.webContents, "");
+    }
+    if (activeHindiSpeechProcess) {
+        activeHindiSpeechProcess.kill();
+        activeHindiSpeechProcess = null;
+    }
+    if (receiptPrintWindow && !receiptPrintWindow.isDestroyed()) receiptPrintWindow.close();
     printerBridge.stop();
 });
 app.on("window-all-closed", () => {

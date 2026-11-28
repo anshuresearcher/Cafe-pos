@@ -1,5 +1,26 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+const orderNotificationListeners = new Set();
+let queuedOrderNotification = null;
+ipcRenderer.on("desktop:order-notification-clicked", (_event, payload) => {
+    if (!orderNotificationListeners.size) {
+        queuedOrderNotification = payload;
+        return;
+    }
+    for (const listener of orderNotificationListeners) listener(payload);
+});
+
+function onOrderNotificationClick(callback) {
+    if (typeof callback !== "function") return () => {};
+    orderNotificationListeners.add(callback);
+    if (queuedOrderNotification) {
+        const payload = queuedOrderNotification;
+        queuedOrderNotification = null;
+        callback(payload);
+    }
+    return () => orderNotificationListeners.delete(callback);
+}
+
 contextBridge.exposeInMainWorld("cafePOSDesktop", Object.freeze({
     getApiBase: () => ipcRenderer.invoke("desktop:get-api-base"),
     saveApiBase: value => ipcRenderer.invoke("desktop:set-api-base", String(value || "")),
@@ -9,6 +30,11 @@ contextBridge.exposeInMainWorld("cafePOSDesktop", Object.freeze({
     closeWindow: () => ipcRenderer.invoke("desktop:window-close"),
     openServerSettings: () => ipcRenderer.invoke("desktop:open-server-settings"),
     saveReceiptPdf: payload => ipcRenderer.invoke("desktop:save-receipt-pdf", payload),
+    printReceipt: payload => ipcRenderer.invoke("desktop:print-receipt", payload),
+    notifyIncomingOrder: payload => ipcRenderer.invoke("desktop:notify-incoming-order", payload),
+    onOrderNotificationClick,
+    speakHindiAlert: text => ipcRenderer.invoke("desktop:speak-hindi-alert", String(text || "")),
+    cancelHindiAlert: () => ipcRenderer.send("desktop:cancel-hindi-alert"),
     selectBluetoothDevice: deviceId => ipcRenderer.send("desktop:bluetooth-select-device", String(deviceId || "")),
     cancelBluetoothSelection: () => ipcRenderer.send("desktop:bluetooth-cancel-selection"),
     onBluetoothDevices: callback => {

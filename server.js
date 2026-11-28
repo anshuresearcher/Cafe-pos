@@ -372,7 +372,7 @@ function hashSessionToken(token) {
     return crypto.createHash("sha256").update(String(token || "")).digest("hex");
 }
 
-function createD1StagingBridgeToken(userId, businessId, scope) {
+function createD1StagingBridgeToken(userId, businessId, scope, deviceId = null) {
     const secret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
     if (secret.length < 32) throw new Error("D1 staging bridge is not configured");
     const issuedAt = Math.floor(Date.now() / 1000);
@@ -384,12 +384,57 @@ function createD1StagingBridgeToken(userId, businessId, scope) {
         sub: Number(userId),
         business_id: Number(businessId),
         scope: String(scope),
+        device_id: String(deviceId || "").trim().slice(0, 128) || null,
         iat: issuedAt,
         exp: issuedAt + 90
     });
     const content = `${header}.${payload}`;
     const signature = crypto.createHmac("sha256", secret).update(content).digest("base64url");
     return `${content}.${signature}`;
+}
+
+const D1_STAGING_AUTH_SCOPES = new Set([
+    "auth.device.read", "auth.users.read", "auth.login.read", "auth.login.write",
+    "auth.session.read", "auth.session.write", "auth.device.register",
+    "auth.support.view", "auth.support.business.write", "auth.support.user.write",
+    "auth.support.license.write", "auth.support.device.write", "auth.support.key.write",
+    "auth.support.login", "auth.public.registration", "auth.public.device.read", "auth.public.device.register",
+    "auth.public.session.read", "auth.public.session.write", "auth.public.business.read"
+]);
+
+const d1OnboardedBusinessIds = new Set();
+
+function createD1StagingAuthServiceToken(businessId, scope) {
+    const secret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    const id = Number(businessId);
+    if (secret.length < 32 || !Number.isSafeInteger(id) || id <= 0 || !D1_STAGING_AUTH_SCOPES.has(String(scope))) {
+        throw new Error("D1 staging authentication bridge is not configured");
+    }
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const header = encode({ alg: "HS256", typ: "JWT" });
+    const payload = encode({
+        iss: "slash-pos-api", aud: "slash-pos-d1-staging", sub: 0,
+        business_id: id, scope: String(scope), device_id: null,
+        iat: issuedAt, exp: issuedAt + 60
+    });
+    const content = `${header}.${payload}`;
+    const signature = crypto.createHmac("sha256", secret).update(content).digest("base64url");
+    return `${content}.${signature}`;
+}
+
+function createD1StagingPublicAuthServiceToken(scope) {
+    const secret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    const safeScope = String(scope || "");
+    if (secret.length < 32 || !D1_STAGING_AUTH_SCOPES.has(safeScope) || !safeScope.startsWith("auth.public.")) {
+        throw new Error("D1 public onboarding bridge is not configured");
+    }
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const encode = value => Buffer.from(JSON.stringify(value)).toString("base64url");
+    const header = encode({ alg: "HS256", typ: "JWT" });
+    const payload = encode({ iss: "slash-pos-api", aud: "slash-pos-d1-staging", sub: 0, business_id: 0, scope: safeScope, device_id: null, iat: issuedAt, exp: issuedAt + 60 });
+    const content = `${header}.${payload}`;
+    return `${content}.${crypto.createHmac("sha256", secret).update(content).digest("base64url")}`;
 }
 
 async function ensureSessionTable() {
@@ -751,6 +796,20 @@ async function getSessionUser(req) {
     if (!token) token = getCookie(req, "cafe_session") || "";
     if (!token) return null;
 
+    if (token.startsWith("d1stg_")) {
+        const result = await findD1StagingSession(token);
+        if (result.status === 401 || result.status === 404) return null;
+        if (result.status < 200 || result.status >= 300) {
+            throw Object.assign(new Error(result.body?.error || "D1 session verification is unavailable"), { status: result.status });
+        }
+        const session = result.body;
+        return {
+            token, userId: Number(session.user_id), businessId: Number(session.business_id),
+            deviceId: session.device_id, expiresAt: new Date(session.expires_at).getTime(),
+            d1Staging: true, user: session.user, device: session.device, license: session.license
+        };
+    }
+
     const result = await pool.query(
         `
         SELECT token, user_id, business_id, device_id, expires_at
@@ -763,6 +822,11 @@ async function getSessionUser(req) {
 
     const session = result.rows[0];
     if (!session) return null;
+
+    if (d1StagingBusinessIdAllowed(session.business_id)) {
+        await pool.query(`DELETE FROM app_sessions WHERE token_hash = $1`, [hashSessionToken(token)]);
+        return null;
+    }
 
     const expiresAt = new Date(session.expires_at).getTime();
     if (expiresAt < Date.now()) {
@@ -780,6 +844,7 @@ async function getSessionUser(req) {
 }
 
 async function loadSessionUser(session) {
+    if (session?.d1Staging) return session.user || null;
     const businessId = Number(session.businessId || 0);
     if (!businessId) return null;
 
@@ -947,6 +1012,9 @@ function permissionForRequest(req) {
     if (path.startsWith('/auth/')) return null;
     if (path === '/d1-staging/menu' || path === '/d1-staging/menu/categories') return 'menu.view';
     if (path === '/d1-staging/business') return 'settings.view';
+    if (path === '/d1-staging/orders' && method === 'POST') return 'new_order.create';
+    if (/^\/d1-staging\/orders\/\d+\/settle$/.test(path) && method === 'POST') return 'payments.create';
+    if (path.startsWith('/d1-staging/orders')) return method === 'GET' ? 'orders.view' : null;
     if (path === '/dashboard/stats') return 'dashboard.view';
     if (path === '/reports/advanced') return req.query?.export === '1' ? 'advanced_reports.export' : 'advanced_reports.view';
     if (path === '/reports/order-categories') return req.query?.export === '1' ? 'reports.export' : 'reports.view';
@@ -1022,7 +1090,7 @@ function permissionForRequest(req) {
 }
 
 async function featurePermissionsForRequest(req) {
-    const path = String(req.path || "").replace(/^\/api(?=\/)/, "");
+    const path = String(req.path || "").replace(/^\/api(?=\/)/, "").replace(/^\/d1-staging(?=\/)/, "");
     const method = String(req.method || "GET").toUpperCase();
     const body = req.body && typeof req.body === "object" ? req.body : {};
     const required = [];
@@ -1107,12 +1175,39 @@ async function requireAuth(req, res, next) {
         const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : (getCookie(req, "cafe_session") || "");
         if (!token) return res.status(401).json({ error: "Authentication required" });
 
+        let row;
+        if (token.startsWith("d1stg_")) {
+            const staging = await findD1StagingSession(token);
+            if (staging.status === 401 || staging.status === 404) return res.status(401).json({ error: "Authentication required" });
+            if (staging.status < 200 || staging.status >= 300) {
+                const status = [400, 403].includes(staging.status) ? staging.status : 503;
+                return res.status(status).json({ error: staging.body?.error || "D1 session verification is unavailable", code: staging.body?.code || "D1_AUTH_UNAVAILABLE" });
+            }
+            const session = staging.body || {};
+            const signedInUser = session.user || {};
+            row = {
+                token: session.token_hash, user_id: session.user_id, business_id: session.business_id,
+                device_id: session.device_id, expires_at: session.expires_at,
+                id: signedInUser.id, display_name: signedInUser.display_name, username: signedInUser.username,
+                profile_id: signedInUser.profile_id, user_business_id: signedInUser.business_id,
+                active: signedInUser.active, is_blocked: signedInUser.is_blocked,
+                permissions_override: signedInUser.permissions_override, is_owner: signedInUser.is_owner,
+                business_name: signedInUser.business_name, business_type: signedInUser.business_type,
+                owner_name: signedInUser.owner_name, business_phone: signedInUser.business_phone,
+                business_email: signedInUser.business_email, business_address: signedInUser.business_address,
+                city: signedInUser.city, state: signedInUser.state, gstin: signedInUser.gstin,
+                currency: signedInUser.currency, business_active: signedInUser.business_active,
+                profile_name: signedInUser.profile_name, permissions: signedInUser.permissions,
+                device_data: session.device, license_data: session.license
+            };
+        } else {
         // Resolve authentication context in one indexed query instead of three serial lookups.
         const result = await runSystemContext(() => pool.query(`
             WITH device_activity AS (
                 UPDATE registered_devices
                 SET last_seen_at=CURRENT_TIMESTAMP
                 WHERE device_id=(SELECT device_id FROM app_sessions WHERE token_hash=$1 AND expires_at>CURRENT_TIMESTAMP LIMIT 1)
+                  AND business_id <> ALL($2::integer[])
                   AND (last_seen_at IS NULL OR last_seen_at < CURRENT_TIMESTAMP - INTERVAL '1 minute')
                 RETURNING id
             )
@@ -1133,8 +1228,13 @@ async function requireAuth(req, res, next) {
             CROSS JOIN (SELECT COUNT(*) FROM device_activity) activity_touch
             WHERE s.token_hash=$1
             LIMIT 1
-        `, [hashSessionToken(token)]));
-        const row = result.rows[0];
+        `, [hashSessionToken(token), d1StagingAuthBusinessIds()]));
+        row = result.rows[0];
+        if (row && d1StagingBusinessIdAllowed(row.user_business_id)) {
+            await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token_hash=$1", [hashSessionToken(token)]));
+            return res.status(401).json({ error: "This business now signs in through D1 staging. Please sign in again." });
+        }
+        }
         if (!row || new Date(row.expires_at).getTime() < Date.now()) {
             if (row) await runSystemContext(() => pool.query("DELETE FROM app_sessions WHERE token_hash=$1", [hashSessionToken(token)]));
             return res.status(401).json({ error: "Authentication required" });
@@ -1679,6 +1779,48 @@ app.get("/register-business", (_, res) => res.redirect("/?view=register-business
 // =====================================================
 app.post('/api/public/register-business', async (req, res) => {
     if (process.env.PUBLIC_BUSINESS_REGISTRATION_ENABLED !== 'true') return res.status(404).json({ error: 'Public business registration is disabled' });
+    if (process.env.D1_STAGING_REGISTRATION_ENABLED === 'true') {
+        try {
+            if (!d1StagingPublicEnabled()) return res.status(503).json({ error: 'D1 business registration is not enabled on this server.' });
+            const b = cleanBusinessPayload(req.body);
+            const username = String(req.body.username || '').trim().toLowerCase();
+            const password = String(req.body.password || '');
+            if (!b.businessName || !b.ownerName || !username || !password) return res.status(400).json({ error: 'Business name, owner name, username and password are required' });
+            if (password.length < 6 || password.length > 1024) return res.status(400).json({ error: 'Password must be between 6 and 1024 characters' });
+            if (!/^[a-z0-9._-]{3,100}$/.test(username)) return res.status(400).json({ error: 'Username may contain only letters, numbers, dot, underscore and hyphen' });
+            if (b.logoUrl) return res.status(400).json({ error: 'Upload the café logo after the business profile is created.' });
+            const rawKey = generateRegistrationKey();
+            const keyExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
+            const slashOpsPassword = String(process.env.INITIAL_SLASH_OPS_PASSWORD || '1222');
+            const maxDevices = Math.max(1, Number(process.env.AUTO_TRIAL_MAX_DEVICES || 1));
+            const result = await fetchD1StagingPublicAuth('register-business', 'auth.public.registration', {
+                method: 'POST',
+                body: {
+                    business: b,
+                    businessCode: makeBusinessCode(b.businessName),
+                    username,
+                    ownerPasswordHash: await hashPassword(password),
+                    slashOpsPasswordHash: await hashPassword(slashOpsPassword),
+                    profiles: builtInProfileDefinitions(),
+                    keyHash: hashRegistrationKey(rawKey),
+                    keyHint: `${rawKey.slice(0, 4)}…${rawKey.slice(-4)}`,
+                    keyExpiresAt: keyExpiresAt.toISOString(),
+                    deviceName: 'Initial Device',
+                    maxDevices,
+                }
+            });
+            if (result.status < 200 || result.status >= 300 || !result.body?.success || !result.body?.business?.id) {
+                const status = [400, 409, 413, 429].includes(result.status) ? result.status : result.status >= 500 ? 503 : 502;
+                return res.status(status).json({ error: String(result.body?.error || 'Could not create business profile in D1') });
+            }
+            const businessId = Number(result.body.business.id);
+            d1OnboardedBusinessIds.add(businessId);
+            return res.status(201).json({ ...result.body, initialRegistrationKey: rawKey });
+        } catch (error) {
+            console.error('D1 business registration error:', error?.name || 'Error');
+            return res.status(error?.status || 503).json({ error: 'Could not create business profile in D1. The existing database was not changed.' });
+        }
+    }
     try {
         return await runSystemContext(async () => {
             const client = await pool.connect();
@@ -1755,14 +1897,25 @@ app.get('/api/public/device-business', async (req,res)=>{
     try {
         const deviceId=getCookie(req,'cafe_device_id');
         if(!deviceId) return res.json({businessName:''});
+        if (d1StagingPublicEnabled()) {
+            const stagingDevice = await findD1StagingDevice(deviceId);
+            if (stagingDevice.status >= 200 && stagingDevice.status < 300) {
+                const { device, business } = stagingDevice.body || {};
+                return res.json({ businessName: device?.status === 'active' && Number(business?.active) === 1 ? String(business?.business_name || '') : '' });
+            }
+            if (stagingDevice.status !== 404) return res.status(502).json({ error: 'D1 staging device lookup is unavailable' });
+        }
         const result=await runSystemContext(()=>pool.query(`
-            SELECT b.business_name AS "businessName"
+            SELECT b.business_name AS "businessName", b.id AS business_id
             FROM registered_devices d
             JOIN businesses b ON b.id=d.business_id
             WHERE d.device_id=$1 AND d.status='active' AND b.active=TRUE
             LIMIT 1
         `,[deviceId]));
-        res.json(result.rows[0]||{businessName:''});
+        if (result.rows[0] && d1StagingBusinessIdAllowed(result.rows[0].business_id)) {
+            return res.status(503).json({ error: 'This pilot device is not present in D1 staging yet.' });
+        }
+        res.json(result.rows[0] ? { businessName: result.rows[0].businessName } : { businessName: '' });
     } catch(e) {
         console.error('Device business lookup error:',e);
         res.status(500).json({error:'Could not load business name'});
@@ -1772,6 +1925,17 @@ app.get('/api/public/device-users', async (req,res)=>{
     try {
         const deviceId=getCookie(req,'cafe_device_id');
         if(!deviceId) return res.status(403).json({error:'This device is not registered'});
+        if (d1StagingPublicEnabled()) {
+            const stagingDevice = await findD1StagingDevice(deviceId);
+            if (stagingDevice.status >= 200 && stagingDevice.status < 300) {
+                const { device, business } = stagingDevice.body || {};
+                if (device?.status !== 'active' || Number(business?.active) !== 1) return res.status(403).json({ error: 'This device is not registered' });
+                const users = await fetchD1StagingAuth(stagingDevice.businessId, 'users', 'auth.users.read', { query: { device_id: deviceId } });
+                if (users.status < 200 || users.status >= 300) return res.status(users.status >= 500 ? 502 : users.status).json(users.body || { error: 'Could not load business users' });
+                return res.json(users.body || { users: [] });
+            }
+            if (stagingDevice.status !== 404) return res.status(502).json({ error: 'D1 staging device lookup is unavailable' });
+        }
         const result=await runSystemContext(()=>pool.query(`
             SELECT u.display_name AS "displayName",u.username,p.name AS "profileName",u.is_blocked AS "isBlocked"
             FROM registered_devices d
@@ -1781,6 +1945,8 @@ app.get('/api/public/device-users', async (req,res)=>{
             WHERE d.device_id=$1 AND d.status='active'
             ORDER BY u.is_owner DESC,LOWER(u.display_name),LOWER(u.username)
         `,[deviceId]));
+        const registered = await getRegisteredDevice(deviceId);
+        if (registered && d1StagingBusinessIdAllowed(registered.business_id)) return res.status(503).json({ error: 'This pilot device is not present in D1 staging yet.' });
         res.json({users:result.rows});
     } catch(e) {
         console.error('Device business users lookup error:',e);
@@ -1801,6 +1967,57 @@ app.post("/api/auth/login", async (req,res)=>{
             return res.status(403).json({ error: "This device is not registered. Enter a registration key first.", code: "DEVICE_NOT_REGISTERED" });
         }
 
+        if (d1StagingPublicEnabled()) {
+            const stagingDevice = await findD1StagingDevice(deviceId);
+            if (stagingDevice.status >= 200 && stagingDevice.status < 300) {
+                const { device, business, license } = stagingDevice.body || {};
+                if (device?.status !== 'active') return res.status(403).json({ error: 'Device registration has been revoked', code: 'DEVICE_REVOKED' });
+                if (Number(business?.active) !== 1) return res.status(403).json({ error: 'Business account is inactive', code: 'BUSINESS_INACTIVE' });
+                if (!license) return res.status(403).json({ error: 'No license is assigned to this business', code: 'LICENSE_MISSING' });
+                const startsAt = Date.parse(license.starts_at);
+                const expiresAt = Date.parse(license.expires_at);
+                if (license.status !== 'active') return res.status(403).json({ error: `Business license is ${license.status}`, code: 'LICENSE_INACTIVE' });
+                if (!Number.isFinite(startsAt) || startsAt > Date.now()) return res.status(403).json({ error: 'Business license has not started yet', code: 'LICENSE_NOT_STARTED' });
+                if (!Number.isFinite(expiresAt) || expiresAt < Date.now()) return res.status(403).json({ error: 'Business license has expired', code: 'LICENSE_EXPIRED' });
+
+                const login = await fetchD1StagingAuth(stagingDevice.businessId, 'login-user', 'auth.login.read', {
+                    method: 'POST', body: { username, deviceId }
+                });
+                if (login.status < 200 || login.status >= 300) return res.status(login.status >= 500 ? 502 : login.status).json(login.body || { error: 'Could not verify this account' });
+                const user = login.body?.user;
+                if (!user || !user.active) return res.status(401).json({ error: 'Invalid username or password' });
+                if (user.is_blocked) return res.status(423).json({ error: 'This account is blocked. Ask an Admin or Manager to unblock it.' });
+                const passwordValid = await verifyPassword(password, user.password_hash);
+                if (!passwordValid) {
+                    const failed = await fetchD1StagingAuth(stagingDevice.businessId, 'login-failure', 'auth.login.write', {
+                        method: 'POST', body: { userId: Number(user.id) }
+                    });
+                    if (failed.status < 200 || failed.status >= 300) return res.status(503).json({ error: 'D1 could not save the failed sign-in attempt. Please retry.' });
+                    if (failed.body?.blocked) return res.status(423).json({ error: 'This account was blocked after five failed sign-in attempts. Ask an Admin or Manager to unblock it.' });
+                    return res.status(401).json({ error: 'Invalid username or password' });
+                }
+                delete user.password_hash;
+                const token = 'd1stg_' + crypto.randomBytes(32).toString('hex');
+                const expiresAtDate = new Date(Date.now() + SESSION_TTL_MS);
+                const savedSession = await fetchD1StagingAuth(stagingDevice.businessId, 'session', 'auth.session.write', {
+                    method: 'POST', body: {
+                        userId: Number(user.id), tokenHash: hashSessionToken(token), deviceId,
+                        expiresAt: expiresAtDate.toISOString()
+                    }
+                });
+                if (savedSession.status < 200 || savedSession.status >= 300) {
+                    return res.status(savedSession.status >= 500 ? 502 : savedSession.status).json(savedSession.body || { error: 'Could not create a D1 session' });
+                }
+                setCookie(res, 'cafe_session', token, { maxAge: Math.floor(SESSION_TTL_MS / 1000), httpOnly: true, sameSite: 'None', secure: true });
+                return res.json({ success: true, user, device, license, expiresAt: expiresAtDate.getTime() });
+            }
+            if (stagingDevice.status !== 404) return res.status(502).json({ error: 'D1 staging sign-in is unavailable' });
+        }
+
+        const legacyDevice = await getRegisteredDevice(deviceId);
+        if (legacyDevice && d1StagingBusinessIdAllowed(legacyDevice.business_id)) {
+            return res.status(503).json({ error: 'This pilot device is not present in D1 staging yet.', code: 'D1_DEVICE_NOT_MIGRATED' });
+        }
         let deviceLicense;
         try {
             deviceLicense = await assertActiveDeviceAndLicense(deviceId);
@@ -1871,7 +2088,7 @@ app.get("/api/auth/heartbeat", async (req, res) => {
         return res.json({ active: true, expiresAt: session.expiresAt });
     } catch (error) {
         console.error("Session heartbeat error:", error);
-        return res.status(500).json({ error: "Could not verify session" });
+        return res.status(error.status >= 500 ? 503 : 500).json({ error: "Could not verify session" });
     }
 });
 app.get("/api/auth/me",async(req,res)=>{
@@ -1879,15 +2096,23 @@ app.get("/api/auth/me",async(req,res)=>{
     try{
         const session = await getSessionUser(req);
         if(!session)return res.status(401).json({error:"Not logged in"});
+        if (session.d1Staging) return res.json({ user: session.user, device: session.device, license: session.license, expiresAt: session.expiresAt });
         const user=await loadSessionUser(session);
         if(!user)return res.status(401).json({error:"Session is invalid"});
         const {device,license} = await assertActiveDeviceAndLicense(session.deviceId, user.business_id);
         res.json({user,device,license,expiresAt: session.expiresAt});
-    } catch(e){res.status(403).json({error:e.message || "Could not read session", code:e.code || "AUTH_VALIDATION_FAILED"});}
+    } catch(e){res.status(e.status >= 500 ? 503 : 403).json({error:e.message || "Could not read session", code:e.code || "AUTH_VALIDATION_FAILED"});}
 });
 
 app.post("/api/auth/logout", async (req, res) => {
     try {
+        const token = getCookie(req, "cafe_session") || "";
+        if (token.startsWith("d1stg_")) {
+            const deleted = await deleteD1StagingSession(token);
+            clearCookie(res, "cafe_session");
+            if (deleted.status < 200 || deleted.status >= 300) return res.status(502).json({ error: "Signed out locally, but D1 could not revoke the session." });
+            return res.json({ success: true });
+        }
         const session = await getSessionUser(req);
         if (session) await pool.query(`DELETE FROM app_sessions WHERE token_hash = $1`, [hashSessionToken(session.token)]);
         clearCookie(res, "cafe_session");
@@ -1908,6 +2133,8 @@ app.get("/restaurant/:token/manifest.webmanifest", async (req, res) => {
     const token = String(req.params.token || "");
     if (!/^[a-f0-9]{48}$/i.test(token)) return res.status(404).json({ error: "Menu not found" });
     try {
+const handledByD1 = await sendD1StagingPublicResponse(req, res, `/public-menu/${token}/manifest`, "GET", null, token);
+if (handledByD1) return;
         const result = await runSystemContext(() => pool.query(
             "SELECT s.business_id, s.enabled, b.business_name FROM public_menu_settings s JOIN businesses b ON b.id=s.business_id WHERE s.token=$1 LIMIT 1",
             [token]
@@ -1935,6 +2162,26 @@ app.get("/restaurant/:token/manifest.webmanifest", async (req, res) => {
         console.error("Guest menu manifest error:", error);
         res.status(500).json({ error: "Could not load menu app details" });
     }
+});
+
+app.use("/public-menu", async (req, res, next) => {
+    if (!d1StagingPublicEnabled()) return next();
+    const requestUrl = new URL(String(req.originalUrl || req.url || "/"), "http://localhost");
+    const match = requestUrl.pathname.match(/^\/public-menu\/([a-f0-9]{48})(?:\/([a-z0-9-]+(?:\/[a-z0-9-]+)*))?$/i);
+    if (!match) return next();
+    const token = match[1];
+    const suffix = match[2] || "";
+    const supported = (req.method === "GET" && (["", "push-config"].includes(suffix) || /^orders\/\d+$/.test(suffix)))
+        || (req.method === "POST" && ["", "analytics", "service-requests", "push-subscriptions", "orders", "orders/statuses"].includes(suffix));
+    if (!supported) {
+        const marker = await fetchD1StagingPublicMenu(`/public-menu/${token}/route-status`, "GET");
+        if (!marker.tokenKnown && !d1StagingBusinessIdAllowed(await d1StagingPublicBusinessId(token))) return next();
+        res.set("X-Data-Backend", "d1-staging-not-ported");
+        return res.status(501).json({ error: "This QR menu feature is not connected to the D1 staging pilot yet." });
+    }
+    const handled = await sendD1StagingPublicResponse(req, res, requestUrl.pathname + requestUrl.search, req.method, req.body, token);
+    if (handled) return;
+    return next();
 });
 
 app.get("/public-menu/:token/push-config", async (req, res) => {
@@ -2583,7 +2830,7 @@ app.get("/public-menu/:token/session", async (req, res) => {
 });
 
 app.post("/public-menu/:token/customers", async (req,res)=>{
-    return res.status(410).json({error:"Phone verification is required. Please request and verify a WhatsApp OTP."});
+    return res.status(410).json({error:"Guest details are submitted with the QR order. No OTP is required."});
 });
 
 app.post("/public-menu/:token/orders", async (req, res) => {
@@ -2996,9 +3243,779 @@ async function proxyD1StagingRead(req, res, endpoint, scope, includePage = false
     }
 }
 
+async function proxyD1StagingWrite(req, res, endpoint, scope) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    const bridgeSecret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    if (!workerBaseUrl || bridgeSecret.length < 32) {
+        return res.status(503).json({ error: "D1 staging bridge is not configured on this server" });
+    }
+
+    const businessId = Number(req.user?.business_id);
+    const userId = Number(req.user?.id);
+    if (!Number.isSafeInteger(businessId) || businessId <= 0 || !Number.isSafeInteger(userId) || userId <= 0) {
+        return res.status(403).json({ error: "A valid signed-in business user is required" });
+    }
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    if (Buffer.byteLength(JSON.stringify(body), "utf8") > 65536) {
+        return res.status(413).json({ error: "Order request is too large" });
+    }
+
+    try {
+        const bridgeToken = createD1StagingBridgeToken(userId, businessId, scope);
+        const query = new URLSearchParams({ business_id: String(businessId) });
+        const workerResponse = await fetch(`${workerBaseUrl}/v1/${endpoint}?${query.toString()}`, {
+            method: "POST",
+            headers: { "X-D1-Bridge-Token": bridgeToken, "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(15000)
+        });
+        const responseText = await workerResponse.text();
+        let responseBody;
+        try { responseBody = JSON.parse(responseText); }
+        catch (_) { return res.status(502).json({ error: "D1 staging service returned an invalid response" }); }
+        if (!workerResponse.ok) {
+            const status = [400, 401, 403, 404, 405, 409, 413, 503].includes(workerResponse.status) ? workerResponse.status : 502;
+            return res.status(status).json({ error: String(responseBody?.error || "D1 staging request failed") });
+        }
+        return res.status(workerResponse.status).json(responseBody);
+    } catch (error) {
+        console.warn("D1 staging write proxy unavailable:", error?.name || "Error");
+        return res.status(502).json({ error: "D1 staging service is unavailable" });
+    }
+}
+
+function d1StagingPosEnabledForRequest(req) {
+    if (String(process.env.D1_STAGING_POS_ENABLED || "").trim().toLowerCase() !== "true") return false;
+    const businessId = Number(req.user?.business_id);
+    return Number.isSafeInteger(businessId) && d1StagingBusinessIdAllowed(businessId);
+}
+
+function d1StagingPublicEnabled() {
+    return String(process.env.D1_STAGING_POS_ENABLED || "").trim().toLowerCase() === "true";
+}
+
+function d1StagingBusinessIdAllowed(businessId) {
+    const id = Number(businessId);
+    if (!d1StagingPublicEnabled() || !Number.isSafeInteger(id) || id <= 0) return false;
+    const allowed = new Set(String(process.env.D1_STAGING_POS_BUSINESS_IDS || "")
+        .split(",").map(value => Number(String(value).trim())).filter(value => Number.isSafeInteger(value) && value > 0));
+    return allowed.has(id) || d1OnboardedBusinessIds.has(id);
+}
+
+function d1StagingAuthBusinessIds() {
+    if (!d1StagingPublicEnabled()) return [];
+    return [...new Set(String(process.env.D1_STAGING_POS_BUSINESS_IDS || "")
+        .split(",").map(value => Number(String(value).trim())).filter(value => Number.isSafeInteger(value) && value > 0))];
+}
+
+async function fetchD1StagingAuth(businessId, endpoint, scope, { method = "GET", body = null, query = {} } = {}) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    const id = Number(businessId);
+    if (!workerBaseUrl || String(process.env.D1_STAGING_BRIDGE_SECRET || "").length < 32) {
+        return { status: 503, body: { error: "D1 staging authentication is not configured." } };
+    }
+    if (!d1StagingBusinessIdAllowed(id) || !D1_STAGING_AUTH_SCOPES.has(String(scope))) {
+        return { status: 403, body: { error: "D1 staging authentication is not enabled for this business." } };
+    }
+    const endpointName = String(endpoint);
+    const fixedEndpoints = new Set(["device", "users", "login-user", "login-failure", "login-failures", "session", "register-device", "support/business-summary", "support/business", "support/branding", "support/users", "support/slash-ops/reset-password", "support/devices", "support/licenses", "support/registration-keys", "system-support/login-user", "system-support/login-lockout", "system-support/login-failure", "system-support/login-failures", "system-support/session"]);
+    const dynamicSupportEndpoint = /^support\/(?:licenses\/\d+|devices\/\d+(?:\/revoke)?|registration-keys\/\d+\/revoke|users\/\d+(?:\/block)?)$/.test(endpointName);
+    if (!fixedEndpoints.has(endpointName) && !dynamicSupportEndpoint) return { status: 404, body: { error: "D1 authentication endpoint not found." } };
+
+    const allowedQueryKeys = endpoint === "device" || endpoint === "users" ? new Set(["device_id"])
+        : endpoint === "session" ? new Set(["token_hash"])
+            : endpoint === "login-failures" ? new Set(["identity_key"])
+                : endpointName === "system-support/session" ? new Set(["token_hash"])
+                    : ["system-support/login-lockout", "system-support/login-failures"].includes(endpointName) ? new Set(["identity_key"]) : new Set();
+    const params = new URLSearchParams({ business_id: String(id) });
+    for (const [key, value] of Object.entries(query || {})) {
+        if (!allowedQueryKeys.has(key) || value === undefined || value === null || typeof value === "object") continue;
+        params.set(key, String(value));
+    }
+
+    const supportLicensePayload = endpointName === "support/licenses" && method === "POST"
+        || /^support\/licenses\/\d+$/.test(endpointName) && method === "PATCH";
+    const payloadKeys = endpointName === "register-device" && method === "POST" ? new Set(["keyHash", "deviceId", "deviceName", "deviceType", "ip", "userAgent"])
+        : endpointName === "system-support/login-user" && method === "POST" ? new Set(["username"])
+        : endpointName === "system-support/login-failure" && method === "POST" ? new Set(["identityKey"])
+        : endpointName === "system-support/session" && method === "POST" ? new Set(["supportUserId", "tokenHash", "expiresAt"])
+        : endpointName === "login-user" ? new Set(["username", "deviceId"])
+        : endpointName === "login-failure" ? new Set(["userId"])
+        : endpointName === "support/registration-keys" && method === "POST" ? new Set(["keyHash", "keyHint", "deviceName", "expiresAt", "createdByUserId"])
+        : endpointName === "support/business" && method === "PATCH" ? new Set(["businessName"])
+        : endpointName === "support/branding" && method === "PATCH" ? new Set(["showPoweredByCafePilot"])
+        : endpointName === "support/users" && method === "POST" ? new Set(["displayName", "username", "passwordHash", "profileId", "active", "permissionsOverride"])
+        : /^support\/users\/\d+$/.test(endpointName) && method === "PATCH" ? new Set(["displayName", "username", "passwordHash", "profileId", "active", "permissionsOverride"])
+        : /^support\/users\/\d+\/block$/.test(endpointName) && method === "PATCH" ? new Set(["blocked", "supportUserId"])
+        : endpointName === "support/slash-ops/reset-password" && method === "POST" ? new Set(["passwordHash"])
+        : supportLicensePayload ? new Set(["licenseType", "addOn", "durationMonths", "status", "startsAt", "expiresAt", "maxDevices", "notes", "createdBySupportUserId"])
+            : endpointName === "session" && method === "POST" ? new Set(["userId", "tokenHash", "deviceId", "expiresAt"]) : new Set();
+    const headers = { Accept: "application/json", "X-D1-Bridge-Token": createD1StagingAuthServiceToken(id, scope) };
+    const options = { method, headers, signal: AbortSignal.timeout(12000) };
+    if (method === "POST" || method === "PATCH") {
+        const safeBody = {};
+        for (const key of payloadKeys) if (body && Object.hasOwn(body, key)) safeBody[key] = body[key];
+        const text = JSON.stringify(safeBody);
+        if (Buffer.byteLength(text, "utf8") > 16384) return { status: 413, body: { error: "D1 authentication request is too large." } };
+        headers["Content-Type"] = "application/json";
+        options.body = text;
+    }
+    try {
+        const response = await fetch(`${workerBaseUrl}/v1/auth/${endpoint}?${params.toString()}`, options);
+        const text = await response.text();
+        let responseBody;
+        try { responseBody = JSON.parse(text || "{}"); }
+        catch (_) { return { status: 502, body: { error: "D1 authentication returned an invalid response." } }; }
+        return { status: response.status, body: responseBody };
+    } catch (error) {
+        console.warn("D1 staging authentication request unavailable:", error?.name || "Error");
+        return { status: 502, body: { error: "D1 staging authentication is unavailable." } };
+    }
+}
+
+async function fetchD1StagingPublicAuth(endpoint, scope, { method = "GET", body = null, query = {} } = {}) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    if (!d1StagingPublicEnabled() || !workerBaseUrl || String(process.env.D1_STAGING_BRIDGE_SECRET || "").length < 32) {
+        return { status: 503, body: { error: "D1 public onboarding is not configured." } };
+    }
+    const endpointName = String(endpoint || "");
+    const allowedRoutes = new Map([
+        ["register-business", ["POST", "auth.public.registration", new Set(["business", "businessCode", "username", "ownerPasswordHash", "slashOpsPasswordHash", "profiles", "keyHash", "keyHint", "keyExpiresAt", "deviceName", "maxDevices"]) ]],
+        ["device", ["GET", "auth.public.device.read", new Set()]],
+        ["register-device", ["POST", "auth.public.device.register", new Set(["keyHash", "deviceId", "deviceName", "deviceType", "ip", "userAgent"]) ]],
+        ["session", [method === "GET" ? "GET" : "DELETE", method === "GET" ? "auth.public.session.read" : "auth.public.session.write", new Set()]],
+        ["business-enabled", ["GET", "auth.public.business.read", new Set()]],
+    ]);
+    const route = allowedRoutes.get(endpointName);
+    if (!route || method !== route[0] || !D1_STAGING_AUTH_SCOPES.has(String(scope)) || scope !== route[1]) {
+        return { status: 404, body: { error: "D1 public authentication endpoint not found." } };
+    }
+    const params = new URLSearchParams();
+    const allowedQuery = endpointName === "device" ? new Set(["device_id"])
+        : endpointName === "session" ? new Set(["token_hash"])
+            : endpointName === "business-enabled" ? new Set(["target_business_id"]) : new Set();
+    for (const [key, value] of Object.entries(query || {})) {
+        if (allowedQuery.has(key) && value !== undefined && value !== null && typeof value !== "object") params.set(key, String(value));
+    }
+    const headers = { Accept: "application/json", "X-D1-Bridge-Token": createD1StagingPublicAuthServiceToken(scope) };
+    const options = { method, headers, signal: AbortSignal.timeout(15000) };
+    if (method === "POST") {
+        const safeBody = {};
+        for (const key of route[2]) if (body && Object.hasOwn(body, key)) safeBody[key] = body[key];
+        const text = JSON.stringify(safeBody);
+        if (Buffer.byteLength(text, "utf8") > 65536) return { status: 413, body: { error: "D1 onboarding request is too large." } };
+        headers["Content-Type"] = "application/json";
+        options.body = text;
+    }
+    try {
+        const response = await fetch(`${workerBaseUrl}/v1/auth/public/${endpointName}${params.size ? `?${params}` : ""}`, options);
+        const text = await response.text();
+        let responseBody;
+        try { responseBody = JSON.parse(text || "{}"); }
+        catch { return { status: 502, body: { error: "D1 onboarding returned an invalid response." } }; }
+        return { status: response.status, body: responseBody };
+    } catch (error) {
+        console.warn("D1 public onboarding request unavailable:", error?.name || "Error");
+        return { status: 502, body: { error: "D1 onboarding is unavailable." } };
+    }
+}
+
+async function findD1StagingDevice(deviceId) {
+    const normalizedDeviceId = String(deviceId || "").trim().slice(0, 128);
+    if (!normalizedDeviceId) return { status: 404, body: null };
+    for (const businessId of d1StagingAuthBusinessIds()) {
+        const result = await fetchD1StagingAuth(businessId, "device", "auth.device.read", { query: { device_id: normalizedDeviceId } });
+        if (result.status === 404) continue;
+        if (result.status < 200 || result.status >= 300) return result;
+        if (result.body?.device?.device_id !== normalizedDeviceId || Number(result.body?.device?.business_id) !== businessId) {
+            return { status: 502, body: { error: "D1 returned mismatched device details." } };
+        }
+        return { ...result, businessId };
+    }
+    const result = await fetchD1StagingPublicAuth("device", "auth.public.device.read", { query: { device_id: normalizedDeviceId } });
+    if (result.status >= 200 && result.status < 300) {
+        const businessId = Number(result.body?.businessId || result.body?.device?.business_id || 0);
+        if (!businessId || result.body?.device?.device_id !== normalizedDeviceId || Number(result.body?.device?.business_id) !== businessId) {
+            return { status: 502, body: { error: "D1 returned mismatched device details." } };
+        }
+        d1OnboardedBusinessIds.add(businessId);
+        return { ...result, businessId };
+    }
+    if (result.status !== 404) return result;
+    return { status: 404, body: null };
+}
+
+async function findD1StagingSession(token) {
+    const tokenHash = hashSessionToken(token);
+    for (const businessId of d1StagingAuthBusinessIds()) {
+        const result = await fetchD1StagingAuth(businessId, "session", "auth.session.read", { query: { token_hash: tokenHash } });
+        if (result.status === 404) continue;
+        if (result.status < 200 || result.status >= 300) return result;
+        if (result.body?.token_hash !== tokenHash || Number(result.body?.business_id) !== businessId) {
+            return { status: 502, body: { error: "D1 returned mismatched session details." } };
+        }
+        return { ...result, businessId };
+    }
+    const result = await fetchD1StagingPublicAuth("session", "auth.public.session.read", { query: { token_hash: tokenHash } });
+    if (result.status >= 200 && result.status < 300) {
+        const businessId = Number(result.body?.business_id || 0);
+        if (!businessId || String(result.body?.token_hash || "") !== tokenHash) return { status: 502, body: { error: "D1 returned mismatched session details." } };
+        d1OnboardedBusinessIds.add(businessId);
+        return { ...result, businessId };
+    }
+    if (result.status !== 404) return result;
+    return { status: 404, body: null };
+}
+
+async function deleteD1StagingSession(token) {
+    const tokenHash = hashSessionToken(token);
+    let firstError = null;
+    for (const businessId of d1StagingAuthBusinessIds()) {
+        const result = await fetchD1StagingAuth(businessId, "session", "auth.session.write", { method: "DELETE", query: { token_hash: tokenHash } });
+        if (result.status < 200 || result.status >= 300) firstError ||= result;
+    }
+    return firstError || { status: 200, body: { success: true } };
+}
+
+async function d1StagingPublicBusinessId(token) {
+    try {
+        const result = await runSystemContext(() => pool.query(
+            "SELECT business_id FROM public_menu_settings WHERE token=$1 LIMIT 1", [String(token || "")]
+        ));
+        return Number(result.rows?.[0]?.business_id || 0) || null;
+    } catch (_) {
+        return null;
+    }
+}
+
+async function fetchD1StagingPublicMenu(path, method = "GET", body = null) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    if (!workerBaseUrl) return { status: 503, body: { error: "D1 staging service is not configured." }, tokenKnown: false };
+    try {
+        const headers = { Accept: "application/json" };
+        const options = { method, headers, signal: AbortSignal.timeout(15000) };
+        if (method !== "GET" && method !== "HEAD") {
+            headers["Content-Type"] = "application/json";
+            options.body = JSON.stringify(body && typeof body === "object" ? body : {});
+        }
+        const response = await fetch(workerBaseUrl + path, options);
+        const text = await response.text();
+        let responseBody = null;
+        if (text) {
+            try { responseBody = JSON.parse(text); }
+            catch (_) { return { status: 502, body: { error: "D1 staging service returned an invalid response." }, tokenKnown: response.headers.get("X-D1-Staging-Token") === "known" }; }
+        }
+        return { status: response.status, body: responseBody, tokenKnown: response.headers.get("X-D1-Staging-Token") === "known" };
+    } catch (error) {
+        console.warn("D1 staging public menu request unavailable:", error?.name || "Error");
+        return { status: 502, body: { error: "D1 staging service is unavailable." }, tokenKnown: false };
+    }
+}
+
+async function sendD1StagingPublicResponse(req, res, routePath, method, body, token) {
+    if (!d1StagingPublicEnabled()) return false;
+    const result = await fetchD1StagingPublicMenu(routePath, method, body);
+    if (routePath.endsWith("/push-config") && result.status >= 200 && result.status < 300 && result.body) {
+        const marketingEnabled = Boolean(result.body.marketingEnabled);
+        const configured = marketingEnabled && Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT);
+        result.body = { ...result.body, marketingEnabled, configured, publicKey: configured ? process.env.VAPID_PUBLIC_KEY : null };
+    }
+    if (result.tokenKnown) {
+        res.set("X-Data-Backend", "cloudflare-d1-staging");
+        if (result.status === 204) res.status(204).end();
+        else if (routePath.endsWith("/manifest") && result.status >= 200 && result.status < 300) res.status(result.status).type("application/manifest+json").send(JSON.stringify(result.body || {}));
+        else res.status(result.status).json(result.body || {});
+        return true;
+    }
+    const businessId = await d1StagingPublicBusinessId(token);
+    if (!d1StagingBusinessIdAllowed(businessId)) return false;
+    res.set("X-Data-Backend", result.status >= 500 ? "d1-staging-unavailable" : "d1-staging-not-ported");
+    if (result.status >= 500) res.status(502).json({ error: "The QR menu is assigned to D1 staging, but its public service is unavailable." });
+    else res.status(501).json({ error: "This QR menu feature is not connected to the D1 staging pilot yet." });
+    return true;
+}
+
+function d1StagingPosRoute(req) {
+    const method = String(req.method || "GET").toUpperCase();
+    const path = String(req.path || "/").replace(/\/+$/, "") || "/";
+    if (path === "/dashboard/stats" && method === "GET") return { endpoint: "pos/dashboard/stats", scope: "reports.view" };
+    if (path === "/devices" && method === "GET") return { endpoint: "pos/devices", scope: "devices.view" };
+    if (path === "/license/status" && method === "GET") return { endpoint: "pos/license/status", scope: "settings.view" };
+    if (path === "/devices/registration-keys" && method === "POST") return { kind: "device-key-create", scope: "devices.edit" };
+    const deviceRevokePath = path.match(/^\/devices\/(\d+)\/revoke$/);
+    if (deviceRevokePath && method === "POST") return { endpoint: "pos/devices/" + deviceRevokePath[1] + "/revoke", scope: "devices.edit" };
+    if (path === "/printers" && method === "GET") {
+        const scope = req.query?.source === "order" ? "orders.print_open" : "printer.view";
+        return { endpoint: "pos/printers", scope };
+    }
+    if (path === "/printers" && method === "POST") return { endpoint: "pos/printers", scope: "printer.create" };
+    const printerIoPath = path.match(/^\/printers\/(\d+)\/(test|print)$/);
+    if (printerIoPath && method === "POST") {
+        const scope = req.query?.source === "kot" ? "kitchen.print"
+            : req.query?.source === "order" ? "orders.print_open" : "printer.print";
+        return { kind: "printer-io", scope };
+    }
+    const printerPath = path.match(/^\/printers\/(\d+)$/);
+    if (printerPath && method === "PUT") return { endpoint: "pos/printers/" + printerPath[1], scope: "printer.edit" };
+    if (printerPath && method === "DELETE") return { endpoint: "pos/printers/" + printerPath[1], scope: "printer.delete" };
+    if (path === "/payments" && method === "GET") return { endpoint: "pos/payments", scope: "payments.view", allPages: true };
+    if (path === "/payments" && method === "POST") return { kind: "disabled-direct-payment" };
+    if (path === "/tables" && method === "GET") return { endpoint: "pos/tables", scope: "tables.view" };
+    if (path === "/tables" && method === "POST") return { endpoint: "pos/tables", scope: "tables.create" };
+    if (path === "/reservations" && method === "GET") return { endpoint: "pos/reservations", scope: "reservations.view" };
+    if (path === "/reservations" && method === "POST") return { endpoint: "pos/reservations", scope: "reservations.create" };
+    const reservationStatusPath = path.match(/^\/reservations\/(\d+)\/status$/);
+    if (reservationStatusPath && method === "PUT") return { endpoint: "pos/reservations/" + reservationStatusPath[1] + "/status", scope: "reservations.edit" };
+    const tableStatusPath = path.match(/^\/tables\/(\d+)\/status$/);
+    if (tableStatusPath && method === "PUT") return { endpoint: "pos/tables/" + tableStatusPath[1] + "/status", scope: "tables.edit" };
+    const tablePath = path.match(/^\/tables\/(\d+)$/);
+    if (tablePath && method === "PUT") return { endpoint: "pos/tables/" + tablePath[1], scope: "tables.edit" };
+    if (tablePath && method === "DELETE") return { endpoint: "pos/tables/" + tablePath[1], scope: "tables.delete" };
+    if (method === "GET" && path === "/business") return { endpoint: "business", scope: "settings.view" };
+    if (method === "PUT" && path === "/business/profile/logo") return { endpoint: "pos/business/logo", scope: "settings.edit" };
+    if (method === "GET" && path === "/billing-adjustments") return { endpoint: "pos/billing-adjustments", scope: "settings.view" };
+    if (method === "POST" && path === "/billing-adjustments") return { endpoint: "pos/billing-adjustments", scope: "settings.edit" };
+    const adjustmentPath = path.match(/^\/billing-adjustments\/(\d+)(?:\/(toggle))?$/);
+    if (adjustmentPath) {
+        const suffix = adjustmentPath[2] ? "/toggle" : "";
+        const endpoint = "pos/billing-adjustments/" + adjustmentPath[1] + suffix;
+        if (["PUT", "DELETE"].includes(method)) return { endpoint, scope: "settings.edit" };
+    }
+    if (path === "/marketing/deals" && method === "GET") return { endpoint: "pos/marketing/deals", scope: "marketing.view" };
+    if (path === "/marketing/deals" && method === "PUT") return { endpoint: "pos/marketing/deals", scope: "marketing.edit" };
+    if (path === "/marketing/push-settings" && method === "GET") return { kind: "marketing-push-settings", endpoint: "pos/marketing/push-settings", scope: "marketing.view" };
+    if (path === "/marketing/push-campaigns" && method === "GET") return { endpoint: "pos/marketing/push-campaigns", scope: "marketing.view" };
+    if (path === "/marketing/push-campaigns" && method === "POST") return { kind: "marketing-push-send", endpoint: "pos/marketing/push-campaigns", scope: "marketing.create" };
+    const pushCampaignPath = path.match(/^\/marketing\/push-campaigns\/(\d+)$/);
+    if (pushCampaignPath && method === "DELETE") return { endpoint: "pos/marketing/push-campaigns/" + pushCampaignPath[1], scope: "marketing.delete" };
+    if (path === "/menu-option-sets" && method === "GET") return { endpoint: "pos/menu-option-sets", scope: "menu.view" };
+    if (path === "/menu-option-sets" && method === "PUT") return { endpoint: "pos/menu-option-sets", scope: "menu.edit" };
+    if (path === "/access" && method === "GET") return { kind: "staff-access", endpoint: "pos/access", scope: "access.view" };
+    if (path === "/access/users" && method === "GET") return { kind: "staff-access", endpoint: "pos/access/users", scope: "access.view" };
+    if (path === "/access/users" && method === "POST") return { kind: "staff-access", endpoint: "pos/access/users", scope: "access.create" };
+    if (path === "/access/profiles" && method === "GET") return { kind: "staff-access", endpoint: "pos/access/profiles", scope: "access.view" };
+    if (path === "/access/profiles" && method === "POST") return { kind: "staff-access", endpoint: "pos/access/profiles", scope: "access.create" };
+    const accessBlockPath = path.match(/^\/access\/users\/(\d+)\/block$/);
+    if (accessBlockPath && method === "PATCH") return { kind: "staff-access", endpoint: "pos/access/users/" + accessBlockPath[1] + "/block", scope: "access.edit" };
+    const accessUserPath = path.match(/^\/access\/users\/(\d+)$/);
+    if (accessUserPath && method === "PUT") return { kind: "staff-access", endpoint: "pos/access/users/" + accessUserPath[1], scope: "access.edit" };
+    if (accessUserPath && method === "DELETE") return { kind: "staff-access", endpoint: "pos/access/users/" + accessUserPath[1], scope: "access.delete" };
+    const accessProfilePath = path.match(/^\/access\/profiles\/(\d+)$/);
+    if (accessProfilePath && method === "PUT") return { kind: "staff-access", endpoint: "pos/access/profiles/" + accessProfilePath[1], scope: "access.edit" };
+    if (accessProfilePath && method === "DELETE") return { kind: "staff-access", endpoint: "pos/access/profiles/" + accessProfilePath[1], scope: "access.delete" };
+    if (path === "/menu/import" && method === "POST") return { endpoint: "pos/menu/import", scope: "menu.create" };
+    if (path === "/menu/public-settings" && method === "GET") return { endpoint: "pos/menu/public-settings", scope: "menu.view" };
+    if (path === "/menu/public-settings" && method === "PUT") return { endpoint: "pos/menu/public-settings", scope: "menu.edit" };
+    if (path === "/menu/public-settings/category-order" && method === "PUT") return { endpoint: "pos/menu/public-settings/category-order", scope: "menu.edit" };
+    if (path === "/menu/public-settings/qr" && method === "POST") return { kind: "qr-generation", endpoint: "pos/menu/public-settings/qr", scope: "menu.view" };
+    if (path === "/menu" && method === "POST") return { endpoint: "pos/menu", scope: "menu.create" };
+    if (path === "/menu" && method === "GET") return { endpoint: "menu", scope: "menu.view", allPages: true };
+    const menuVariantPath = path.match(/^\/menu\/(\d+)\/variants$/);
+    if (menuVariantPath && method === "GET") return { endpoint: "pos/menu/" + menuVariantPath[1] + "/variants", scope: "menu.view" };
+    const menuQrStockPath = path.match(/^\/menu\/(\d+)\/qr-stock$/);
+    if (menuQrStockPath && method === "PATCH") return { endpoint: "pos/menu/" + menuQrStockPath[1] + "/qr-stock", scope: "menu.edit" };
+    const menuPricePath = path.match(/^\/menu\/(\d+)\/prices$/);
+    if (menuPricePath && method === "PATCH") return { endpoint: "pos/menu/" + menuPricePath[1] + "/prices", scope: "menu.edit" };
+    const menuEnablePath = path.match(/^\/menu\/(\d+)\/enable$/);
+    if (menuEnablePath && method === "PUT") return { endpoint: "pos/menu/" + menuEnablePath[1] + "/enable", scope: "menu.edit" };
+    const menuItemPath = path.match(/^\/menu\/(\d+)$/);
+    if (menuItemPath && method === "PUT") return { endpoint: "pos/menu/" + menuItemPath[1], scope: "menu.edit" };
+    if (menuItemPath && method === "DELETE") return { endpoint: "pos/menu/" + menuItemPath[1], scope: "menu.delete" };
+    if (path === "/kot-groups/printers" && method === "GET") return { endpoint: "pos/kot-groups/printers", scope: "kot_groups.view" };
+    if (path === "/kot-groups" && method === "GET") return { endpoint: "pos/kot-groups", scope: "kot_groups.view" };
+    if (path === "/kot-groups" && method === "POST") return { endpoint: "pos/kot-groups", scope: "kot_groups.create" };
+    const kotGroupPath = path.match(/^\/kot-groups\/(\d+)$/);
+    if (kotGroupPath && method === "PUT") return { endpoint: "pos/kot-groups/" + kotGroupPath[1], scope: "kot_groups.edit" };
+    if (kotGroupPath && method === "DELETE") return { endpoint: "pos/kot-groups/" + kotGroupPath[1], scope: "kot_groups.delete" };
+    if (path === "/kot-device-print-settings" && method === "GET") return { endpoint: "pos/kot-device-print-settings", scope: "kot_groups.view" };
+    if (path === "/kot-device-print-settings" && method === "PUT") return { endpoint: "pos/kot-device-print-settings", scope: "kot_groups.edit" };
+    if (path === "/kot-printing-mode" && method === "GET") {
+        const scope = req.user?.permissions?.["new_order.create"] === true ? "new_order.create"
+            : req.user?.permissions?.["kitchen.print"] === true ? "kitchen.print" : "orders.view";
+        return { endpoint: "pos/kot-printing-mode", scope };
+    }
+    if (path === "/kot-print-jobs/claim" && method === "POST") return { endpoint: "pos/kot-print-jobs/claim", scope: "kitchen.print" };
+    if (path === "/kot-print-jobs/claim") return { error: "Method not allowed", status: 405 };
+    const kotJobPath = path.match(/^\/kot-print-jobs\/(\d+)\/complete$/);
+    if (kotJobPath && method === "POST") return { endpoint: "pos/kot-print-jobs/" + kotJobPath[1] + "/complete", scope: "kitchen.print" };
+    if (path === "/kot/notifications" && method === "GET") return { endpoint: "pos/kot/notifications", scope: "kitchen.view" };
+    if (path === "/kot" && method === "GET") return { endpoint: "pos/kot", scope: "kitchen.view" };
+    const kotItemPath = path.match(/^\/kot\/(\d+)$/);
+    if (kotItemPath && method === "PUT") return { endpoint: "pos/kot/" + kotItemPath[1], scope: "kitchen.edit" };
+    if (path === "/orders/qr-notifications" && method === "GET") return { endpoint: "pos/orders/qr-notifications", scope: req.user?.permissions?.["orders.view"] === true ? "orders.view" : "kitchen.view" };
+    if (path === "/qr-service-requests" && method === "GET") return { endpoint: "pos/qr-service-requests", scope: "qr_service_requests.view" };
+    const reportPath = path.match(/^\/reports\/(summary|payments|best-items|category|order-type|daily|gst|sale-items-by-transaction|qr-menu-analytics|order-activity|kitchen-prep-times|sales-audit|order-categories|sales-summary|advanced)$/);
+    if (reportPath && method === "GET") return { endpoint: "pos/reports/" + reportPath[1], scope: "reports.view" };
+    if (path === "/invoices" && method === "GET") return { endpoint: "pos/invoices", scope: "payments.view", allPages: true };
+    if (path === "/invoices" && method === "POST") return { endpoint: "pos/invoices", scope: "payments.create" };
+    const invoiceOrderPath = path.match(/^\/invoices\/order\/(\d+)$/);
+    if (invoiceOrderPath && method === "GET") return { endpoint: "pos/invoices/order/" + invoiceOrderPath[1], scope: "payments.view" };
+    const invoicePath = path.match(/^\/invoices\/(\d+)$/);
+    if (invoicePath && method === "GET") return { endpoint: "pos/invoices/" + invoicePath[1], scope: "payments.view" };
+    const idPath = path.match(/^\/orders\/(\d+)(?:\/([a-z-]+))?$/);
+    if (path === "/settings" && method === "GET") return { endpoint: "pos/settings", scope: "settings.view" };
+    if (path === "/settings" && method === "PUT") return { endpoint: "pos/settings", scope: "settings.edit" };
+    if (path === "/settings/sales-channels" && method === "PUT") return { endpoint: "pos/settings/sales-channels", scope: "settings.edit" };
+    if (path === "/expenses/categories" && method === "GET") return { endpoint: "pos/expenses/categories", scope: "expenses.view" };
+    if (path === "/expenses/categories" && method === "POST") return { endpoint: "pos/expenses/categories", scope: "expenses.create" };
+    if (path === "/expenses/summary" && method === "GET") return { endpoint: "pos/expenses/summary", scope: "expenses.view" };
+    if (path === "/expenses" && method === "GET") return { endpoint: "pos/expenses", scope: "expenses.view" };
+    if (path === "/expenses" && method === "POST") return { endpoint: "pos/expenses", scope: "expenses.create" };
+    const expensePath = path.match(/^\/expenses\/(\d+)$/);
+    if (expensePath && method === "DELETE") return { endpoint: "pos/expenses/" + expensePath[1], scope: "expenses.delete" };
+    if (path === "/loyalty/settings" && method === "GET") return { endpoint: "pos/loyalty/settings", scope: "loyalty.view" };
+    if (path === "/loyalty/settings" && method === "PUT") return { endpoint: "pos/loyalty/settings", scope: "loyalty.edit" };
+    if (path === "/loyalty/adjust" && method === "POST") return { endpoint: "pos/loyalty/adjust", scope: "loyalty.create" };
+    const loyaltyCustomerPath = path.match(/^\/loyalty\/customers\/(\d+)$/);
+    if (loyaltyCustomerPath && method === "GET") return { endpoint: "pos/loyalty/customers/" + loyaltyCustomerPath[1], scope: "loyalty.view" };
+    if (method === "GET" && path === "/menu/categories") return { endpoint: "menu/categories", scope: "menu.view", allPages: true };
+    if (method === "POST" && path === "/menu/categories") return { endpoint: "menu/categories", scope: "menu.create" };
+    const menuCategoryPath = path.match(/^\/menu\/categories\/(\d+)$/);
+    if (menuCategoryPath && method === "PUT") return { endpoint: "menu/categories/" + menuCategoryPath[1], scope: "menu.edit" };
+    if (menuCategoryPath && method === "DELETE") return { endpoint: "menu/categories/" + menuCategoryPath[1], scope: "menu.delete" };
+    if (method === "GET" && path === "/customers") return { endpoint: "pos/customers", scope: "customers.view", allPages: true };
+    if (method === "POST" && path === "/customers") return { endpoint: "pos/customers", scope: "customers.create" };
+    if (method === "POST" && path === "/customers/save-for-billing") return { endpoint: "pos/customers/billing", scope: "customers.create" };
+    const customerActivityPath = path.match(/^\/customers\/(\d+)\/order-activity$/);
+    if (customerActivityPath && method === "GET") return { endpoint: "pos/customers/" + customerActivityPath[1] + "/order-activity", scope: "customers.view" };
+    const customerPath = path.match(/^\/customers\/(\d+)$/);
+    if (customerPath && method === "PUT") return { endpoint: "pos/customers/" + customerPath[1], scope: "customers.edit" };
+    if (customerPath && method === "DELETE") return { endpoint: "pos/customers/" + customerPath[1], scope: "customers.delete" };
+    if (method === "GET" && path === "/orders") return { endpoint: "pos/orders", scope: "orders.view", allPages: true };
+    if (method === "POST" && path === "/orders") return { kind: "create-order", endpoint: "pos/orders", scope: "new_order.create" };
+    const qrStatusPath = path.match(/^\/orders\/(\d+)\/qr-status$/);
+    if (qrStatusPath && method === "PUT") return { endpoint: "pos/orders/" + qrStatusPath[1] + "/qr-status", scope: "orders.edit_open" };
+    if (!idPath) return null;
+    const orderId = Number(idPath[1]);
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) return { error: "A valid order ID is required.", status: 400 };
+    const resource = String(idPath[2] || "");
+    if (method === "GET" && !resource) return { endpoint: "pos/orders/" + orderId, scope: "orders.view" };
+    if (method === "GET" && ["items", "payments", "kot"].includes(resource)) return { endpoint: "pos/orders/" + orderId + "/" + resource, scope: "orders.view", allPages: true };
+    if (method === "GET" && resource === "activity") return { endpoint: "pos/orders/" + orderId + "/activity", scope: "orders.view" };
+    if (method === "GET" && resource === "payment-summary") return { endpoint: "pos/orders/" + orderId + "/payment-summary", scope: "payments.view" };
+    if (method === "POST" && resource === "settle") return { endpoint: "pos/orders/" + orderId + "/settle", scope: "payments.create" };
+    if (method === "PUT" && resource === "complete") return { endpoint: "pos/orders/" + orderId + "/complete", scope: "orders.edit_open" };
+    if (method === "PUT" && resource === "cancel") return { endpoint: "pos/orders/" + orderId + "/cancel", scope: "orders.cancel" };
+    if (method === "POST" && resource === "kot") return { endpoint: "pos/orders/" + orderId + "/kot", scope: "kitchen.print" };
+    if (method === "POST" && resource === "printed") return { endpoint: "pos/orders/" + orderId + "/printed", scope: "orders.print_open" };
+    if (method === "PUT" && !resource) return { kind: "update-order", orderId, scope: "orders.edit_open" };
+    return null;
+}
+
+async function fetchD1StagingPos(req, endpoint, scope, { method = "GET", body = null, query = {} } = {}) {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    const bridgeSecret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    const businessId = Number(req.user?.business_id);
+    const userId = Number(req.user?.id);
+    if (!workerBaseUrl || bridgeSecret.length < 32) return { status: 503, body: { error: "D1 staging bridge is not configured on this server." } };
+    if (!Number.isSafeInteger(businessId) || businessId <= 0 || !Number.isSafeInteger(userId) || userId <= 0) {
+        return { status: 403, body: { error: "A valid signed-in business user is required." } };
+    }
+    const params = new URLSearchParams({ business_id: String(businessId) });
+    const sourceQuery = method === "GET" ? { ...(req.query || {}), ...query } : query;
+    for (const [key, value] of Object.entries(sourceQuery)) {
+        if (key === "business_id" || value === undefined || value === null || typeof value === "object") continue;
+        params.set(key, String(value));
+    }
+    const headers = { Accept: "application/json", "X-D1-Bridge-Token": createD1StagingBridgeToken(userId, businessId, scope, req.device?.device_id) };
+    const requestOptions = { method, headers, signal: AbortSignal.timeout(15000) };
+    if (method !== "GET" && method !== "HEAD") {
+        const payload = body && typeof body === "object" ? body : {};
+        const text = JSON.stringify(payload);
+        const maxBytes = ["pos/menu/import", "pos/menu/public-settings"].includes(endpoint) ? 2_500_000 : 65536;
+        if (Buffer.byteLength(text, "utf8") > maxBytes) return { status: 413, body: { error: "D1 staging request is too large." } };
+        headers["Content-Type"] = "application/json";
+        requestOptions.body = text;
+    }
+    try {
+        const response = await fetch(workerBaseUrl + "/v1/" + endpoint + "?" + params.toString(), requestOptions);
+        const text = await response.text();
+        let responseBody;
+        try { responseBody = JSON.parse(text); }
+        catch (_) { return { status: 502, body: { error: "D1 staging service returned an invalid response." } }; }
+        return { status: response.status, body: responseBody };
+    } catch (error) {
+        console.warn("D1 staging POS request unavailable:", error?.name || "Error");
+        return { status: 502, body: { error: "D1 staging service is unavailable." } };
+    }
+}
+
+async function fetchAllD1StagingPosPages(req, route) {
+    const rows = [];
+    const limit = D1_STAGING_MAX_PAGE_SIZE;
+    let offset = 0;
+    while (offset <= 1000000 && rows.length < 10000) {
+        const result = await fetchD1StagingPos(req, route.endpoint, route.scope, {
+            query: { ...(req.query || {}), limit, offset }
+        });
+        if (result.status < 200 || result.status >= 300) return result;
+        const body = result.body;
+        const pageItems = Array.isArray(body) ? body : Array.isArray(body?.items) ? body.items : [];
+        rows.push(...pageItems);
+        const hasMore = typeof body?.hasMore === "boolean" ? body.hasMore : pageItems.length >= limit;
+        if (!hasMore || !pageItems.length) break;
+        offset = Number(body?.nextOffset) > offset ? Number(body.nextOffset) : offset + pageItems.length;
+    }
+    return { status: 200, body: rows };
+}
+
+function d1ItemSignature(items) {
+    const normalized = (Array.isArray(items) ? items : []).map(item => ({
+        menuId: Number(item?.menuId ?? item?.menu_id ?? item?.id) || null,
+        variantId: Number(item?.variantId ?? item?.variant_id) || null,
+        quantity: Number(item?.quantity) || 0,
+        options: item?.options || []
+    }));
+    return JSON.stringify(normalized);
+}
+
+app.use("/api", async (req, res, next) => {
+    if (!d1StagingPosEnabledForRequest(req)) return next();
+    const path = String(req.path || "/");
+    const protectedDomain = [
+        "/orders", "/menu", "/tables", "/reservations", "/customers", "/settings", "/business", "/devices", "/license",
+        "/billing-adjustments", "/invoices", "/payments", "/marketing", "/loyalty", "/dashboard",
+        "/reports", "/expenses", "/access", "/kot", "/kot-groups", "/printers",
+        "/kot-device-print-settings", "/kot-printing-mode", "/kot-print-jobs",
+        "/menu-option-sets", "/qr-service-requests"
+    ].some(prefix => path === prefix || path.startsWith(prefix + "/"));
+    const route = d1StagingPosRoute(req);
+    if (route?.error) return res.status(route.status || 400).json({ error: route.error });
+    if (!route) {
+        if (protectedDomain) {
+            res.set("X-Data-Backend", "d1-staging-not-ported");
+            return res.status(501).json({ error: "This screen is not connected to the D1 staging pilot yet.", path });
+        }
+        return next();
+    }
+    res.set("X-Data-Backend", "cloudflare-d1-staging");
+    if (path === "/orders" || path.startsWith("/orders/")) res.set("X-Orders-Server-Time", new Date().toISOString());
+
+    if (route.kind === "printer-io") return next();
+    if (route.kind === "disabled-direct-payment") {
+        return res.status(410).json({ error: "Direct payment creation is disabled. Record payments through order settlement." });
+    }
+    if (route.kind === "device-key-create") {
+        try {
+            const key = await createD1StagingDeviceRegistrationKey(Number(req.user.business_id), {
+                request: req,
+                deviceName: String(req.body.deviceName || "POS Device").trim() || "POS Device",
+                createdByType: "admin",
+                createdByUserId: req.user.id,
+                expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : new Date(Date.now() + 24 * 60 * 60 * 1000)
+            });
+            return res.status(201).json({ success: true, registrationKey: key });
+        } catch (error) {
+            return res.status(error.status || 502).json({ error: error.message || "Failed to generate registration key" });
+        }
+    }
+
+    try {
+        if (route.kind === "qr-generation") {
+            const body = req.body && typeof req.body === "object" ? req.body : {};
+            const result = await fetchD1StagingPos(req, route.endpoint, route.scope, { method: "POST", body });
+            if (result.status < 200 || result.status >= 300) return res.status(result.status).json(result.body);
+            const targetUrl = String(body.url || "").trim();
+            const dataUrl = await QRCode.toDataURL(targetUrl, {
+                errorCorrectionLevel: "M", margin: 3, width: 640,
+                color: { dark: "#111827", light: "#FFFFFF" }
+            });
+            return res.json({ dataUrl });
+        }
+
+        if (route.kind === "marketing-push-settings") {
+            const result = await fetchD1StagingPos(req, route.endpoint, route.scope);
+            if (result.status < 200 || result.status >= 300) return res.status(result.status).json(result.body);
+            return res.json({ ...result.body, configured: Boolean(process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY && process.env.VAPID_SUBJECT) });
+        }
+
+        if (route.kind === "marketing-push-send") {
+            if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY || !process.env.VAPID_SUBJECT) {
+                return res.status(503).json({ error: "Push notifications need VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT in the server environment" });
+            }
+            let webPush;
+            try { webPush = require("web-push"); }
+            catch (_) { return res.status(503).json({ error: "The web-push package is not installed on this server" }); }
+            const body = req.body && typeof req.body === "object" ? req.body : {};
+            const title = String(body.title || "").trim().slice(0, 120);
+            const message = String(body.message || "").trim().slice(0, 500);
+            if (!title || !message) return res.status(400).json({ error: "Add a title and message" });
+            const created = await fetchD1StagingPos(req, route.endpoint, route.scope, { method: "POST", body: { title, message } });
+            if (created.status < 200 || created.status >= 300) return res.status(created.status).json(created.body);
+            const campaign = created.body?.campaign;
+            const campaignId = Number(campaign?.id);
+            const subscriberCount = Math.max(0, Number(campaign?.subscriber_count) || 0);
+            if (!Number.isSafeInteger(campaignId) || campaignId <= 0) return res.status(502).json({ error: "D1 created the campaign without returning its ID." });
+            webPush.setVapidDetails(process.env.VAPID_SUBJECT, process.env.VAPID_PUBLIC_KEY, process.env.VAPID_PRIVATE_KEY);
+
+            const subscriberResult = await fetchD1StagingPos(req, "pos/marketing/push-subscriptions", "marketing.create");
+            if (subscriberResult.status < 200 || subscriberResult.status >= 300) {
+                await fetchD1StagingPos(req, `pos/marketing/push-campaigns/${campaignId}/finalize`, "marketing.create", {
+                    method: "PUT", body: { status: "failed", sentCount: 0, failedCount: subscriberCount }
+                });
+                return res.status(subscriberResult.status).json(subscriberResult.body);
+            }
+            const subscriptions = Array.isArray(subscriberResult.body?.subscriptions) ? subscriberResult.body.subscriptions : [];
+            let sentCount = 0, failedCount = 0;
+            const expiredIds = [];
+            const targetUrl = String(created.body?.targetUrl || campaign?.target_url || "");
+            const payload = JSON.stringify({ title, body: message, url: targetUrl, tag: `campaign-${campaignId}` });
+            for (let offset = 0; offset < subscriptions.length; offset += 50) {
+                const batch = subscriptions.slice(offset, offset + 50);
+                const results = await Promise.allSettled(batch.map(row => webPush.sendNotification(row.subscription, payload, { TTL: 60 * 60 * 24 })));
+                results.forEach((result, index) => {
+                    if (result.status === "fulfilled") sentCount++;
+                    else {
+                        failedCount++;
+                        const statusCode = Number(result.reason?.statusCode || 0);
+                        if (statusCode === 404 || statusCode === 410) expiredIds.push(Number(batch[index].id));
+                    }
+                });
+            }
+            if (expiredIds.length) {
+                await fetchD1StagingPos(req, "pos/marketing/push-subscriptions/expired", "marketing.create", { method: "DELETE", body: { ids: expiredIds } });
+            }
+            const status = failedCount === 0 ? "sent" : sentCount === 0 ? "failed" : "partial";
+            const finalized = await fetchD1StagingPos(req, `pos/marketing/push-campaigns/${campaignId}/finalize`, "marketing.create", {
+                method: "PUT", body: { status, sentCount, failedCount }
+            });
+            if (finalized.status < 200 || finalized.status >= 300) {
+                return res.status(502).json({ error: "Notifications were sent, but D1 could not save the delivery result.", sentCount, failedCount, campaignId });
+            }
+            return res.status(201).json({ success: true, campaign: finalized.body?.campaign || null, message: `Sent to ${sentCount} of ${subscriptions.length} subscribed device(s).` });
+        }
+
+        if (route.kind === "staff-access") {
+            const body = req.body && typeof req.body === "object" ? { ...req.body } : {};
+            const accessUserCreate = path === "/access/users" && req.method === "POST";
+            const accessUserEdit = /^\/access\/users\/\d+$/.test(path) && req.method === "PUT";
+            if (accessUserCreate || accessUserEdit) {
+                const password = String(body.password || "");
+                delete body.password;
+                delete body.passwordHash;
+                if (accessUserCreate && (!password || password.length < 6)) return res.status(400).json({ error: "Password must be at least 6 characters" });
+                if (password && password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+                if (password.length > 1024) return res.status(400).json({ error: "Password must be 1024 characters or fewer" });
+                if (password) body.passwordHash = await hashPassword(password);
+            }
+            const result = await fetchD1StagingPos(req, route.endpoint, route.scope, { method: req.method, body });
+            return res.status(result.status).json(result.body);
+        }
+
+        if (route.kind === "create-order") {
+            const sourceBody = req.body && typeof req.body === "object" ? req.body : {};
+            const checkout = sourceBody.checkout && typeof sourceBody.checkout === "object" ? sourceBody.checkout : null;
+            const createBody = { ...sourceBody, initialStatus: "Open", status: "Open" };
+            delete createBody.checkout;
+            const created = await fetchD1StagingPos(req, route.endpoint, route.scope, { method: "POST", body: createBody });
+            if (created.status < 200 || created.status >= 300) return res.status(created.status).json(created.body);
+            if (!checkout) return res.status(created.status).json(created.body);
+            const orderId = Number(created.body?.order?.id);
+            if (!Number.isSafeInteger(orderId) || orderId <= 0) return res.status(502).json({ error: "D1 created the order without returning its ID." });
+            const settled = await fetchD1StagingPos(req, "pos/orders/" + orderId + "/settle", "payments.create", { method: "POST", body: checkout });
+            if (settled.status < 200 || settled.status >= 300) {
+                return res.status(settled.status).json({
+                    ...settled.body,
+                    order: created.body?.order || null,
+                    settlementPending: true,
+                    error: String(settled.body?.error || "The order was saved in D1, but checkout did not finish. Open the order and settle its balance.")
+                });
+            }
+            return res.status(settled.status).json(settled.body);
+        }
+
+        if (route.kind === "update-order") {
+            const body = req.body && typeof req.body === "object" ? req.body : {};
+            const checkout = body.checkout && typeof body.checkout === "object" ? body.checkout : null;
+            const updateBody = { ...body };
+            delete updateBody.checkout;
+            const existing = await fetchD1StagingPos(req, "pos/orders/" + route.orderId, "orders.view");
+            if (existing.status < 200 || existing.status >= 300) return res.status(existing.status).json(existing.body);
+            const existingOrder = existing.body?.order;
+            if (!existingOrder) return res.status(404).json({ error: "Order not found" });
+            const permissions = req.user?.permissions && typeof req.user.permissions === "object" ? req.user.permissions : {};
+            const ownerDefaults = req.user?.is_owner === true && req.user?.permissions_override === null;
+            const canEditClosed = ownerDefaults || permissions["orders.edit_closed"] === true;
+            const canEditAfterPrint = ownerDefaults || permissions["orders.edit_after_print"] === true;
+            const canEditOpen = ownerDefaults || permissions["orders.edit_open"] === true || permissions["orders.edit"] === true;
+            const orderStatus = String(existingOrder.status || "").toLowerCase();
+            const isQrOrder = Boolean(existingOrder.is_qr_order || existingOrder.public_tracking_token) || /^QR-/i.test(String(existingOrder.order_number || ""));
+            if (orderStatus === "cancelled") return res.status(409).json({ error: "Cancelled orders cannot be edited." });
+            if (orderStatus === "completed") {
+                const canEditThisBill = existingOrder.bill_printed_at ? (canEditAfterPrint || canEditClosed) : canEditClosed;
+                if (!canEditThisBill) {
+                    return res.status(403).json({ error: existingOrder.bill_printed_at
+                        ? "You do not have permission to edit a printed bill."
+                        : "Only the business owner or a user with closed-bill editing can edit this closed bill." });
+                }
+            } else if (orderStatus === "ready" && isQrOrder) {
+                if (!canEditOpen) return res.status(403).json({ error: "You do not have permission to edit open orders." });
+            } else if (["pending", "preparing"].includes(orderStatus) && isQrOrder) {
+                return res.status(409).json({ error: "QR orders must be accepted and marked ready before checkout." });
+            } else if (orderStatus === "open") {
+                if (!canEditOpen) return res.status(403).json({ error: "You do not have permission to edit open orders." });
+            } else {
+                return res.status(409).json({ error: "This order cannot be edited in its current status." });
+            }
+            const updated = await fetchD1StagingPos(req, "pos/orders/" + route.orderId, "orders.edit_open", { method: "PUT", body: updateBody });
+            if (updated.status < 200 || updated.status >= 300) return res.status(updated.status).json(updated.body);
+            if (!checkout) return res.status(updated.status).json(updated.body);
+            const settled = await fetchD1StagingPos(req, "pos/orders/" + route.orderId + "/settle", "payments.create", { method: "POST", body: checkout });
+            if (settled.status < 200 || settled.status >= 300) {
+                return res.status(settled.status).json({
+                    ...settled.body,
+                    order: updated.body?.order || null,
+                    settlementPending: true,
+                    error: String(settled.body?.error || "The order was saved in D1, but checkout did not finish. Open the order and settle its balance.")
+                });
+            }
+            return res.status(settled.status).json(settled.body);
+        }
+
+        const result = route.allPages
+            ? await fetchAllD1StagingPosPages(req, route)
+            : await fetchD1StagingPos(req, route.endpoint, route.scope, { method: req.method, body: req.body });
+        if (path === "/menu/public-settings" && result.status >= 200 && result.status < 300 && result.body && typeof result.body === "object") {
+            const host = String(req.hostname || "").toLowerCase();
+            result.body.localNetworkUrl = ["localhost", "127.0.0.1", "::1"].includes(host) ? getLocalNetworkMenuUrl() : null;
+        }
+        return res.status(result.status).json(result.body);
+    } catch (error) {
+        console.error("D1 staging POS bridge error:", error?.name || "Error");
+        return res.status(502).json({ error: "D1 staging POS request failed." });
+    }
+});
+
 app.get("/api/d1-staging/business", (req, res) => proxyD1StagingRead(req, res, "business", "settings.view"));
 app.get("/api/d1-staging/menu/categories", (req, res) => proxyD1StagingRead(req, res, "menu/categories", "menu.view", true));
 app.get("/api/d1-staging/menu", (req, res) => proxyD1StagingRead(req, res, "menu", "menu.view", true));
+
+function parseD1StagingOrderId(req, res) {
+    const orderId = Number(req.params.id);
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) {
+        res.status(400).json({ error: "A valid order ID is required" });
+        return null;
+    }
+    return orderId;
+}
+
+app.get("/api/d1-staging/orders", (req, res) => proxyD1StagingRead(req, res, "orders", "orders.view", true));
+app.get("/api/d1-staging/orders/:id", (req, res) => {
+    const orderId = parseD1StagingOrderId(req, res);
+    if (orderId) return proxyD1StagingRead(req, res, "orders/" + orderId, "orders.view");
+});
+app.get("/api/d1-staging/orders/:id/:resource", (req, res) => {
+    const orderId = parseD1StagingOrderId(req, res);
+    if (!orderId) return;
+    const resource = String(req.params.resource || "").toLowerCase();
+    if (!["items", "payments", "kot"].includes(resource)) return res.status(404).json({ error: "D1 staging order resource not found" });
+    return proxyD1StagingRead(req, res, "orders/" + orderId + "/" + resource, "orders.view", true);
+});
+app.post("/api/d1-staging/orders", (req, res) => proxyD1StagingWrite(req, res, "orders", "new_order.create"));
+app.post("/api/d1-staging/orders/:id/settle", (req, res) => {
+    const orderId = parseD1StagingOrderId(req, res);
+    if (orderId) return proxyD1StagingWrite(req, res, "orders/" + orderId + "/settle", "payments.create");
+});
 
 // Image writes use the application's café-scoped session. The Supabase service key
 // stays on this server; callers cannot choose a business id, bucket, or object path.
@@ -3598,6 +4615,70 @@ async function setBusinessImageReference(entity, id, businessId, imageUrl, previ
     return runSystemContext(() => pool.query("UPDATE businesses SET logo_url=$1,updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND logo_url IS NOT DISTINCT FROM $3 RETURNING id,logo_url AS image_url", [imageUrl, businessId, previousUrl]));
 }
 
+async function readD1StagingImageReference(req, entity, id) {
+    const result = await fetchD1StagingPos(req, `pos/image-references/${entity}/${id}`, entity === "logo" ? "settings.view" : "menu.view");
+    if (result.status < 200 || result.status >= 300) throw Object.assign(new Error(result.body?.error || "Could not load the image target."), { status: result.status });
+    return { image_url: result.body?.imageUrl || null };
+}
+
+async function writeD1StagingImageReference(req, entity, id, imageUrl, expectedImageUrl) {
+    const result = await fetchD1StagingPos(req, `pos/image-references/${entity}/${id}`, entity === "logo" ? "settings.edit" : "menu.edit", {
+        method: "PUT", body: { imageUrl: imageUrl || null, expectedImageUrl: expectedImageUrl || null }
+    });
+    if (result.status < 200 || result.status >= 300) throw Object.assign(new Error(result.body?.error || "Could not save the image reference."), { status: result.status });
+    return result.body;
+}
+
+function d1StagingImageObject(imageUrl, businessId) {
+    if (!imageUrl || typeof imageUrl !== "string") return null;
+    let parsed;
+    try { parsed = new URL(imageUrl); } catch { return null; }
+    const base = getD1StagingWorkerBaseUrl();
+    if (!base || parsed.origin !== base || parsed.search || parsed.hash || parsed.username || parsed.password) return null;
+    const match = parsed.pathname.match(/^\/images\/(item|category|logo)\/(\d+)\/(\d+)\/([a-f0-9-]{36}\.(?:jpg|png|webp))$/i);
+    if (!match || Number(match[2]) !== Number(businessId)) return null;
+    if (match[1] === "logo" && Number(match[3]) !== Number(businessId)) return null;
+    return { entity: match[1], targetId: Number(match[3]), filename: match[4] };
+}
+
+async function writeD1StagingImageObject(req, entity, id, filename, image, mimeType, method = "PUT") {
+    const workerBaseUrl = getD1StagingWorkerBaseUrl();
+    const secret = String(process.env.D1_STAGING_BRIDGE_SECRET || "");
+    const businessId = Number(req.user?.business_id || 0);
+    const userId = Number(req.user?.id || 0);
+    if (!workerBaseUrl || secret.length < 32 || !d1StagingBusinessIdAllowed(businessId) || !userId) {
+        return { status: 503, body: { error: "D1 image storage is not configured for this café." } };
+    }
+    const scope = entity === "logo" ? "settings.edit" : "menu.edit";
+    const token = createD1StagingBridgeToken(userId, businessId, scope, req.device?.device_id);
+    const safeFilename = String(filename || "");
+    if (!/^[a-f0-9-]{36}\.(?:jpg|png|webp)$/i.test(safeFilename)) return { status: 400, body: { error: "Invalid image filename." } };
+    const route = `/v1/images/${entity}/${id}/${encodeURIComponent(safeFilename)}?business_id=${businessId}`;
+    const headers = { "X-D1-Bridge-Token": token, Accept: "application/json" };
+    const options = { method, headers, signal: AbortSignal.timeout(20000) };
+    if (method === "PUT") {
+        headers["Content-Type"] = mimeType;
+        options.body = image;
+    }
+    try {
+        const response = await fetch(workerBaseUrl + route, options);
+        const text = await response.text();
+        let body;
+        try { body = JSON.parse(text || "{}"); } catch { body = { error: "D1 image storage returned an invalid response." }; }
+        return { status: response.status, body };
+    } catch (error) {
+        console.warn("D1 image storage request unavailable:", error?.name || "Error");
+        return { status: 502, body: { error: "D1 image storage is unavailable." } };
+    }
+}
+
+async function deleteD1StagingImageIfUnreferenced(req, imageUrl, businessId) {
+    const object = d1StagingImageObject(imageUrl, businessId);
+    if (!object) return false;
+    const result = await writeD1StagingImageObject(req, object.entity, object.targetId, object.filename, null, null, "DELETE");
+    return result.status >= 200 && result.status < 300;
+}
+
 async function uploadTenantImage(req, res) {
     const entity = String(req.params.entity || (req.path?.endsWith("/logo") ? "logo" : "")).toLowerCase();
     const businessId = Number(req.user?.business_id || 0);
@@ -3609,8 +4690,26 @@ async function uploadTenantImage(req, res) {
     if (!image || !image.length || image.length > maxBytes || !imageStorageMimeExtensions[mimeType]) return res.status(413).json({ error: entity === "item" ? "Choose a non-empty JPEG, PNG or WebP image up to 2 MB." : "Café logos and category images must be 200 KB or smaller." });
     if (!imageBufferMatchesMime(image, mimeType)) return res.status(415).json({ error: "The image contents do not match its JPEG, PNG or WebP file type." });
     try {
-        const existing = await imageRecordForBusiness(entity, id, businessId);
+        const d1Reference = d1StagingPosEnabledForRequest(req) && ["item", "category", "logo"].includes(entity);
+        const existing = d1Reference ? await readD1StagingImageReference(req, entity, id) : await imageRecordForBusiness(entity, id, businessId);
         if (!existing) return res.status(404).json({ error: "The image target was not found for this café." });
+        if (d1Reference) {
+            const filename = `${crypto.randomUUID()}.${imageStorageMimeExtensions[mimeType]}`;
+            const stored = await writeD1StagingImageObject(req, entity, id, filename, image, mimeType, "PUT");
+            if (stored.status < 200 || stored.status >= 300 || !stored.body?.imageUrl) {
+                return res.status(stored.status >= 400 && stored.status < 500 ? stored.status : 502).json({ error: stored.body?.error || "Could not upload the image to Cloudflare storage." });
+            }
+            const imageUrl = String(stored.body.imageUrl);
+            try {
+                const updated = await writeD1StagingImageReference(req, entity, id, imageUrl, existing.image_url || null);
+                if (updated?.success !== true) throw Object.assign(new Error("The image target changed while uploading. Please retry."), { status: 409 });
+            } catch (error) {
+                await deleteD1StagingImageIfUnreferenced(req, imageUrl, businessId);
+                throw error;
+            }
+            if (existing.image_url && existing.image_url !== imageUrl) await deleteD1StagingImageIfUnreferenced(req, existing.image_url, businessId);
+            return res.json({ success: true, imageUrl, objectPath: stored.body.objectPath, size: image.length, contentType: mimeType });
+        }
         const config = getImageStorageConfig();
         const objectPath = entity === "logo"
             ? `${businessId}/logo/${crypto.randomUUID()}.${imageStorageMimeExtensions[mimeType]}`
@@ -3629,16 +4728,20 @@ async function uploadTenantImage(req, res) {
         }
         const imageUrl = imageStoragePublicUrl(config, bucket, objectPath);
         let updated;
-        try { updated = await setBusinessImageReference(entity, id, businessId, imageUrl, existing.image_url || null); }
+        try {
+            updated = d1Reference
+                ? await writeD1StagingImageReference(req, entity, id, imageUrl, existing.image_url || null)
+                : await setBusinessImageReference(entity, id, businessId, imageUrl, existing.image_url || null);
+        }
         catch (error) {
             await fetch(endpoint, { method: "DELETE", headers: imageStorageAuthHeaders(config) }).catch(() => {});
             throw error;
         }
-        if (!updated.rows.length) {
+        if (d1Reference ? updated?.success !== true : !updated.rows.length) {
             await fetch(endpoint, { method: "DELETE", headers: imageStorageAuthHeaders(config) }).catch(() => {});
             return res.status(409).json({ error: "The image target changed while uploading. Please retry." });
         }
-        if (existing.image_url && existing.image_url !== imageUrl) await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
+        if (!d1Reference && existing.image_url && existing.image_url !== imageUrl) await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
         res.json({ success: true, imageUrl, objectPath, size: image.length, contentType: mimeType });
     } catch (error) {
         console.error("Secure image upload error:", error.message);
@@ -3652,12 +4755,16 @@ async function removeTenantImage(req, res) {
     const id = entity === "logo" ? businessId : Number(req.params.id);
     if (!imageStorageBuckets[entity] || !Number.isInteger(businessId) || businessId <= 0 || !Number.isInteger(id) || id <= 0) return res.status(400).json({ error: "Choose a valid image target." });
     try {
-        const existing = await imageRecordForBusiness(entity, id, businessId);
+        const d1Reference = d1StagingPosEnabledForRequest(req) && ["item", "category", "logo"].includes(entity);
+        const existing = d1Reference ? await readD1StagingImageReference(req, entity, id) : await imageRecordForBusiness(entity, id, businessId);
         if (!existing) return res.status(404).json({ error: "The image target was not found for this café." });
         if (!existing.image_url) return res.json({ success: true, imageUrl: "" });
-        const updated = await setBusinessImageReference(entity, id, businessId, null, existing.image_url);
-        if (!updated.rows.length) return res.status(409).json({ error: "The image changed while removing it. Please retry." });
-        await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
+        const updated = d1Reference
+            ? await writeD1StagingImageReference(req, entity, id, null, existing.image_url)
+            : await setBusinessImageReference(entity, id, businessId, null, existing.image_url);
+        if (d1Reference ? updated?.success !== true : !updated.rows.length) return res.status(409).json({ error: "The image changed while removing it. Please retry." });
+        if (d1Reference) await deleteD1StagingImageIfUnreferenced(req, existing.image_url, businessId);
+        else await deleteManagedImageIfUnreferenced(existing.image_url, businessId);
         res.json({ success: true, imageUrl: "" });
     } catch (error) {
         console.error("Secure image removal error:", error.message);
@@ -6205,7 +7312,7 @@ app.put(
             const adminDefaults = req.user.is_owner === true && req.user.permissions_override === null;
             const closed = order.status === "Completed";
             if (closed && !adminDefaults && permissions["orders.cancel_closed"] !== true) {
-                throw Object.assign(new Error("You do not have permission to cancel a closed order."), { status: 403 });
+                throw Object.assign(new Error("You do not have permission to void a closed order."), { status: 403 });
             }
             if (!closed && !adminDefaults && permissions["orders.edit_open"] !== true && permissions["orders.edit"] !== true) {
                 throw Object.assign(new Error("You do not have permission to cancel this open order."), { status: 403 });
@@ -6265,7 +7372,7 @@ app.put(
 
             }
 
-            await recordOrderActivity(client, order.id, "Order cancelled", `Reason: ${reason}. Cancelled by ${orderActivityActorLabel(req)}${closed ? ". Closed order cancellation." : "."}`, req);
+            await recordOrderActivity(client, order.id, closed ? "Order voided" : "Order cancelled", `Reason: ${reason}. ${closed ? "Voided" : "Cancelled"} by ${orderActivityActorLabel(req)}${closed ? ". Closed bill voided." : "."}`, req);
 
             await client.query("COMMIT");
 
@@ -8367,7 +9474,7 @@ app.get("/api/reports/sales-audit", async (req, res) => {
             SELECT b.business_name,b.business_code,
                    o.id AS order_id,o.order_number,o.order_type,o.table_number,o.pax,
                    o.created_at,o.updated_at,o.subtotal,o.discount,o.service_charge,o.gst,o.total AS bill_total,
-                   o.status AS order_status,o.notes,o.non_chargeable_reason,o.cancellation_reason,o.bill_printed_at,
+                    CASE WHEN activity.voided_at IS NOT NULL OR (o.status='Cancelled' AND activity.closed_at IS NOT NULL) THEN 'Voided' ELSE o.status END AS order_status,o.notes,o.non_chargeable_reason,o.cancellation_reason,o.bill_printed_at,
                    o.public_tracking_token,o.marketing_deal_name,o.discount_adjustment_name,
                    o.customer_id,o.sales_channel_key,
                    COALESCE(NULLIF(o.sales_channel_name,''),CASE WHEN o.public_tracking_token IS NOT NULL THEN 'Slash ' || o.order_type ELSE o.order_type END) AS channel_label,
@@ -8396,7 +9503,7 @@ app.get("/api/reports/sales-audit", async (req, res) => {
                         THEN ROUND(EXTRACT(EPOCH FROM (activity.accepted_at-o.created_at))/60.0,2) ELSE NULL END AS time_to_accept,
                    CASE WHEN activity.ready_at IS NOT NULL AND activity.accepted_at IS NOT NULL
                         THEN ROUND(EXTRACT(EPOCH FROM (activity.ready_at-activity.accepted_at))/60.0,2) ELSE NULL END AS time_to_prepare,
-                   COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) AS business_date
+                   COALESCE(activity.voided_at,o.cancelled_at,activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) AS business_date
             FROM orders o
             INNER JOIN businesses b ON b.id=o.business_id
             LEFT JOIN invoices i ON i.order_id=o.id AND i.business_id=o.business_id
@@ -8413,6 +9520,7 @@ app.get("/api/reports/sales-audit", async (req, res) => {
                 SELECT (ARRAY_AGG(a.actor ORDER BY a.created_at ASC) FILTER (WHERE a.event_type='Order created'))[1] AS created_by,
                        (ARRAY_AGG(a.actor ORDER BY a.created_at DESC) FILTER (WHERE a.event_type='Order completed'))[1] AS closed_by,
                        MAX(a.created_at) FILTER (WHERE a.event_type='Order completed') AS closed_at,
+                       MAX(a.created_at) FILTER (WHERE a.event_type='Order voided') AS voided_at,
                        MAX(a.created_at) FILTER (WHERE a.event_type='QR order accepted') AS accepted_at,
                        MAX(a.created_at) FILTER (WHERE a.event_type='QR order marked ready') AS ready_at,
                        COUNT(*) FILTER (WHERE o.bill_printed_at IS NOT NULL AND a.created_at>o.bill_printed_at AND a.event_type='Closed bill edited') AS modified_after_print,
@@ -8442,10 +9550,10 @@ app.get("/api/reports/sales-audit", async (req, res) => {
                 WHERE k.order_id=o.id AND k.business_id=o.business_id
                   AND k.prep_started_at IS NOT NULL AND k.prep_completed_at IS NOT NULL
             ) prep ON TRUE
-            WHERE o.business_id=$1 AND o.status='Completed'
-              AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) >= ${dateRange.start}
-              AND COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) < ${dateRange.end}
-            ORDER BY COALESCE(activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) DESC,o.id DESC
+            WHERE o.business_id=$1 AND (o.status='Completed' OR (o.status='Cancelled' AND (activity.voided_at IS NOT NULL OR activity.closed_at IS NOT NULL)))
+              AND COALESCE(activity.voided_at,o.cancelled_at,activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) >= ${dateRange.start}
+              AND COALESCE(activity.voided_at,o.cancelled_at,activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) < ${dateRange.end}
+            ORDER BY COALESCE(activity.voided_at,o.cancelled_at,activity.closed_at,i.invoice_date,pay.last_payment_time,o.updated_at,o.created_at) DESC,o.id DESC
         `, [businessId]);
         res.json({ transactions: result.rows });
     } catch (error) {
@@ -9722,6 +10830,10 @@ app.get('/api/reports/advanced', async (req, res) => {
                     o.order_number,
                     o.order_type,
                     o.table_number,
+                    CASE WHEN EXISTS (
+                        SELECT 1 FROM order_activity a
+                        WHERE a.order_id=o.id AND a.business_id=o.business_id AND a.event_type IN ('Order voided','Order completed')
+                    ) THEN 'Voided' ELSE 'Cancelled' END AS action,
                     COALESCE(o.cancelled_at,o.updated_at,o.created_at) AS cancelled_at,
                     o.cancellation_reason AS reason,
                     o.cancelled_by_user_id,
@@ -10978,6 +12090,13 @@ function sendRawPrinterBytes(host,port,bytes) {
 async function getTenantPrinter(req,res,printerId) {
     const id=Number(printerId),businessId=Number(req.user.business_id);
     if(!Number.isInteger(id)||id<=0){res.status(400).json({error:'Invalid printer ID'});return null;}
+    if (d1StagingPosEnabledForRequest(req)) {
+        const result = await fetchD1StagingPos(req, "pos/printers", "printer.view", { query: { source: null } });
+        if (result.status < 200 || result.status >= 300) { res.status(result.status).json(result.body); return null; }
+        const printer = (Array.isArray(result.body) ? result.body : []).find(row => Number(row.id) === id && row.active !== false);
+        if (!printer) { res.status(404).json({error:'Printer not found'}); return null; }
+        return printer;
+    }
     const printer=(await pool.query('SELECT * FROM printers WHERE id=$1 AND business_id=$2 AND active=TRUE',[id,businessId])).rows[0];
     if(!printer){res.status(404).json({error:'Printer not found'});return null;}
     return printer;
@@ -11051,7 +12170,14 @@ app.post('/api/printers/:id/print',async(req,res)=>{
         if(!printer)return;
         if(printer.connection_type!=='network')return res.status(400).json({error:'Use the local print dialog or Bluetooth connection for this printer'});
         if(!req.body.receipt||!['object','string'].includes(typeof req.body.receipt))return res.status(400).json({error:'Receipt data is required'});
-        const savedSettings=(await pool.query('SELECT settings FROM app_settings WHERE business_id=$1',[Number(req.user.business_id)])).rows[0]?.settings||{};
+        let savedSettings;
+        if (d1StagingPosEnabledForRequest(req)) {
+            const result = await fetchD1StagingPos(req, "pos/settings", "settings.view");
+            if (result.status < 200 || result.status >= 300) return res.status(result.status).json(result.body);
+            savedSettings = result.body && typeof result.body === "object" ? result.body : {};
+        } else {
+            savedSettings = (await pool.query('SELECT settings FROM app_settings WHERE business_id=$1',[Number(req.user.business_id)])).rows[0]?.settings||{};
+        }
         const settings={
             restaurantName:req.user.business_name||'SLASH POS',
             address:req.user.business_address||'',
@@ -11736,6 +12862,33 @@ async function createDeviceRegistrationKey(businessId, options = {}) {
     return { ...r.rows[0], rawKey };
 }
 
+async function createD1StagingDeviceRegistrationKey(businessId, options = {}) {
+    const id = Number(businessId);
+    if (!d1StagingBusinessIdAllowed(id)) throw Object.assign(new Error("D1 staging key creation is not enabled for this business"), { status: 403 });
+    const rawKey = generateRegistrationKey();
+    const expiresAt = options.expiresAt ? new Date(options.expiresAt) : new Date(Date.now() + 24 * 60 * 60 * 1000);
+    if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now()) {
+        throw Object.assign(new Error("Registration key expiry must be in the future"), { status: 400 });
+    }
+    const deviceName = String(options.deviceName || "POS Device").trim().slice(0, 160) || "POS Device";
+    const body = {
+        keyHash: hashRegistrationKey(rawKey),
+        keyHint: rawKey.slice(0, 4) + "…" + rawKey.slice(-4),
+        deviceName,
+        expiresAt: expiresAt.toISOString()
+    };
+    const result = options.request
+        ? await fetchD1StagingPos(options.request, "pos/devices/registration-keys", "devices.edit", { method: "POST", body })
+        : await fetchD1StagingAuth(id, "support/registration-keys", "auth.support.key.write", {
+            method: "POST",
+            body: { ...body, createdByUserId: options.createdByUserId ? Number(options.createdByUserId) : null }
+        });
+    if (result.status < 200 || result.status >= 300 || !result.body?.registrationKey) {
+        throw Object.assign(new Error(result.body?.error || "D1 could not create the registration key"), { status: result.status || 502 });
+    }
+    return { ...result.body.registrationKey, rawKey };
+}
+
 async function registerDeviceFromKey(req, res) {
     try {
         const rawKey = String(req.body.registrationKey || '').trim();
@@ -11745,9 +12898,60 @@ async function registerDeviceFromKey(req, res) {
 
         let deviceId = getCookie(req, 'cafe_device_id');
         if (!deviceId) deviceId = crypto.randomBytes(32).toString('hex');
+        const keyHash = hashRegistrationKey(rawKey);
+        if (d1StagingPublicEnabled()) {
+        const staging = await fetchD1StagingPublicAuth('register-device', 'auth.public.device.register', {
+                method: 'POST', body: {
+                    keyHash,
+                    deviceId,
+                    deviceName,
+                    deviceType,
+                    ip: String(req.ip || '').slice(0, 100),
+                    userAgent: String(req.headers['user-agent'] || '').slice(0, 512)
+                }
+            });
+            if (staging.status >= 200 && staging.status < 300) {
+                const businessId = Number(staging.body?.business?.id || staging.body?.device?.business_id || 0);
+                if (!businessId || Number(staging.body?.device?.business_id) !== businessId || String(staging.body?.device?.device_id || '') !== deviceId) {
+                    return res.status(502).json({ error: 'D1 returned mismatched device registration details.' });
+                }
+                d1OnboardedBusinessIds.add(businessId);
+                setCookie(res, 'cafe_device_id', deviceId, { maxAge: 60 * 60 * 24 * 365, httpOnly: true, sameSite: 'None', secure: true });
+                return res.status(201).json(staging.body);
+            }
+            if (staging.status !== 404) return res.status(staging.status >= 500 ? 502 : staging.status).json(staging.body || { error: 'Could not register this device in D1.' });
+        }
+        let stagingUnavailable = false;
+        for (const businessId of d1StagingAuthBusinessIds()) {
+            const staging = await fetchD1StagingAuth(businessId, 'register-device', 'auth.device.register', {
+                method: 'POST',
+                body: {
+                    keyHash,
+                    deviceId,
+                    deviceName,
+                    deviceType,
+                    ip: String(req.ip || '').slice(0, 100),
+                    userAgent: String(req.headers['user-agent'] || '').slice(0, 512)
+                }
+            });
+            if (staging.status === 404) continue;
+            if (staging.status >= 200 && staging.status < 300) {
+                const business = staging.body?.business || {};
+                const device = staging.body?.device || {};
+                if (Number(business.id) !== businessId || Number(device.business_id) !== businessId || String(device.device_id || '') !== deviceId) {
+                    return res.status(502).json({ error: 'D1 returned mismatched device registration details.' });
+                }
+                setCookie(res, 'cafe_device_id', deviceId, { maxAge: 60 * 60 * 24 * 365, httpOnly: true, sameSite: 'None', secure: true });
+                return res.status(201).json(staging.body);
+            }
+            if (staging.status >= 500) {
+                stagingUnavailable = true;
+                break;
+            }
+            return res.status(staging.status).json(staging.body || { error: 'Could not register this device in D1 staging.' });
+        }
 
         return await runSystemContext(async () => {
-            const keyHash = hashRegistrationKey(rawKey);
             const result = await pool.query(`
                 SELECT k.*, l.status AS license_status, l.starts_at, l.expires_at, l.max_devices, b.business_name, b.business_code, b.active AS business_active
                 FROM device_registration_keys k
@@ -11757,7 +12961,12 @@ async function registerDeviceFromKey(req, res) {
                 LIMIT 1
             `, [keyHash]);
             const key = result.rows[0];
-            if (!key) return res.status(404).json({ error: 'Invalid registration key' });
+            if (!key) return res.status(stagingUnavailable ? 502 : 404).json({ error: stagingUnavailable ? 'D1 staging device registration is unavailable.' : 'Invalid registration key' });
+            if (d1StagingBusinessIdAllowed(key.business_id)) {
+                return res.status(stagingUnavailable ? 502 : 503).json({
+                    error: stagingUnavailable ? 'D1 staging device registration is unavailable.' : 'This device registration key is not present in D1 staging yet.'
+                });
+            }
             if (key.status !== 'unused') return res.status(409).json({ error: 'This registration key has already been used or revoked' });
             if (key.expires_at && new Date(key.expires_at).getTime() < Date.now()) {
                 await pool.query(`UPDATE device_registration_keys SET status='expired' WHERE id=$1`, [key.id]);
@@ -11832,6 +13041,21 @@ async function createSupportSession(userId) {
     return { token, expiresAt: expiresAt.getTime() };
 }
 
+async function createD1SupportSession(userId) {
+    const businessId = d1StagingAuthBusinessIds()[0];
+    if (!businessId) throw Object.assign(new Error("D1 staging support authentication is unavailable."), { status: 503 });
+    const token = `d1sup_${crypto.randomBytes(32).toString("hex")}`;
+    const tokenHash = hashSessionToken(token);
+    const expiresAt = new Date(Date.now() + SUPPORT_SESSION_TTL_MS);
+    const saved = await fetchD1StagingAuth(businessId, "system-support/session", "auth.support.login", {
+        method: "POST", body: { supportUserId: Number(userId), tokenHash, expiresAt: expiresAt.toISOString() }
+    });
+    if (saved.status < 200 || saved.status >= 300) {
+        throw Object.assign(new Error(saved.body?.error || "Could not save the Support session in D1."), { status: saved.status >= 500 ? 503 : saved.status });
+    }
+    return { token, expiresAt: expiresAt.getTime() };
+}
+
 async function getSupportSession(req) {
     let token = String(req.headers.authorization || '').startsWith('Bearer ')
         ? String(req.headers.authorization || '').slice(7).trim()
@@ -11839,6 +13063,14 @@ async function getSupportSession(req) {
     if (!token) token = getCookie(req, 'cafe_support_session') || '';
     if (!token) return null;
     const tokenHash = hashSessionToken(token);
+    if (token.startsWith("d1sup_")) {
+        const businessId = d1StagingAuthBusinessIds()[0];
+        if (!businessId) throw Object.assign(new Error("D1 staging support authentication is unavailable."), { status: 503 });
+        const result = await fetchD1StagingAuth(businessId, "system-support/session", "auth.support.login", { query: { token_hash: tokenHash } });
+        if (result.status === 401 || result.status === 404) return null;
+        if (result.status < 200 || result.status >= 300) throw Object.assign(new Error(result.body?.error || "D1 support session validation failed."), { status: result.status });
+        return result.body?.session ? { ...result.body.session, d1Staging: true } : null;
+    }
     const r = await pool.query(`SELECT s.token_hash AS token,s.support_user_id,s.expires_at,u.username,u.display_name FROM support_sessions s JOIN support_users u ON u.id=s.support_user_id WHERE s.token_hash=$1 LIMIT 1`, [tokenHash]);
     const row = r.rows[0];
     if (!row) return null;
@@ -11872,22 +13104,41 @@ app.post('/api/support/login', async (req,res)=>{
         const password=String(req.body.password||'');
         if(!username||!password) return res.status(400).json({error:'Support username and password are required'});
         if(password.length>1024) return res.status(400).json({error:'Password must be 1024 characters or fewer'});
+        const businessId=d1StagingAuthBusinessIds()[0];
+        if(!businessId)return res.status(503).json({error:'D1 staging support authentication is not configured'});
         const identityKey=loginIdentityKey('support',0,username);
-        const existingLockout=await getLoginLockout(identityKey);
+        const lockout=await fetchD1StagingAuth(businessId,'system-support/login-lockout','auth.support.login',{query:{identity_key:identityKey}});
+        if(lockout.status<200||lockout.status>=300)return res.status(503).json({error:'Could not check Support sign-in status in D1'});
+        const existingLockout=Number(lockout.body?.lockedUntil)||0;
         if(existingLockout){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((existingLockout-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}
-        const r=await pool.query(`SELECT id,username,display_name,password_hash,active FROM support_users WHERE LOWER(username)=$1 LIMIT 1`,[username]);
-        const user=r.rows[0];
+        const lookup=await fetchD1StagingAuth(businessId,'system-support/login-user','auth.support.login',{method:'POST',body:{username}});
+        if(lookup.status<200||lookup.status>=300)return res.status(503).json({error:'Could not load Support account from D1'});
+        const user=lookup.body?.user;
         const passwordValid=user?.active?await verifyPassword(password,user.password_hash):false;
-        if(!passwordValid){const lockedUntil=await recordFailedLogin(identityKey);if(lockedUntil){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((lockedUntil-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}return res.status(401).json({error:'Invalid support credentials'});}
-        await clearLoginFailures(identityKey);
-        const session=await createSupportSession(user.id);
+        if(!passwordValid){
+            const failed=await fetchD1StagingAuth(businessId,'system-support/login-failure','auth.support.login',{method:'POST',body:{identityKey}});
+            if(failed.status<200||failed.status>=300)return res.status(503).json({error:'Could not record the Support sign-in attempt in D1'});
+            const lockedUntil=Number(failed.body?.lockedUntil)||0;
+            if(lockedUntil){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((lockedUntil-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}
+            return res.status(401).json({error:'Invalid support credentials'});
+        }
+        const cleared=await fetchD1StagingAuth(businessId,'system-support/login-failures','auth.support.login',{method:'DELETE',query:{identity_key:identityKey}});
+        if(cleared.status<200||cleared.status>=300)return res.status(503).json({error:'Could not reset the Support sign-in status in D1'});
+        const session=await createD1SupportSession(user.id);
         setCookie(res,'cafe_support_session',session.token,{maxAge:Math.floor(SUPPORT_SESSION_TTL_MS/1000),httpOnly:true,sameSite:'Lax',secure:true});
         res.json({success:true,user:{id:user.id,username:user.username,displayName:user.display_name},expiresAt:session.expiresAt});
     }catch(e){console.error('Support login error:',e);res.status(500).json({error:'Support login failed'});}
 });
 
 app.post('/api/support/logout', supportAuth, async(req,res)=>{
-    try { await pool.query(`DELETE FROM support_sessions WHERE token_hash=$1`,[req.supportUser.token]); clearCookie(res,'cafe_support_session'); res.json({success:true}); }
+    try {
+        if(req.supportUser.d1Staging){
+            const businessId=d1StagingAuthBusinessIds()[0];
+            const result=businessId?await fetchD1StagingAuth(businessId,'system-support/session','auth.support.login',{method:'DELETE',query:{token_hash:req.supportUser.token}}):{status:503};
+            if(result.status<200||result.status>=300)return res.status(503).json({error:'Could not revoke the Support session in D1'});
+        }else await pool.query(`DELETE FROM support_sessions WHERE token_hash=$1`,[req.supportUser.token]);
+        clearCookie(res,'cafe_support_session'); res.json({success:true});
+    }
     catch(e){res.status(500).json({error:'Support logout failed'});}
 });
 
@@ -11911,10 +13162,58 @@ app.get('/api/support/businesses', supportAuth, async(req,res)=>{
                 SELECT * FROM business_licenses bl WHERE bl.business_id=b.id ORDER BY bl.id DESC LIMIT 1
             ) l ON TRUE
             LEFT JOIN support_business_branding brand ON brand.business_id=b.id
+            WHERE NOT (b.id = ANY($1::int[]))
             ORDER BY b.id DESC
-        `));
-        res.json(r.rows);
-    } catch(e){console.error(e);res.status(500).json({error:'Failed to load businesses'});}
+        `, [d1StagingAuthBusinessIds()]));
+        const businesses = r.rows.slice();
+        for (const businessId of d1StagingAuthBusinessIds()) {
+            const result = await fetchD1StagingAuth(businessId, "support/business-summary", "auth.support.view");
+            if (result.status < 200 || result.status >= 300) {
+                if (result.status === 404) continue;
+                throw Object.assign(new Error(result.body?.error || "Could not load D1 business summary"), { status: 502 });
+            }
+            const source = result.body?.business;
+            if (!source) continue;
+            const license = result.body?.license || null;
+            const addressLine = [source.address, source.city, source.state].map(value => String(value || "").trim()).filter(Boolean).join(", ");
+            businesses.push({
+                id: Number(source.id),
+                account_number: String(source.id),
+                business_code: source.business_code,
+                business_name: source.business_name,
+                business_brand_name: source.business_name,
+                branch_id: String(source.id),
+                branch_code: source.business_code,
+                branch_name: source.business_name,
+                address_line: addressLine,
+                business_status: source.active ? "Active" : "Inactive",
+                branch_status: source.active ? "Active" : "Inactive",
+                business_type: source.business_type,
+                owner_name: source.owner_name,
+                phone: source.phone,
+                email: source.email,
+                address: source.address,
+                city: source.city,
+                state: source.state,
+                active: Boolean(source.active),
+                created_at: source.created_at,
+                license_id: license?.id ?? null,
+                plan: license?.plan ?? null,
+                license_type: license?.license_type ?? null,
+                add_on: license?.add_on ?? null,
+                duration_months: license?.duration_months ?? null,
+                license_status: license?.status ?? null,
+                starts_at: license?.starts_at ?? null,
+                expires_at: license?.expires_at ?? null,
+                max_devices: license?.max_devices ?? null,
+                active_devices: Number(result.body?.activeDevices || 0),
+                active_users: Number(result.body?.activeUsers || 0),
+                show_powered_by_cafe_pilot: result.body?.showPoweredByCafePilot !== false
+            });
+        }
+        businesses.sort((a, b) => Number(b.id) - Number(a.id));
+        res.json(businesses);
+    } catch(e){console.error(e);res.status(e.status||500).json({error:e.message||'Failed to load businesses'});}
 });
 
 app.patch('/api/support/businesses/:id', supportAuth, async(req,res)=>{
@@ -11924,6 +13223,10 @@ app.patch('/api/support/businesses/:id', supportAuth, async(req,res)=>{
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
         if(!businessName)return res.status(400).json({error:'Business name is required'});
         if(businessName.length>200)return res.status(400).json({error:'Business name must be 200 characters or fewer'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const d1=await fetchD1StagingAuth(businessId,"support/business","auth.support.business.write",{method:"PATCH",body:{businessName}});
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(()=>pool.query(
             `UPDATE businesses SET business_name=$1 WHERE id=$2 RETURNING id,business_name`,
             [businessName,businessId]
@@ -11939,6 +13242,10 @@ app.patch('/api/support/businesses/:id/branding', supportAuth, async(req,res)=>{
         const show=req.body?.showPoweredByCafePilot;
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
         if(typeof show!=='boolean')return res.status(400).json({error:'Choose whether Slash branding should be shown.'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const d1=await fetchD1StagingAuth(businessId,"support/branding","auth.support.business.write",{method:"PATCH",body:{showPoweredByCafePilot:show}});
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(()=>pool.query(
             "INSERT INTO support_business_branding(business_id,show_powered_by_cafe_pilot,updated_at) SELECT id,$2,CURRENT_TIMESTAMP FROM businesses WHERE id=$1 ON CONFLICT (business_id) DO UPDATE SET show_powered_by_cafe_pilot=EXCLUDED.show_powered_by_cafe_pilot,updated_at=CURRENT_TIMESTAMP RETURNING show_powered_by_cafe_pilot",
             [businessId,show]
@@ -11952,6 +13259,10 @@ app.get('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
     try {
         const businessId=Number(req.params.id);
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const d1=await fetchD1StagingAuth(businessId,"support/users","auth.support.view");
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(async()=>{
             const users=await pool.query(`
                 SELECT u.id,u.display_name,u.username,u.profile_id,u.active,u.is_blocked,
@@ -11981,6 +13292,10 @@ app.patch('/api/support/businesses/:businessId/users/:userId/block', supportAuth
         const businessId=Number(req.params.businessId),userId=Number(req.params.userId),blocked=req.body?.blocked;
         if(!Number.isInteger(businessId)||businessId<=0||!Number.isInteger(userId)||userId<=0)return res.status(400).json({error:'Invalid business or user ID'});
         if(typeof blocked!=='boolean')return res.status(400).json({error:'Choose whether to block or unblock this user'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const d1=await fetchD1StagingAuth(businessId,`support/users/${userId}/block`,"auth.support.user.write",{method:"PATCH",body:{blocked,supportUserId:Number(req.supportUser.support_user_id)}});
+            return res.status(d1.status).json(d1.body);
+        }
         const updated=await runSystemContext(async()=>{
             const user=(await pool.query('SELECT id FROM app_users WHERE id=$1 AND business_id=$2',[userId,businessId])).rows[0];
             if(!user)return null;
@@ -12011,6 +13326,10 @@ app.post('/api/support/businesses/:id/slash-ops/reset-password', supportAuth, as
         const password=String(req.body?.password||'');
         if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Invalid business ID'});
         if(password.length<4||password.length>1024)return res.status(400).json({error:'Password must be at least 4 characters'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const d1=await fetchD1StagingAuth(businessId,"support/slash-ops/reset-password","auth.support.user.write",{method:"POST",body:{passwordHash:await hashPassword(password)}});
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(async()=>{
             const user=(await pool.query(`
                 SELECT u.id FROM app_users u
@@ -12040,6 +13359,19 @@ app.post('/api/support/businesses/:id/users', supportAuth, async(req,res)=>{
         if(!displayName||!username)return res.status(400).json({error:'Display name and username are required'});
         if(!/^[a-z0-9._-]{3,100}$/.test(username))return res.status(400).json({error:'Username may contain only letters, numbers, dot, underscore and hyphen'});
         if(password.length<6)return res.status(400).json({error:'Password must be at least 6 characters'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            let permissionsOverride=null;
+            if(req.body.permissionsOverride!==undefined&&req.body.permissionsOverride!==null){
+                if(typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride))return res.status(400).json({error:'Custom permissions must be an object'});
+                const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER,ACCESS_FEATURE_PERMISSIONS_SERVER));
+                permissionsOverride={};
+                for(const key of allowed)permissionsOverride[key]=req.body.permissionsOverride[key]===true;
+            }
+            const d1=await fetchD1StagingAuth(businessId,"support/users","auth.support.user.write",{method:"POST",body:{
+                displayName,username,passwordHash:await hashPassword(password),profileId,active,permissionsOverride
+            }});
+            return res.status(d1.status).json(d1.body);
+        }
         const user=await runSystemContext(async()=>{
             let assignedProfileName=null;
             if(profileId!==null){
@@ -12075,6 +13407,25 @@ app.patch('/api/support/businesses/:businessId/users/:userId', supportAuth, asyn
     try {
         const businessId=Number(req.params.businessId),userId=Number(req.params.userId);
         if(!Number.isInteger(businessId)||businessId<=0||!Number.isInteger(userId)||userId<=0)return res.status(400).json({error:'Invalid business or user ID'});
+        if(d1StagingBusinessIdAllowed(businessId)){
+            const body={};
+            for(const key of ["displayName","username","active"])if(req.body[key]!==undefined)body[key]=req.body[key];
+            if(req.body.profileId!==undefined)body.profileId=req.body.profileId===''?null:req.body.profileId;
+            if(req.body.permissionsOverride!==undefined){
+                if(req.body.permissionsOverride!==null&&(!req.body.permissionsOverride||typeof req.body.permissionsOverride!=='object'||Array.isArray(req.body.permissionsOverride)))return res.status(400).json({error:'Custom permissions must be an object'});
+                if(req.body.permissionsOverride===null)body.permissionsOverride=null;
+                else{
+                    const allowed=new Set(ACCESS_MODULES_SERVER.flatMap(moduleKey=>ACCESS_ACTIONS_SERVER.map(action=>moduleKey+'.'+action)).concat(ACCESS_ORDER_PERMISSIONS_SERVER,ACCESS_FEATURE_PERMISSIONS_SERVER));
+                    body.permissionsOverride={};
+                    for(const key of allowed)body.permissionsOverride[key]=req.body.permissionsOverride[key]===true;
+                }
+            }
+            const password=String(req.body.password||'');
+            if(password&&password.length<6)return res.status(400).json({error:'Password must be at least 6 characters'});
+            if(password)body.passwordHash=await hashPassword(password);
+            const d1=await fetchD1StagingAuth(businessId,`support/users/${userId}`,"auth.support.user.write",{method:"PATCH",body});
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(async()=>{
             const current=(await pool.query(`
                 SELECT u.*,p.name AS profile_name
@@ -12151,6 +13502,19 @@ app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
         const maxDevices=Number(req.body.maxDevices||1);
         if(!Number.isInteger(maxDevices)||maxDevices<1)return res.status(400).json({error:'Max devices must be a positive whole number'});
         if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(expiresAt.getTime()) || expiresAt<=startsAt) return res.status(400).json({error:'Invalid license dates'});
+        if (d1StagingBusinessIdAllowed(businessId)) {
+            const d1 = await fetchD1StagingAuth(businessId, "support/licenses", "auth.support.license.write", {
+                method: "POST",
+                body: {
+                    licenseType, addOn, durationMonths, status,
+                    startsAt: startsAt.toISOString(), expiresAt: expiresAt.toISOString(), maxDevices,
+                    notes: String(req.body.notes||'').trim()||null,
+                    createdBySupportUserId: Number(req.supportUser.support_user_id)
+                }
+            });
+            if (d1.status < 200 || d1.status >= 300) return res.status(d1.status).json(d1.body);
+            return res.status(201).json(d1.body);
+        }
         const result=await runSystemContext(async()=>{
             await pool.query(`UPDATE business_licenses SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE business_id=$1 AND status='active'`,[businessId]);
             return pool.query(`INSERT INTO business_licenses(business_id,plan,license_type,add_on,duration_months,status,starts_at,expires_at,max_devices,notes,created_by_support_user_id) VALUES($1,$2,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,[businessId,licenseType,addOn,durationMonths,status,startsAt,expiresAt,maxDevices,String(req.body.notes||'').trim()||null,Number(req.supportUser.support_user_id)]);
@@ -12162,7 +13526,17 @@ app.post('/api/support/businesses/:id/licenses', supportAuth, async(req,res)=>{
 app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
     try {
         const id=Number(req.params.id);
-        const current=(await runSystemContext(()=>pool.query(`SELECT * FROM business_licenses WHERE id=$1`,[id]))).rows[0];
+        const businessId=Number(req.query.businessId);
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Business ID is required'});
+        const useD1=d1StagingBusinessIdAllowed(businessId);
+        let current;
+        if(useD1) {
+            const d1Current=await fetchD1StagingAuth(businessId, `support/licenses/${id}`, "auth.support.view");
+            if(d1Current.status<200||d1Current.status>=300)return res.status(d1Current.status).json(d1Current.body);
+            current=d1Current.body?.license;
+        } else {
+            current=(await runSystemContext(()=>pool.query(`SELECT * FROM business_licenses WHERE id=$1`,[id]))).rows[0];
+        }
         if(!current)return res.status(404).json({error:'License not found'});
         const status=req.body.status===undefined?current.status:String(req.body.status);
         const rawType=req.body.licenseType===undefined
@@ -12178,6 +13552,18 @@ app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
         if(!['active','suspended','revoked','expired'].includes(status))return res.status(400).json({error:'Invalid license status'});
         if(!Number.isInteger(maxDevices)||maxDevices<1)return res.status(400).json({error:'Max devices must be a positive whole number'});
         if(!Number.isFinite(new Date(startsAt).getTime())||!Number.isFinite(new Date(expiresAt).getTime())||new Date(expiresAt)<=new Date(startsAt))return res.status(400).json({error:'Expiry must be after start date'});
+        if(useD1) {
+            if(Number(current.business_id)!==businessId)return res.status(404).json({error:'License not found'});
+            const d1=await fetchD1StagingAuth(businessId, `support/licenses/${id}`, "auth.support.license.write", {
+                method:"PATCH",
+                body:{
+                    licenseType,addOn,durationMonths,status,
+                    startsAt:new Date(startsAt).toISOString(),expiresAt:new Date(expiresAt).toISOString(),
+                    maxDevices,notes:req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null)
+                }
+            });
+            return res.status(d1.status).json(d1.body);
+        }
         const r=await runSystemContext(()=>pool.query(`UPDATE business_licenses SET plan=$1,license_type=$1,add_on=$2,duration_months=$3,status=$4,starts_at=$5,expires_at=$6,max_devices=$7,notes=$8,updated_at=CURRENT_TIMESTAMP,revoked_at=CASE WHEN $4='revoked' THEN COALESCE(revoked_at,CURRENT_TIMESTAMP) ELSE NULL END WHERE id=$9 RETURNING *`,[licenseType,addOn,durationMonths,status,startsAt,expiresAt,maxDevices,req.body.notes===undefined?current.notes:(String(req.body.notes||'').trim()||null),id]));
         res.json({success:true,license:r.rows[0]});
     }catch(e){res.status(e.status||500).json({error:e.message||'Failed to update license'});}
@@ -12185,7 +13571,13 @@ app.patch('/api/support/licenses/:id', supportAuth, async(req,res)=>{
 
 app.get('/api/support/businesses/:id/devices', supportAuth, async(req,res)=>{
     try {
-        const r=await runSystemContext(()=>pool.query(`SELECT d.id,d.business_id,d.device_id,d.device_name,d.device_type,d.status,d.registered_at,d.last_seen_at,d.last_ip,d.user_agent,l.plan,l.status AS license_status,l.expires_at FROM registered_devices d LEFT JOIN business_licenses l ON l.id=d.license_id WHERE d.business_id=$1 ORDER BY d.id DESC`,[Number(req.params.id)]));
+        const businessId=Number(req.params.id);
+        if(d1StagingBusinessIdAllowed(businessId)) {
+            const d1=await fetchD1StagingAuth(businessId,"support/devices","auth.support.view");
+            if(d1.status<200||d1.status>=300)return res.status(d1.status).json(d1.body);
+            return res.json(Array.isArray(d1.body)?d1.body:[]);
+        }
+        const r=await runSystemContext(()=>pool.query(`SELECT d.id,d.business_id,d.device_id,d.device_name,d.device_type,d.status,d.registered_at,d.last_seen_at,d.last_ip,d.user_agent,l.plan,l.status AS license_status,l.expires_at FROM registered_devices d LEFT JOIN business_licenses l ON l.id=d.license_id WHERE d.business_id=$1 ORDER BY d.id DESC`,[businessId]));
         res.json(r.rows);
     }catch(e){res.status(500).json({error:'Failed to load devices'});}
 });
@@ -12193,14 +13585,23 @@ app.get('/api/support/businesses/:id/devices', supportAuth, async(req,res)=>{
 app.post('/api/support/businesses/:id/registration-keys', supportAuth, async(req,res)=>{
     try {
         const businessId=Number(req.params.id);
-        const key=await createDeviceRegistrationKey(businessId,{deviceName:String(req.body.deviceName||'POS Device').trim()||'POS Device',createdByType:'support',createdByUserId:req.supportUser.support_user_id,expiresAt:req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+24*60*60*1000)});
+        const options={deviceName:String(req.body.deviceName||'POS Device').trim()||'POS Device',createdByType:'support',createdByUserId:req.supportUser.support_user_id,expiresAt:req.body.expiresAt?new Date(req.body.expiresAt):new Date(Date.now()+24*60*60*1000)};
+        const key=d1StagingBusinessIdAllowed(businessId)
+            ? await createD1StagingDeviceRegistrationKey(businessId,options)
+            : await createDeviceRegistrationKey(businessId,options);
         res.status(201).json({success:true,registrationKey:key});
-    }catch(e){res.status(400).json({error:e.message||'Failed to generate registration key'});}
+    }catch(e){res.status(e.status||400).json({error:e.message||'Failed to generate registration key'});}
 });
 
 app.post('/api/support/devices/:id/revoke', supportAuth, async(req,res)=>{
     try {
         const id=Number(req.params.id);
+        const businessId=Number(req.query.businessId);
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Business ID is required'});
+        if(d1StagingBusinessIdAllowed(businessId)) {
+            const d1=await fetchD1StagingAuth(businessId,`support/devices/${id}/revoke`,"auth.support.device.write",{method:"POST"});
+            return res.status(d1.status).json(d1.body);
+        }
         const r=await runSystemContext(()=>pool.query(`UPDATE registered_devices SET status='revoked',revoked_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=$1 RETURNING id,business_id,device_name,status,revoked_at`,[id]));
         if(!r.rows.length)return res.status(404).json({error:'Device not found'});
         res.json({success:true,device:r.rows[0]});
@@ -12211,6 +13612,12 @@ app.delete('/api/support/devices/:id', supportAuth, async(req,res)=>{
     const id=Number(req.params.id);
     if(!Number.isInteger(id)||id<1)return res.status(400).json({error:'Invalid device ID'});
     try {
+        const businessId=Number(req.query.businessId);
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Business ID is required'});
+        if(d1StagingBusinessIdAllowed(businessId)) {
+            const d1=await fetchD1StagingAuth(businessId,`support/devices/${id}`,"auth.support.device.write",{method:"DELETE"});
+            return res.status(d1.status).json(d1.body);
+        }
         const result=await runSystemContext(()=>pool.query(`
             WITH removed AS (
                 DELETE FROM registered_devices
@@ -12239,6 +13646,12 @@ app.delete('/api/support/devices/:id', supportAuth, async(req,res)=>{
 app.post('/api/support/registration-keys/:id/revoke', supportAuth, async(req,res)=>{
     try {
         const id=Number(req.params.id);
+        const businessId=Number(req.query.businessId);
+        if(!Number.isInteger(businessId)||businessId<=0)return res.status(400).json({error:'Business ID is required'});
+        if(d1StagingBusinessIdAllowed(businessId)) {
+            const d1=await fetchD1StagingAuth(businessId,`support/registration-keys/${id}/revoke`,"auth.support.key.write",{method:"POST"});
+            return res.status(d1.status).json(d1.body);
+        }
         const r=await runSystemContext(()=>pool.query(`UPDATE device_registration_keys SET status='revoked' WHERE id=$1 AND status='unused' RETURNING id,business_id,key_hint,status`,[id]));
         if(!r.rows.length)return res.status(404).json({error:'Unused registration key not found'});
         res.json({success:true,key:r.rows[0]});

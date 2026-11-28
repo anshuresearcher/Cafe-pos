@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "slash-pos-menu-pilot",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-24",
+  "workers_dev": true,
+  "vars": {
+    "PILOT_BUSINESS_IDS": "1,18"
+  },
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "slash-pos-assets-pilot"
+    }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cafe-pos-dev",
+      "database_id": "32a41007-2eac-4bbd-8021-3679f5e9aa83"
+    }
+  ]
+}

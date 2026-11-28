@@ -66,9 +66,13 @@ async function listPrinters() {
     return Array.isArray(parsed) ? parsed : [parsed];
 }
 
-async function rawPrint(printerName, receipt) {
+async function rawPrint(printerName, receipt, options = {}) {
     const printer64 = Buffer.from(String(printerName), "utf8").toString("base64");
     const receipt64 = Buffer.from(String(receipt), "utf8").toString("base64");
+    const fontSize = Math.min(24, Math.max(8, Math.round(Number(options.fontSize) || 10)));
+    const scale = fontSize <= 12 ? 1 : fontSize <= 17 ? 2 : 3;
+    const fontScale = (scale - 1) << 4;
+    const bold = options.bold === false ? 0 : 1;
     const script = `
 $printer = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${printer64}'))
 $data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${receipt64}'))
@@ -106,8 +110,8 @@ public class CafePosRawPrinter {
 }
 '@
 $bytes = [Text.Encoding]::UTF8.GetBytes($data)
-$prefix = [byte[]](0x1B,0x40)
-$suffix = [byte[]](0x0A,0x0A,0x0A,0x1D,0x56,0x00)
+$prefix = [byte[]](0x1B,0x40,0x1D,0x21,${fontScale},0x1B,0x45,${bold})
+$suffix = [byte[]](0x1B,0x45,0x00,0x1D,0x21,0x00,0x0A,0x0A,0x0A,0x1D,0x56,0x00)
 $payload = New-Object byte[] ($prefix.Length + $bytes.Length + $suffix.Length)
 [Array]::Copy($prefix,0,$payload,0,$prefix.Length)
 [Array]::Copy($bytes,0,$payload,$prefix.Length,$bytes.Length)
@@ -117,9 +121,11 @@ $payload = New-Object byte[] ($prefix.Length + $bytes.Length + $suffix.Length)
     await runPowerShell(script);
 }
 
-async function driverPrint(printerName, receipt) {
+async function driverPrint(printerName, receipt, options = {}) {
     const printer64 = Buffer.from(String(printerName), "utf8").toString("base64");
     const receipt64 = Buffer.from(String(receipt), "utf8").toString("base64");
+    const fontSize = Math.min(24, Math.max(8, Math.round(Number(options.fontSize) || 10)));
+    const bold = options.bold === false ? "Regular" : "Bold";
     const script = `
 $printer = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${printer64}'))
 $data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${receipt64}'))
@@ -136,14 +142,18 @@ public class CafePosDriverPrinter {
         document.DocumentName = "Slash POS Print Job";
         document.DefaultPageSettings.Margins = new Margins(35, 35, 35, 35);
         document.PrintController = new StandardPrintController();
-        Font font = new Font("Consolas", 10);
+        Font font = new Font("Consolas", 10, FontStyle.${bold});
+        float verticalScale = ${fontSize / 10}f;
         string[] lines = data.Replace("\\r", "").Split('\\n');
         int index = 0;
         document.PrintPage += delegate(object sender, PrintPageEventArgs e) {
             float y = e.MarginBounds.Top;
-            float lineHeight = font.GetHeight(e.Graphics);
+                float lineHeight = font.GetHeight(e.Graphics) * verticalScale;
             while (index < lines.Length && y + lineHeight <= e.MarginBounds.Bottom) {
-                e.Graphics.DrawString(lines[index++], font, Brushes.Black, e.MarginBounds.Left, y);
+                    System.Drawing.Drawing2D.GraphicsState state = e.Graphics.Save();
+                    e.Graphics.Transform = new System.Drawing.Drawing2D.Matrix(1, 0, 0, verticalScale, e.MarginBounds.Left, y);
+                    e.Graphics.DrawString(lines[index++], font, Brushes.Black, 0, 0);
+                    e.Graphics.Restore(state);
                 y += lineHeight;
             }
             e.HasMorePages = index < lines.Length;
@@ -223,9 +233,13 @@ function start() {
                     ? `SLASH POS\nPRINTER TEST\n${printer.name}\n${new Date().toLocaleString()}\n\n\n`
                     : String(body.receipt || "");
                 if (!receipt) return sendJson(req, res, 400, { error: "receipt is required." }, origin);
-                if (usesWindowsDriver(printer)) await driverPrint(printer.name, receipt);
-                else await rawPrint(printer.name, receipt);
-                return sendJson(req, res, 200, { ok: true, printer: printer.name }, origin);
+                const options = { fontSize: body.fontSize, bold: body.bold };
+                const copies = Math.min(20, Math.max(1, Math.floor(Number(body.copies) || 1)));
+                for (let copy = 0; copy < copies; copy++) {
+                    if (usesWindowsDriver(printer)) await driverPrint(printer.name, receipt, options);
+                    else await rawPrint(printer.name, receipt, options);
+                }
+                return sendJson(req, res, 200, { ok: true, printer: printer.name, copies }, origin);
             }
             return sendJson(req, res, 404, { error: "Not found." }, origin);
         } catch (error) {

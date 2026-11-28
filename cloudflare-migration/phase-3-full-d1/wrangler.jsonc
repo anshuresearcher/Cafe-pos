@@ -1,0 +1,45 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "slash-pos-full-d1-staging",
+  "main": "src/index.js",
+  "compatibility_date": "2026-11-24",
+  "workers_dev": true,
+  "vars": {
+    "STAGING_BUSINESS_IDS": "1,18",
+    "D1_STAGING_ORDER_WRITES_ENABLED": "true",
+    "D1_STAGING_PUBLIC_QR_ORDER_WRITES_ENABLED": "true",
+    "D1_STAGING_PAYMENT_WRITES_ENABLED": "true",
+    "D1_PUBLIC_REGISTRATION_ENABLED": "true"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "cafe-pos-full-dev",
+      "database_id": "75b31229-5ad6-46fc-a382-805cb34e1e62"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "IMAGES",
+      "bucket_name": "slash-pos-assets-pilot"
+    },
+    {
+      "binding": "LOGOS",
+      "bucket_name": "cafe-logos"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ORDER_COORDINATOR",
+        "class_name": "OrderCoordinator"
+      }
+    ]
+  },
+  "exports": {
+    "OrderCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  }
+}

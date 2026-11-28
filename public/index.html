@@ -718,6 +718,7 @@
                 <aside id="ordersDetailPane" class="orders-detail-panel" aria-label="Selected order details">
                     <div class="orders-detail-heading"><div><span class="eyebrow">ORDER DETAILS</span><h3 id="orderDetailsPanelTitle">Select an order</h3><p id="orderDetailsPanelHint">Choose an order from the list to see its items and bill.</p></div><button type="button" class="orders-detail-close" onclick="closeOrderDetails()" aria-label="Clear selected order">×</button></div>
                     <div id="orderDetailsToolbar" class="orders-detail-toolbar" hidden>
+                        <button id="orderDetailsEditButton" type="button" class="orders-detail-tool orders-detail-edit-tool" hidden aria-label="Edit order" title="Edit order"><span class="orders-detail-tool-icon" aria-hidden="true">✎</span><small>Edit Order</small></button>
                         <button type="button" class="orders-detail-tool" onclick="openOrderKOTView()" aria-label="KOT view" title="KOT view"><span class="orders-detail-tool-icon orders-kot-grid-icon" aria-hidden="true"><i></i><i></i><i></i><i></i></span><small>KOT View</small></button>
                         <button type="button" class="orders-detail-tool active" onclick="focusOrderInfo()" aria-label="Order info" title="Order info"><span class="orders-detail-tool-icon" aria-hidden="true">ⓘ</span><small>Order Info</small></button>
                         <div class="orders-detail-more-wrap">
@@ -1075,7 +1076,7 @@
         <section id="table-qr-menu" class="page">
           <div class="table-qr-module-header"><div><span class="menu-eyebrow">GUEST QR MENU</span><h2>Table QR Menu</h2><p>Manage guest publishing, table QR codes, and sold-out status.</p></div></div>
           <section class="restaurant-menu-publisher">
-            <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for your POS tables. Guests verify their WhatsApp number before starting a table session.</p></div></div>
+            <div class="restaurant-menu-publisher-head"><div><span class="menu-eyebrow">MENU PUBLISHING</span><h3>Guest menu controls</h3><p>QR links are generated for your POS tables. Guests enter their contact details to start a table session; no OTP is required.</p></div></div>
             <div class="restaurant-menu-publisher-controls">
               <label class="restaurant-menu-publish-toggle"><input id="publicMenuEnabled" type="checkbox"> Publish QR menu</label>
               <label for="publicMenuPriceChannel">Guest price list</label>
@@ -1542,7 +1543,7 @@
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('weekday-sales')"><span class="module-card-icon">📆</span><span class="module-card-copy"><strong>Sales by Weekday</strong><span>Find the busiest and highest earning days.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('daypart-sales')"><span class="module-card-icon">☕</span><span class="module-card-copy"><strong>Sales by Daypart</strong><span>Compare breakfast, lunch, afternoon, evening and late night.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('top-customers')"><span class="module-card-icon">👥</span><span class="module-card-copy"><strong>Top Customers</strong><span>See your highest value customers for this period.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
-    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled Orders</strong><span>Review the reason, staff name, cancellation time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
+    <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('cancelled-orders')"><span class="module-card-icon">↩️</span><span class="module-card-copy"><strong>Cancelled &amp; Voided Orders</strong><span>Review the action, reason, staff name, time and order value.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('discount-orders')"><span class="module-card-icon">％</span><span class="module-card-copy"><strong>Discounted Orders</strong><span>Review completed orders that used a discount.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
     <button type="button" class="module-navigation-card" onclick="showAdvancedReportsView('non-chargeable-orders')"><span class="module-card-icon">🧾</span><span class="module-card-copy"><strong>Non-chargeable Orders</strong><span>Review completed orders with no payment collected.</span></span><span class="module-card-arrow" aria-hidden="true">›</span></button>
   </div>
@@ -1553,7 +1554,7 @@
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="weekday-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Weekday</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('weekday-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Weekday</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedWeekdayBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="daypart-sales" hidden><div class="advanced-report-table-heading"><h3>Sales by Daypart</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('daypart-sales')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Daypart</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedDaypartBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="top-customers" hidden><div class="advanced-report-table-heading"><h3>Top Customers</h3><button type="button" class="big-btn" data-export-module="advanced_reports" onclick="downloadAdvancedReport('top-customers')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Customer</th><th>Orders</th><th>Sales</th></tr></thead><tbody id="advancedCustomersBody"></tbody></table></div></div>
-    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Cancelled At</th><th>Reason</th><th>Cancelled By</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
+    <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="cancelled-orders" hidden><div class="advanced-report-table-heading"><h3>Cancelled &amp; Voided Orders</h3><button type="button" class="big-btn" id="downloadCancelledReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('cancelled')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Action</th><th>Date</th><th>Reason</th><th>Action By</th><th>Order Value</th></tr></thead><tbody id="advancedCancelledBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="discount-orders" hidden><div class="advanced-report-table-heading"><h3>Discounted Orders</h3><button type="button" class="big-btn" id="downloadDiscountReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('discounts')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Discount</th><th>Discount Rule</th><th>Total</th><th>Payment</th></tr></thead><tbody id="advancedDiscountBody"></tbody></table></div></div>
     <div class="dashboard-box advanced-report-panel" data-advanced-report-panel="non-chargeable-orders" hidden><div class="advanced-report-table-heading"><h3>Non-chargeable Orders</h3><button type="button" class="big-btn" id="downloadNonChargeableReport" data-export-module="advanced_reports" onclick="downloadAdvancedReport('non-chargeable')" hidden>Download CSV</button></div><div class="table-container"><table><thead><tr><th>Order</th><th>Date</th><th>Type</th><th>Reason</th><th>Order Value</th><th>Payment</th></tr></thead><tbody id="advancedNonChargeableBody"></tbody></table></div></div>
   </div>
@@ -2411,7 +2412,7 @@
 
 <div class="dashboard-box sales-audit-box">
     <div class="sales-audit-header">
-        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review completed sales, payment and balance details, plus kitchen prep time by item and station.</p></div>
+        <div><h3>🧾 Sale transaction audit</h3><p class="access-muted">Review completed and voided transactions, payment and balance details, plus kitchen prep time by item and station.</p></div>
         <div class="sales-audit-actions"><button type="button" class="cancel-btn" onclick="loadSalesAuditReport()">Load transactions</button><button type="button" class="big-btn" data-export-module="reports" hidden onclick="downloadSalesAuditCSV()">↓ Download CSV</button></div>
     </div>
     <div id="salesAuditStatus" class="access-muted" role="status">Choose a date range above, then load the transaction audit.</div>
@@ -3123,6 +3124,11 @@
             </div>
         </div>
 
+        <div id="billCancellationWatermark" class="bill-cancellation-watermark" role="note" hidden>
+            <strong>Cancelled</strong>
+            <span id="billCancellationReasonWatermark" hidden></span>
+        </div>
+
         <div class="bill-header">
             <img id="billRestaurantLogo" class="bill-restaurant-logo" alt="Business logo" hidden>
             <h2 id="billRestaurantName">SLASH POS</h2>
@@ -3336,8 +3342,8 @@ Visit Again 😊</p>
     <div class="modal-content cancel-order-dialog">
         <div class="modal-heading"><div><span class="module-eyebrow">ORDER CANCELLATION</span><h2 id="cancelOrderDialogTitle">Cancel order</h2></div><button type="button" class="close-btn" onclick="closeCancelOrderDialog()" aria-label="Close cancellation dialog">✕</button></div>
         <p id="cancelOrderDialogDescription" class="cancel-order-description">Choose a reason to cancel this order.</p>
-        <p id="cancelOrderPaymentNotice" class="cancel-order-payment-notice" hidden>This order is already closed. Cancelling records the order as cancelled; handle any payment refund separately.</p>
-        <div class="form-group"><label for="cancelOrderReason">Cancellation reason</label><select id="cancelOrderReason"></select></div>
+        <p id="cancelOrderPaymentNotice" class="cancel-order-payment-notice" hidden>This order is already closed. Voiding records the bill as void; handle any payment refund separately.</p>
+        <div class="form-group"><label id="cancelOrderReasonLabel" for="cancelOrderReason">Reason</label><select id="cancelOrderReason"></select></div>
         <p id="cancelOrderDialogError" class="cancel-order-error" role="alert" hidden></p>
         <div class="modal-actions"><button type="button" class="table-action-btn" onclick="closeCancelOrderDialog()">Keep order</button><button type="button" class="cancel-btn" id="confirmCancelOrderButton" onclick="submitCancelOrder()">Cancel order</button></div>
     </div>
