@@ -13108,7 +13108,10 @@ app.post('/api/support/login', async (req,res)=>{
         if(!businessId)return res.status(503).json({error:'D1 staging support authentication is not configured'});
         const identityKey=loginIdentityKey('support',0,username);
         const lockout=await fetchD1StagingAuth(businessId,'system-support/login-lockout','auth.support.login',{query:{identity_key:identityKey}});
-        if(lockout.status<200||lockout.status>=300)return res.status(503).json({error:'Could not check Support sign-in status in D1'});
+        if(lockout.status<200||lockout.status>=300){
+            console.warn('D1 support login lockout check failed',{status:Number(lockout.status)||0,error:String(lockout.body?.error||'').slice(0,200)||null});
+            return res.status(503).json({error:'Could not check Support sign-in status in D1'});
+        }
         const existingLockout=Number(lockout.body?.lockedUntil)||0;
         if(existingLockout){res.setHeader('Retry-After',String(Math.max(1,Math.ceil((existingLockout-Date.now())/1000))));return res.status(429).json({error:'Too many failed sign-in attempts. Try again later.'});}
         const lookup=await fetchD1StagingAuth(businessId,'system-support/login-user','auth.support.login',{method:'POST',body:{username}});
